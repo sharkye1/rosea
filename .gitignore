@@ -1,0 +1,19 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# файлы для локального тестирования
+tests/data/
+
+scripts/
+
+docs/SPEC.md
+docs/README.org
