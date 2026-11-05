@@ -5,6 +5,9 @@ pub enum RoseaError {
     InvalidEncoding,
     InvalidHeader,
     UnsupportedVersion(u32),
+    InvalidMode,
+    UnsupportedMode(u32),
+    DuplicateField,
 }
 
 impl fmt::Display for RoseaError {
@@ -15,6 +18,11 @@ impl fmt::Display for RoseaError {
             Self::UnsupportedVersion(version) => {
                 write!(f, "Версия v{version} не поддерживается, нужна v14")
             }
+            Self::InvalidMode => write!(f, "В поле Mode должно быть целое неотрицательное число"),
+            Self::UnsupportedMode(mode) => {
+                write!(f, "Режим {mode} не поддерживается, нужен Mode: 0")
+            }
+            Self::DuplicateField => write!(f, "Поле Mode указано повторно"),
         }
     }
 }
