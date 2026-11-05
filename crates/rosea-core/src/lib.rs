@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+pub mod error;
+pub mod parse;
+
 pub const PROFILE_ID: &str = "rosea-mvp-v1";
 
 #[cfg(test)]
