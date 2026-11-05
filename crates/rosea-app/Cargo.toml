@@ -1,0 +1,17 @@
+[package]
+name = "rosea-app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+
+[[bin]]
+name = "rosea"
+path = "src/main.rs"
+
+[dependencies]
+rosea-core = { path = "../rosea-core" }
+minifb = { version = "=0.29.0", optional = true, default-features = false }
+
+[features]
+default = ["window"]
+window = ["dep:minifb"]

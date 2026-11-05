@@ -1,0 +1,8 @@
+[package]
+name = "rosea-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+
+[dependencies]
+lzma-rs = { version = "=0.3.0", default-features = false }
