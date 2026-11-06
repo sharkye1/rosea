@@ -1,4 +1,4 @@
-//! Чтение обычных точек темпа; применение BPM и скорости относится к подготовке карты.
+//! Чтение обычных и inherited-точек; применение BPM и скорости относится к подготовке карты.
 
 use crate::error::RoseaError;
 use crate::model::TimingPoint;
@@ -8,7 +8,7 @@ use super::osu_mode;
 const MAX_TIMING_POINTS: usize = 100_000;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
-/// Читает обычные timing points; inherited-точки возвращают ошибку.
+/// Читает обычные и inherited timing points с сохранением исходных значений полей.
 /// Пустая секция допустима. Результат упорядочен по времени и исходной строке.
 pub fn osu_timing_points(bytes: &[u8]) -> Result<Vec<TimingPoint>, RoseaError> {
     osu_mode(bytes)?;
@@ -81,20 +81,24 @@ fn parse_timing_point(line: &str, line_number: usize) -> Result<TimingPoint, Ros
         return Err(invalid("time"));
     }
     // 1 задаёт обычную точку темпа, 0 — inherited-точку изменения скорости.
-    // Пока возвращаем ошибку на 0, чтобы не отдавать неполный список точек.
     let uninherited: u8 = values[6].parse().map_err(|_| invalid("uninherited"))?;
-    match uninherited {
-        0 => return Err(RoseaError::UnsupportedTimingPoint { line: line_number }),
-        1 => {}
+    let uninherited = match uninherited {
+        0 => false,
+        1 => true,
         _ => return Err(invalid("uninherited")),
-    }
-    // Здесь beatLength хранит длительность одного бита в миллисекундах.
+    };
+    // У обычной точки beatLength положителен; у inherited — отрицателен.
+    // Обратный множитель сохраняем как записан; перевод в скорость оставляем для prepare.
     let beat_length: f64 = values[1].parse().map_err(|_| invalid("beatLength"))?;
-    if !beat_length.is_finite() || beat_length <= 0.0 {
+    if !beat_length.is_finite()
+        || (uninherited && beat_length <= 0.0)
+        || (!uninherited && beat_length >= 0.0)
+    {
         return Err(invalid("beatLength"));
     }
     let meter: u32 = values[2].parse().map_err(|_| invalid("meter"))?;
-    if meter == 0 {
+    // Размер такта применяется только к обычным точкам; у inherited допускаем 0.
+    if uninherited && meter == 0 {
         return Err(invalid("meter"));
     }
     let sample_set: u8 = values[3].parse().map_err(|_| invalid("sampleSet"))?;
@@ -118,6 +122,7 @@ fn parse_timing_point(line: &str, line_number: usize) -> Result<TimingPoint, Ros
         sample_set,
         sample_index,
         volume,
+        uninherited,
         effects,
     })
 }

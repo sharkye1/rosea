@@ -22,7 +22,9 @@ pub struct Circle {
     pub hit_sound: u8,
 }
 
-/// Обычная timing point (uninherited = 1); beat_length задана в мс на бит.
+/// Исходная timing point. Смысл beat_length зависит от флага uninherited:
+/// true — положительная длительность бита в мс;
+/// false — отрицательный обратный множитель скорости в процентах.
 #[derive(Debug, PartialEq)]
 pub struct TimingPoint {
     pub line: usize,
@@ -32,5 +34,6 @@ pub struct TimingPoint {
     pub sample_set: u8,
     pub sample_index: u32,
     pub volume: u8,
+    pub uninherited: bool,
     pub effects: u32,
 }

@@ -33,9 +33,6 @@ pub enum RoseaError {
         field: &'static str,
         line: usize,
     },
-    UnsupportedTimingPoint {
-        line: usize,
-    },
     ResourceLimit {
         resource: &'static str,
         limit: u64,
@@ -93,12 +90,6 @@ impl fmt::Display for RoseaError {
             }
             Self::InvalidTimingPointField { field, line } => {
                 write!(f, "Строка {line}: некорректное поле timing point {field}")
-            }
-            Self::UnsupportedTimingPoint { line } => {
-                write!(
-                    f,
-                    "Строка {line}: inherited timing point пока не поддерживается"
-                )
             }
             Self::ResourceLimit {
                 resource,

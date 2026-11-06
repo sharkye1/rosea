@@ -1,4 +1,4 @@
-//! Проверяем поля точек темпа, порядок равновременных записей и диагностику ошибок.
+//! Проверяем точки темпа и скорости, порядок равновременных записей и диагностику ошибок.
 
 use rosea_core::error::RoseaError;
 use rosea_core::model::TimingPoint;
@@ -25,6 +25,7 @@ fn reads_all_fields_and_keeps_source_order_at_equal_times() {
                 sample_set: 0,
                 sample_index: 0,
                 volume: 0,
+                uninherited: true,
                 effects: 0
             },
             TimingPoint {
@@ -35,6 +36,7 @@ fn reads_all_fields_and_keeps_source_order_at_equal_times() {
                 sample_set: 2,
                 sample_index: 7,
                 volume: 80,
+                uninherited: true,
                 effects: 9
             },
             TimingPoint {
@@ -45,6 +47,7 @@ fn reads_all_fields_and_keeps_source_order_at_equal_times() {
                 sample_set: 3,
                 sample_index: 1,
                 volume: 100,
+                uninherited: true,
                 effects: 1
             },
         ])
@@ -65,7 +68,7 @@ fn accepts_empty_or_missing_timing_section() {
 
 #[test]
 fn canonicalizes_zero_and_preserves_all_effect_bits() {
-    let text = map("-0,500,1,1,4294967295,0,1,4294967295\n0,500,4,1,0,100,1,8");
+    let text = map("-0,500,1,1,4294967295,0,1,4294967295\n0,-50,4,1,0,100,0,8");
     let points = osu_timing_points(text.as_bytes()).unwrap();
     assert_eq!(points[0].line, 3);
     assert_eq!(points[1].line, 4);
@@ -75,6 +78,8 @@ fn canonicalizes_zero_and_preserves_all_effect_bits() {
     assert_eq!(points[0].sample_set, 1);
     assert_eq!(points[0].sample_index, u32::MAX);
     assert_eq!(points[0].effects, u32::MAX);
+    assert!(points[0].uninherited);
+    assert!(!points[1].uninherited);
     assert_eq!(points[1].effects, 8);
 }
 
@@ -141,12 +146,86 @@ fn requires_exactly_eight_fields() {
 }
 
 #[test]
-fn rejects_inherited_points_instead_of_skipping_them() {
-    let text = map("0,500,4,1,0,100,1,0\n1000,-50,4,1,0,80,0,1");
+fn reads_mixed_points_in_time_and_source_order() {
+    // Три точки в одно время сохраняют порядок строк независимо от типа.
+    let text = map("1500,-25,0,3,2,80,0,9\n\
+         1000,500,4,1,0,100,1,0\n\
+         1000,-50,4,2,3,75,0,1\n\
+         1000,600,3,0,0,100,1,8");
+    let points = osu_timing_points(text.as_bytes()).unwrap();
+    let order: Vec<_> = points
+        .iter()
+        .map(|p| (p.line, p.time, p.uninherited, p.beat_length))
+        .collect();
     assert_eq!(
-        osu_timing_points(text.as_bytes()),
-        Err(RoseaError::UnsupportedTimingPoint { line: 4 })
+        order,
+        vec![
+            (4, 1000.0, true, 500.0),
+            (5, 1000.0, false, -50.0),
+            (6, 1000.0, true, 600.0),
+            (3, 1500.0, false, -25.0)
+        ]
     );
+    assert_eq!(
+        points[3],
+        TimingPoint {
+            line: 3,
+            time: 1500.0,
+            beat_length: -25.0,
+            meter: 0,
+            sample_set: 3,
+            sample_index: 2,
+            volume: 80,
+            uninherited: false,
+            effects: 9
+        }
+    );
+}
+
+#[test]
+fn preserves_raw_inherited_beat_length_without_calculating_velocity() {
+    // Даже крайние отрицательные значения здесь только сохраняются как f64.
+    for (value, expected) in [
+        ("-0.5", -0.5),
+        ("-5000", -5000.0),
+        ("-1e-300", -1e-300),
+        ("-1e300", -1e300),
+    ] {
+        let text = map(&format!("-10.25,{value},0,0,0,0,0,0"));
+        let points = osu_timing_points(text.as_bytes()).unwrap();
+        assert_eq!(points.len(), 1);
+        assert!(!points[0].uninherited);
+        assert_eq!(points[0].time, -10.25);
+        assert_eq!(points[0].beat_length, expected);
+    }
+}
+
+#[test]
+fn rejects_invalid_inherited_fields() {
+    for (index, field, values) in [
+        (0, "time", vec!["", "abc", "NaN", "inf", "-inf", "1e999"]),
+        (
+            1,
+            "beatLength",
+            vec!["", "abc", "NaN", "inf", "-inf", "-1e999", "0", "-0", "500"],
+        ),
+        (2, "meter", vec!["", "abc", "-1", "1.5", "4294967296"]),
+        (3, "sampleSet", vec!["", "abc", "-1", "1.5", "4", "256"]),
+        (4, "sampleIndex", vec!["", "abc", "-1", "1.5", "4294967296"]),
+        (5, "volume", vec!["", "abc", "-1", "1.5", "101", "256"]),
+        (7, "effects", vec!["", "abc", "-1", "1.5", "4294967296"]),
+    ] {
+        for value in values {
+            let mut fields = ["1000", "-50", "0", "1", "0", "100", "0", "0"];
+            fields[index] = value;
+            let text = map(&format!("0,500,4,1,0,100,1,0\n{}", fields.join(",")));
+            assert_eq!(
+                osu_timing_points(text.as_bytes()),
+                Err(RoseaError::InvalidTimingPointField { field, line: 4 }),
+                "{field}: {value}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -169,7 +248,8 @@ fn checks_header_and_standard_mode() {
 
 #[test]
 fn enforces_timing_point_and_line_limits() {
-    let mut text = map(&"0,500,4,1,0,100,1,0\n".repeat(100_000));
+    // Лимит общий для обычных и inherited-точек.
+    let mut text = map(&"0,500,4,1,0,100,1,0\n0,-50,0,1,0,100,0,0\n".repeat(50_000));
     assert_eq!(osu_timing_points(text.as_bytes()).unwrap().len(), 100_000);
     text.push_str("0,500,4,1,0,100,1,0");
     assert_eq!(
