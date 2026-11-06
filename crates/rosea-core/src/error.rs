@@ -60,10 +60,12 @@ impl fmt::Display for RoseaError {
                 )
             }
             Self::InvalidDifficultyField { field, line } => {
-                write!(
-                    f,
-                    "Строка {line}: поле {field} должно быть конечным числом от 0 до 10"
-                )
+                let range = if matches!(*field, "SliderMultiplier" | "SliderTickRate") {
+                    "конечным числом строго больше 0"
+                } else {
+                    "конечным числом от 0 до 10"
+                };
+                write!(f, "Строка {line}: поле {field} должно быть {range}")
             }
             Self::EmptyBeatmap => write!(f, "В карте нет объектов HitObjects"),
             Self::InvalidHitObjectField {
@@ -84,7 +86,7 @@ impl fmt::Display for RoseaError {
             } => {
                 write!(
                     f,
-                    "Строка {line}, объект {}: тип {flags} не поддерживается, пока доступны только круги",
+                    "Строка {line}, объект {}: тип объекта или кривая не поддерживается (type={flags})",
                     object_id.0
                 )
             }

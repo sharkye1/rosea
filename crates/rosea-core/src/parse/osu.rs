@@ -1,6 +1,7 @@
 //! Заголовок .osu и поддерживаемые поля секций General и Difficulty.
 
 use crate::error::RoseaError;
+use crate::model::ObjectId;
 
 #[derive(Debug, PartialEq)]
 pub struct Difficulty {
@@ -8,6 +9,9 @@ pub struct Difficulty {
     pub od: f64,
     pub hp: f64,
     pub ar: f64,
+    // Без слайдеров отсутствие этих полей допустимо, поэтому сохраняем Option.
+    pub slider_multiplier: Option<f64>,
+    pub slider_tick_rate: Option<f64>,
 }
 
 pub fn osu_header(bytes: &[u8]) -> Result<u32, RoseaError> {
@@ -78,15 +82,21 @@ pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
     Ok(mode.unwrap_or(0))
 }
 
-/// Читает CS, OD, HP и AR; при отсутствии AR использует OD.
+/// Читает сложность; при отсутствии AR использует OD.
+/// SliderMultiplier и SliderTickRate обязательны, если в HitObjects есть слайдер.
 pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
     osu_header(bytes)?;
     let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
     let mut in_difficulty = false;
+    let mut in_objects = false;
+    let mut object_index = 0_u32;
+    let mut has_sliders = false;
     let mut cs = None;
     let mut od = None;
     let mut hp = None;
     let mut ar = None;
+    let mut slider_multiplier = None;
+    let mut slider_tick_rate = None;
 
     for (index, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -95,6 +105,32 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
         }
         if line.starts_with('[') {
             in_difficulty = line == "[Difficulty]";
+            in_objects = line == "[HitObjects]";
+            continue;
+        }
+        if in_objects {
+            if object_index == 100_000 {
+                return Err(RoseaError::ResourceLimit {
+                    resource: "hit_objects",
+                    limit: 100_000,
+                    observed: u64::from(object_index) + 1,
+                });
+            }
+            // Для обязательности параметров читаем только флаг типа.
+            // Геометрия и остальные поля остаются задачей парсера объектов.
+            let flags: u8 = line
+                .split(',')
+                .nth(3)
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .map_err(|_| RoseaError::InvalidHitObjectField {
+                    field: "type",
+                    line: index + 1,
+                    object_id: ObjectId(object_index),
+                })?;
+            has_sliders |= flags & 2 != 0;
+            object_index += 1;
             continue;
         }
         if !in_difficulty {
@@ -108,6 +144,8 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
             "OverallDifficulty" => ("OverallDifficulty", &mut od),
             "HPDrainRate" => ("HPDrainRate", &mut hp),
             "ApproachRate" => ("ApproachRate", &mut ar),
+            "SliderMultiplier" => ("SliderMultiplier", &mut slider_multiplier),
+            "SliderTickRate" => ("SliderTickRate", &mut slider_tick_rate),
             _ => continue,
         };
         if slot.is_some() {
@@ -118,7 +156,14 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
             line: index + 1,
         };
         let value: f64 = value.trim().parse().map_err(|_| invalid())?;
-        if !value.is_finite() || !(0.0..=10.0).contains(&value) {
+        // Параметры слайдеров имеют собственный диапазон: любое конечное число > 0.
+        let is_slider_setting = matches!(field, "SliderMultiplier" | "SliderTickRate");
+        let in_range = if is_slider_setting {
+            value > 0.0
+        } else {
+            (0.0..=10.0).contains(&value)
+        };
+        if !value.is_finite() || !in_range {
             return Err(invalid());
         }
         *slot = Some(value);
@@ -129,10 +174,17 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
     let cs = cs.ok_or(RoseaError::MissingDifficultyField("CircleSize"))?;
     let od = od.ok_or(RoseaError::MissingDifficultyField("OverallDifficulty"))?;
     let hp = hp.ok_or(RoseaError::MissingDifficultyField("HPDrainRate"))?;
+    // Проверяем после всего файла: HitObjects может идти до или после Difficulty.
+    if has_sliders {
+        slider_multiplier.ok_or(RoseaError::MissingDifficultyField("SliderMultiplier"))?;
+        slider_tick_rate.ok_or(RoseaError::MissingDifficultyField("SliderTickRate"))?;
+    }
     Ok(Difficulty {
         cs,
         od,
         hp,
         ar: ar.unwrap_or(od),
+        slider_multiplier,
+        slider_tick_rate,
     })
 }
