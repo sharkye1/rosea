@@ -1,7 +1,10 @@
+//! Ошибки разбора и лимитов. Вариант ошибки отделён от текста для пользователя.
+
 use std::fmt;
 
 use crate::model::ObjectId;
 
+// Вызывающий код может различать причины через match, без разбора сообщений Display.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RoseaError {
     InvalidEncoding,
@@ -25,6 +28,13 @@ pub enum RoseaError {
         line: usize,
         object_id: ObjectId,
         flags: u8,
+    },
+    InvalidTimingPointField {
+        field: &'static str,
+        line: usize,
+    },
+    UnsupportedTimingPoint {
+        line: usize,
     },
     ResourceLimit {
         resource: &'static str,
@@ -79,6 +89,15 @@ impl fmt::Display for RoseaError {
                     f,
                     "Строка {line}, объект {}: тип {flags} не поддерживается, пока доступны только круги",
                     object_id.0
+                )
+            }
+            Self::InvalidTimingPointField { field, line } => {
+                write!(f, "Строка {line}: некорректное поле timing point {field}")
+            }
+            Self::UnsupportedTimingPoint { line } => {
+                write!(
+                    f,
+                    "Строка {line}: inherited timing point пока не поддерживается"
                 )
             }
             Self::ResourceLimit {

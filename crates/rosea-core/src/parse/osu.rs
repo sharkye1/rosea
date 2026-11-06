@@ -1,3 +1,5 @@
+//! Заголовок .osu и поддерживаемые поля секций General и Difficulty.
+
 use crate::error::RoseaError;
 
 #[derive(Debug, PartialEq)]
@@ -10,6 +12,7 @@ pub struct Difficulty {
 
 pub fn osu_header(bytes: &[u8]) -> Result<u32, RoseaError> {
     let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    // BOM допустим только в начале. Убираем его из текстового представления.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
 
     for line in text.lines() {
@@ -18,6 +21,7 @@ pub fn osu_header(bytes: &[u8]) -> Result<u32, RoseaError> {
             continue;
         }
 
+        // Комментарии до заголовка не допускаются: первая непустая строка задаёт версию.
         let version = line
             .strip_prefix("osu file format v")
             .ok_or(RoseaError::InvalidHeader)?;
@@ -35,6 +39,7 @@ pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
     osu_header(bytes)?;
     let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
     let mut in_general = false;
+    // Не сбрасываем при повторной секции General: второй Mode остаётся дубликатом.
     let mut mode = None;
 
     for line in text.lines() {
@@ -69,6 +74,7 @@ pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
         mode = Some(value);
     }
 
+    // Отсутствующий Mode означает Standard по правилам формата.
     Ok(mode.unwrap_or(0))
 }
 
@@ -95,6 +101,7 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
             continue;
         }
 
+        // У поддерживаемого ключа без двоеточия пустое значение вызовет ошибку числа.
         let (key, value) = line.split_once(':').unwrap_or((line, ""));
         let (field, slot) = match key.trim() {
             "CircleSize" => ("CircleSize", &mut cs),
@@ -117,6 +124,8 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
         *slot = Some(value);
     }
 
+    // Проверяем наличие после всей секции: порядок полей в файле произвольный.
+    // Подстановка AR выполняется, когда итоговый OD уже известен.
     let cs = cs.ok_or(RoseaError::MissingDifficultyField("CircleSize"))?;
     let od = od.ok_or(RoseaError::MissingDifficultyField("OverallDifficulty"))?;
     let hp = hp.ok_or(RoseaError::MissingDifficultyField("HPDrainRate"))?;

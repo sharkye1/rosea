@@ -1,3 +1,5 @@
+//! Чтение кругов из HitObjects с сохранением исходных ID и номеров строк.
+
 use crate::error::RoseaError;
 use crate::model::{Circle, ObjectId, Point};
 
@@ -39,6 +41,7 @@ pub fn osu_circles(bytes: &[u8]) -> Result<Vec<Circle>, RoseaError> {
                 observed: circles.len() as u64 + 1,
             });
         }
+        // Назначаем ID до сортировки; комментарии и пустые строки не считаются объектами.
         let id = ObjectId(circles.len() as u32);
         circles.push(parse_circle(line, index + 1, id)?);
     }
@@ -46,6 +49,7 @@ pub fn osu_circles(bytes: &[u8]) -> Result<Vec<Circle>, RoseaError> {
     if circles.is_empty() {
         return Err(RoseaError::EmptyBeatmap);
     }
+    // При равном времени исходный ID сохраняет порядок объектов в карте.
     circles.sort_by(|a, b| {
         a.start_time
             .total_cmp(&b.start_time)
@@ -82,6 +86,8 @@ fn parse_circle(line: &str, line_number: usize, id: ObjectId) -> Result<Circle, 
         .unwrap_or("")
         .parse()
         .map_err(|_| invalid("type"))?;
+    // Выделяем базовые типы: круг, слайдер, спиннер и hold.
+    // Флаги new-combo и цвета в маску не входят и не мешают распознать круг.
     if flags & (1 | 2 | 8 | 128) != 1 {
         return Err(RoseaError::UnsupportedHitObject {
             line: line_number,
@@ -103,6 +109,7 @@ fn parse_circle(line: &str, line_number: usize, id: ObjectId) -> Result<Circle, 
             return Err(invalid(field));
         }
     }
+    // Проверяем форму hitSample; указанный в хвосте файл не открываем.
     if let Some(sample) = fields.next().filter(|sample| !sample.is_empty()) {
         let mut sample_fields = sample.splitn(5, ':');
         for _ in 0..4 {
@@ -116,6 +123,7 @@ fn parse_circle(line: &str, line_number: usize, id: ObjectId) -> Result<Circle, 
             return Err(invalid("hitSample"));
         }
     }
+    // Оба написания нуля должны считаться одним временем при total_cmp.
     Ok(Circle {
         id,
         line: line_number,

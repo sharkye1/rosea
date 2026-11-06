@@ -1,3 +1,5 @@
+//! Проверяем чтение кругов, исходные ID после сортировки и отказы на неверных строках.
+
 use rosea_core::error::RoseaError;
 use rosea_core::model::{Circle, ObjectId, Point};
 use rosea_core::parse::osu_circles;
@@ -159,6 +161,7 @@ fn checks_header_and_standard_mode() {
 
 #[test]
 fn enforces_object_and_line_limits() {
+    // Сам предел допустим; ошибка должна появиться на следующем объекте или байте.
     let mut text = map(&"0,0,0,1,0\n".repeat(100_000));
     assert_eq!(osu_circles(text.as_bytes()).unwrap().len(), 100_000);
     text.push_str("0,0,0,1,0");

@@ -1,3 +1,5 @@
+//! Проверяем заголовок и поля секций на маленьких картах, заданных прямо в тестах.
+
 use rosea_core::error::RoseaError;
 use rosea_core::parse::{Difficulty, osu_difficulty, osu_header, osu_mode};
 
