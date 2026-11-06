@@ -8,6 +8,8 @@ pub enum RoseaError {
     InvalidMode,
     UnsupportedMode(u32),
     DuplicateField,
+    MissingDifficultyField(&'static str),
+    InvalidDifficultyField { field: &'static str, line: usize },
 }
 
 impl fmt::Display for RoseaError {
@@ -22,7 +24,19 @@ impl fmt::Display for RoseaError {
             Self::UnsupportedMode(mode) => {
                 write!(f, "Режим {mode} не поддерживается, нужен Mode: 0")
             }
-            Self::DuplicateField => write!(f, "Поле Mode указано повторно"),
+            Self::DuplicateField => write!(f, "Поддерживаемое поле указано повторно"),
+            Self::MissingDifficultyField(field) => {
+                write!(
+                    f,
+                    "В секции Difficulty отсутствует обязательное поле {field}"
+                )
+            }
+            Self::InvalidDifficultyField { field, line } => {
+                write!(
+                    f,
+                    "Строка {line}: поле {field} должно быть конечным числом от 0 до 10"
+                )
+            }
         }
     }
 }

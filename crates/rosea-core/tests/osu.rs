@@ -1,5 +1,5 @@
 use rosea_core::error::RoseaError;
-use rosea_core::parse::{osu_header, osu_mode};
+use rosea_core::parse::{Difficulty, osu_difficulty, osu_header, osu_mode};
 
 #[test]
 fn reads_header() {
@@ -85,4 +85,123 @@ fn mode_parser_checks_header() {
         Err(RoseaError::UnsupportedVersion(13))
     );
     assert_eq!(osu_mode(b"\xff"), Err(RoseaError::InvalidEncoding));
+}
+
+#[test]
+fn reads_difficulty_fields_in_their_section() {
+    let text = "\u{feff}\r\n\nosu file format v14\r\n\
+        [General]\r\nCircleSize: invalid\r\n\
+        [Difficulty]\r\n\r\n// CircleSize: 9\r\n\
+        HPDrainRate: 6.25\r\n CircleSize : 4.5 \r\n\
+        ApproachRate: 9\r\nUnknownField: ignored\r\n\
+        OverallDifficulty: 7.75\r\n\
+        [Metadata]\r\nOverallDifficulty: invalid\r\n";
+    assert_eq!(
+        osu_difficulty(text.as_bytes()),
+        Ok(Difficulty {
+            cs: 4.5,
+            od: 7.75,
+            hp: 6.25,
+        })
+    );
+}
+
+#[test]
+fn accepts_difficulty_range_boundaries() {
+    for value in [0.0, 10.0] {
+        let text = format!(
+            "osu file format v14\n[Difficulty]\n\
+             CircleSize: {value}\nOverallDifficulty: {value}\nHPDrainRate: {value}"
+        );
+        assert_eq!(
+            osu_difficulty(text.as_bytes()),
+            Ok(Difficulty {
+                cs: value,
+                od: value,
+                hp: value,
+            })
+        );
+    }
+}
+
+#[test]
+fn requires_each_difficulty_field() {
+    for missing in ["CircleSize", "OverallDifficulty", "HPDrainRate"] {
+        let mut text = String::from("osu file format v14\n[Difficulty]\n");
+        for field in ["CircleSize", "OverallDifficulty", "HPDrainRate"] {
+            if field != missing {
+                text.push_str(&format!("{field}: 5\n"));
+            }
+        }
+        text.push_str(&format!("[Metadata]\n{missing}: 5"));
+        assert_eq!(
+            osu_difficulty(text.as_bytes()),
+            Err(RoseaError::MissingDifficultyField(missing))
+        );
+    }
+    for body in ["", "[Difficulty]", "[General]\nCircleSize: 5"] {
+        let text = format!("osu file format v14\n{body}");
+        assert_eq!(
+            osu_difficulty(text.as_bytes()),
+            Err(RoseaError::MissingDifficultyField("CircleSize"))
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_difficulty_values_with_field_and_line() {
+    for field in ["CircleSize", "OverallDifficulty", "HPDrainRate"] {
+        for value in [
+            "",
+            "abc",
+            "5:6",
+            "NaN",
+            "inf",
+            "-inf",
+            "1e999",
+            "-0.00000001",
+            "10.00000001",
+        ] {
+            let text = format!("osu file format v14\n[Difficulty]\n\n// comment\n{field}: {value}");
+            assert_eq!(
+                osu_difficulty(text.as_bytes()),
+                Err(RoseaError::InvalidDifficultyField { field, line: 5 }),
+                "{field}: {value}"
+            );
+        }
+        let text = format!("osu file format v14\n[Difficulty]\n{field}");
+        assert_eq!(
+            osu_difficulty(text.as_bytes()),
+            Err(RoseaError::InvalidDifficultyField { field, line: 3 })
+        );
+    }
+}
+
+#[test]
+fn rejects_duplicate_difficulty_fields() {
+    for field in ["CircleSize", "OverallDifficulty", "HPDrainRate"] {
+        for separator in ["\n", "\n[Metadata]\nTitle: A\n[Difficulty]\n"] {
+            let text = format!(
+                "osu file format v14\n[Difficulty]\n\
+                 CircleSize: 4\nOverallDifficulty: 5\nHPDrainRate: 6{separator}{field}: 7"
+            );
+            assert_eq!(
+                osu_difficulty(text.as_bytes()),
+                Err(RoseaError::DuplicateField)
+            );
+        }
+    }
+}
+
+#[test]
+fn difficulty_parser_checks_header() {
+    assert_eq!(
+        osu_difficulty(b"[Difficulty]\nCircleSize: 4"),
+        Err(RoseaError::InvalidHeader)
+    );
+    assert_eq!(
+        osu_difficulty(b"osu file format v13"),
+        Err(RoseaError::UnsupportedVersion(13))
+    );
+    assert_eq!(osu_difficulty(b"\xff"), Err(RoseaError::InvalidEncoding));
 }
