@@ -33,6 +33,14 @@ pub enum RoseaError {
         field: &'static str,
         line: usize,
     },
+    InvalidSliderLength {
+        line: usize,
+        object_id: ObjectId,
+    },
+    NumericalError {
+        line: usize,
+        object_id: ObjectId,
+    },
     ResourceLimit {
         resource: &'static str,
         limit: u64,
@@ -92,6 +100,20 @@ impl fmt::Display for RoseaError {
             }
             Self::InvalidTimingPointField { field, line } => {
                 write!(f, "Строка {line}: некорректное поле timing point {field}")
+            }
+            Self::InvalidSliderLength { line, object_id } => {
+                write!(
+                    f,
+                    "Строка {line}, объект {}: длина слайдера должна быть конечной и неотрицательной",
+                    object_id.0
+                )
+            }
+            Self::NumericalError { line, object_id } => {
+                write!(
+                    f,
+                    "Строка {line}, объект {}: некорректный численный результат при подготовке или выборке пути",
+                    object_id.0
+                )
             }
             Self::ResourceLimit {
                 resource,
