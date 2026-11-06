@@ -13,6 +13,9 @@ Supports:
 """
 
 import math
+import bisect
+import struct
+import re
 import os
 import sys
 import time
@@ -62,6 +65,10 @@ class Visualizer:
         width: int = 1024,
         height: int = 768,
         headless: bool = False,
+        audio_path: Optional[str] = None,
+        disable_audio: bool = False,
+        disable_hitsounds: bool = False,
+        audio_offset: float = 0.0,
     ):
         self.beatmap_path = beatmap_path
         self.replay_path = replay_path
@@ -101,6 +108,26 @@ class Visualizer:
         self.tech_panel_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_dock_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_close_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+
+        # Audio & High-Resolution Clock State
+        self.audio_available: bool = False
+        self.explicit_audio_path: Optional[str] = audio_path
+        self.disable_audio_playback: bool = disable_audio
+        self.hitsounds_enabled: bool = not disable_hitsounds
+        self.audio_offset_ms: float = audio_offset
+        self.audio_muted: bool = False
+        self.music_volume: float = 0.75
+        self.hitsound_volume: float = 0.8
+        self.music_loaded: bool = False
+        self.music_playing: bool = False
+        self.audio_path: Optional[str] = None
+        self.hitsound_samples: Dict[str, pygame.mixer.Sound] = {}
+        self.sound_events: List[Tuple[float, str]] = []
+        self.sound_event_idx: int = 0
+        self.audio_anchor_track_ms: float = 0.0
+        self.audio_anchor_perf_time: float = time.perf_counter()
+
+        self.init_audio()
 
         # Map list for keyboard cycling ([ / ] or PageUp / PageDown)
         self.all_map_files: List[str] = []
@@ -209,6 +236,8 @@ class Visualizer:
             3.0,
         )
 
+        self.setup_audio_for_beatmap()
+
     def open_map_browser(self):
         """Open or bring to front the non-blocking map browser window."""
         if self.map_browser:
@@ -266,6 +295,299 @@ class Visualizer:
         self.build_slider_caches()
         side_name = "справа" if self.tech_hud_dock == "right" else "слева"
         self.set_toast(f"Панель инспектора закреплена {side_name}", 1.5)
+
+    def init_audio(self):
+        """Initialize audio mixer with low-latency buffer (512 samples) and load hitsounds."""
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            self.audio_available = True
+            self.init_hitsounds()
+        except Exception:
+            self.audio_available = False
+            self.hitsounds_enabled = False
+            self.disable_audio_playback = True
+
+    def init_hitsounds(self):
+        """Load skin hitsounds or synthesize crisp procedural click sounds."""
+        if not self.audio_available:
+            return
+        skins_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Skins")
+        if os.path.isdir(skins_dir):
+            skin_candidates = []
+            for sname in os.listdir(skins_dir):
+                if "WhiteCat" in sname:
+                    skin_candidates.insert(0, os.path.join(skins_dir, sname))
+                else:
+                    skin_candidates.append(os.path.join(skins_dir, sname))
+
+            for skin_path in skin_candidates:
+                norm = os.path.join(skin_path, "normal-hitnormal.wav")
+                if os.path.isfile(norm):
+                    try:
+                        self.hitsound_samples["normal"] = pygame.mixer.Sound(norm)
+                        whistle = os.path.join(skin_path, "normal-hitwhistle.wav")
+                        finish = os.path.join(skin_path, "normal-hitfinish.wav")
+                        clap = os.path.join(skin_path, "normal-hitclap.wav")
+                        if os.path.isfile(whistle):
+                            self.hitsound_samples["whistle"] = pygame.mixer.Sound(whistle)
+                        if os.path.isfile(finish):
+                            self.hitsound_samples["finish"] = pygame.mixer.Sound(finish)
+                        if os.path.isfile(clap):
+                            self.hitsound_samples["clap"] = pygame.mixer.Sound(clap)
+                        break
+                    except Exception:
+                        pass
+
+        # Procedural fallback
+        if "normal" not in self.hitsound_samples:
+            sr = 44100
+            dur = 0.04
+            buf = bytearray()
+            for i in range(int(sr * dur)):
+                t = i / float(sr)
+                env = math.exp(-t * 90.0)
+                sample = int(32767.0 * 0.7 * env * math.sin(2.0 * math.pi * 1100.0 * (1.0 - t * 4.0) * t))
+                sample = max(-32767, min(32767, sample))
+                buf.extend(struct.pack("<hh", sample, sample))
+            try:
+                self.hitsound_samples["normal"] = pygame.mixer.Sound(buffer=bytes(buf))
+            except Exception:
+                pass
+
+        for snd in self.hitsound_samples.values():
+            try:
+                snd.set_volume(self.hitsound_volume)
+            except Exception:
+                pass
+
+    def resolve_audio_file(self, bm_path: str, audio_filename: str, artist: str, title: str) -> Optional[str]:
+        """Smart audio resolver: explicit path -> same folder -> user's osu! Songs directory."""
+        if self.explicit_audio_path and os.path.isfile(self.explicit_audio_path):
+            return self.explicit_audio_path
+
+        folder = os.path.dirname(os.path.abspath(bm_path))
+        if audio_filename:
+            cand = os.path.join(folder, audio_filename)
+            if os.path.isfile(cand):
+                return cand
+
+        if os.path.isdir(folder):
+            for f in os.listdir(folder):
+                if f.lower().endswith((".mp3", ".ogg")) and not any(k in f.lower() for k in ("hit", "slider", "spin")):
+                    full = os.path.join(folder, f)
+                    if os.path.getsize(full) > 200000:
+                        return full
+
+        songs_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Songs")
+        if not os.path.isdir(songs_dir):
+            return None
+
+        clean_title = re.sub(r"[^a-zA-Z0-9]", "", title).lower()
+        clean_artist = re.sub(r"[^a-zA-Z0-9]", "", artist).lower()
+
+        best_folder = None
+        best_score = 0
+        for sdir in os.listdir(songs_dir):
+            sd_clean = re.sub(r"[^a-zA-Z0-9]", "", sdir).lower()
+            score = 0
+            if clean_title and len(clean_title) >= 4 and clean_title[:8] in sd_clean:
+                score += 10
+            if clean_artist and len(clean_artist) >= 3 and clean_artist[:6] in sd_clean:
+                score += 5
+            if score > best_score:
+                best_score = score
+                best_folder = os.path.join(songs_dir, sdir)
+
+        if best_folder and best_score >= 10:
+            if audio_filename:
+                cand = os.path.join(best_folder, audio_filename)
+                if os.path.isfile(cand):
+                    return cand
+            for f in os.listdir(best_folder):
+                if f.lower().endswith((".mp3", ".ogg", ".wav")) and not any(k in f.lower() for k in ("hit", "slider", "spin")):
+                    full = os.path.join(best_folder, f)
+                    if os.path.getsize(full) > 250000:
+                        return full
+        return None
+
+    def setup_audio_for_beatmap(self):
+        """Configure and load audio track and hitsounds for the loaded beatmap."""
+        if self.audio_available:
+            try:
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
+        self.music_loaded = False
+        self.music_playing = False
+        self.audio_path = None
+
+        self.build_sound_events()
+
+        if not self.audio_available or self.disable_audio_playback:
+            self.audio_anchor_track_ms = self.current_time_ms
+            self.audio_anchor_perf_time = time.perf_counter()
+            return
+
+        audio_file = self.resolve_audio_file(
+            self.beatmap_path,
+            getattr(self.beatmap, "audio_filename", ""),
+            getattr(self.beatmap, "artist", ""),
+            getattr(self.beatmap, "title", ""),
+        )
+
+        if audio_file and os.path.isfile(audio_file):
+            try:
+                pygame.mixer.music.load(audio_file)
+                pygame.mixer.music.set_volume(0.0 if self.audio_muted else self.music_volume)
+                self.music_loaded = True
+                self.audio_path = audio_file
+            except Exception:
+                self.music_loaded = False
+                self.audio_path = None
+
+        self.audio_anchor_track_ms = self.current_time_ms
+        self.audio_anchor_perf_time = time.perf_counter()
+
+        if self.is_playing and self.music_loaded and self.current_time_ms >= 0 and self.playback_speed == 1.0:
+            target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+            try:
+                pygame.mixer.music.play(start=target_sec)
+                self.music_playing = True
+            except Exception:
+                pass
+
+    def build_sound_events(self):
+        """Extract and sort note hitsound trigger timestamps."""
+        self.sound_events = []
+        if not self.beatmap or not self.beatmap.hit_objects:
+            self.sound_event_idx = 0
+            return
+
+        for obj in self.beatmap.hit_objects:
+            sound_kind = self._sound_type_for(getattr(obj, "hit_sound", 0))
+            if obj.kind == "circle":
+                self.sound_events.append((obj.time, sound_kind))
+            elif obj.kind == "slider":
+                self.sound_events.append((obj.time, sound_kind))
+                spans = getattr(obj, "spans", 1)
+                if spans and spans > 1:
+                    span_dur = (obj.end_time - obj.time) / spans
+                    for s in range(1, spans):
+                        self.sound_events.append((obj.time + s * span_dur, "normal"))
+                self.sound_events.append((obj.end_time, "normal"))
+            elif obj.kind == "spinner":
+                self.sound_events.append((obj.end_time, "finish"))
+
+        self.sound_events.sort(key=lambda x: x[0])
+        times = [x[0] for x in self.sound_events]
+        self.sound_event_idx = bisect.bisect_left(times, self.current_time_ms)
+
+    @staticmethod
+    def _sound_type_for(mask: int) -> str:
+        if mask & 4:
+            return "finish"
+        elif mask & 8:
+            return "clap"
+        elif mask & 2:
+            return "whistle"
+        return "normal"
+
+    def play_hitsound(self, kind: str):
+        if self.audio_muted or not self.hitsounds_enabled or not self.audio_available:
+            return
+        snd = self.hitsound_samples.get(kind) or self.hitsound_samples.get("normal")
+        if snd:
+            try:
+                chan = pygame.mixer.find_channel()
+                if chan:
+                    chan.play(snd)
+                else:
+                    snd.play()
+            except Exception:
+                pass
+
+    def toggle_audio_mute(self):
+        """Toggle audio mute state (key U)."""
+        self.audio_muted = not self.audio_muted
+        if self.audio_muted:
+            try:
+                pygame.mixer.music.set_volume(0.0)
+            except Exception:
+                pass
+            self.set_toast("Звук выключен (Mute)", 1.5)
+        else:
+            try:
+                pygame.mixer.music.set_volume(self.music_volume)
+            except Exception:
+                pass
+            self.set_toast(f"Звук включен ({int(self.music_volume * 100)}%)", 1.5)
+
+    def adjust_audio_offset(self, delta_ms: float):
+        """Adjust universal audio offset (Alt + Left/Right arrows)."""
+        self.audio_offset_ms += delta_ms
+        self.set_toast(f"Смещение звука: {self.audio_offset_ms:+.1f} мс", 1.5)
+        if self.music_playing and self.playback_speed == 1.0 and self.current_time_ms >= 0:
+            target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+            try:
+                pygame.mixer.music.play(start=target_sec)
+                self.audio_anchor_track_ms = self.current_time_ms
+                self.audio_anchor_perf_time = time.perf_counter()
+            except Exception:
+                pass
+
+    def toggle_playback(self):
+        """Toggle pause/play with synchronized audio."""
+        self.is_playing = not self.is_playing
+        if not self.is_playing:
+            if self.music_playing:
+                try:
+                    pygame.mixer.music.pause()
+                except Exception:
+                    pass
+        else:
+            self.audio_anchor_track_ms = self.current_time_ms
+            self.audio_anchor_perf_time = time.perf_counter()
+            if self.music_loaded and self.current_time_ms >= 0 and self.playback_speed == 1.0:
+                if self.music_playing:
+                    try:
+                        pygame.mixer.music.unpause()
+                    except Exception:
+                        pass
+                else:
+                    target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+                    try:
+                        pygame.mixer.music.play(start=target_sec)
+                        self.music_playing = True
+                    except Exception:
+                        pass
+
+    def change_speed(self, delta_idx: int):
+        """Change playback speed with audio muting at non-1.0x speeds."""
+        new_idx = max(0, min(len(self.speed_options) - 1, self.speed_idx + delta_idx))
+        if new_idx == self.speed_idx:
+            return
+        self.speed_idx = new_idx
+        self.playback_speed = self.speed_options[self.speed_idx]
+        self.audio_anchor_track_ms = self.current_time_ms
+        self.audio_anchor_perf_time = time.perf_counter()
+
+        if self.playback_speed != 1.0:
+            if self.music_playing:
+                try:
+                    pygame.mixer.music.pause()
+                except Exception:
+                    pass
+            self.set_toast(f"Скорость {self.playback_speed:.2f}x (музыка заглушена)", 1.5)
+        else:
+            if self.music_loaded and self.current_time_ms >= 0 and self.is_playing:
+                target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+                try:
+                    pygame.mixer.music.play(start=target_sec)
+                    self.music_playing = True
+                except Exception:
+                    pass
+            self.set_toast("Скорость 1.00x (музыка в синхроне)", 1.5)
 
     def init_fonts(self):
         try:
@@ -393,13 +715,80 @@ class Visualizer:
             self.slider_caches[obj.id] = (surf, min_x, min_y)
 
     def seek_to(self, time_ms: float):
-        self.current_time_ms = max(0.0, min(self.last_time, time_ms))
+        self.current_time_ms = max(self.start_time, min(self.last_time, time_ms))
+        self.audio_anchor_track_ms = self.current_time_ms
+        self.audio_anchor_perf_time = time.perf_counter()
+
+        if self.sound_events:
+            times = [x[0] for x in self.sound_events]
+            self.sound_event_idx = bisect.bisect_left(times, self.current_time_ms)
+
+        if self.music_loaded:
+            if self.current_time_ms >= 0 and self.playback_speed == 1.0:
+                target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+                try:
+                    pygame.mixer.music.play(start=target_sec)
+                    if not self.is_playing:
+                        pygame.mixer.music.pause()
+                        self.music_playing = False
+                    else:
+                        self.music_playing = True
+                except Exception:
+                    pass
+            else:
+                try:
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
+                self.music_playing = False
 
     def step(self, dt_ms: float):
-        if self.is_playing:
+        if not self.is_playing:
+            self.audio_anchor_perf_time = time.perf_counter()
+            return
+
+        if self.headless or not self.music_playing:
             self.current_time_ms += dt_ms * self.playback_speed
-            if self.current_time_ms > self.last_time:
-                self.current_time_ms = self.start_time
+            self.audio_anchor_track_ms = self.current_time_ms
+            self.audio_anchor_perf_time = time.perf_counter()
+        else:
+            perf_now = time.perf_counter()
+            delta_ms = (perf_now - self.audio_anchor_perf_time) * 1000.0 * self.playback_speed
+            self.current_time_ms = self.audio_anchor_track_ms + delta_ms
+
+            # Hardware audio drift correction
+            if self.playback_speed == 1.0:
+                hw_pos = pygame.mixer.music.get_pos()
+                if hw_pos >= 0:
+                    expected_time = self.audio_anchor_track_ms + hw_pos
+                    drift = self.current_time_ms - expected_time
+                    if abs(drift) > 20.0:
+                        self.audio_anchor_perf_time += (drift / 1000.0) * 0.1
+
+        # Start audio when crossing 0.0 ms in interactive mode
+        if not self.headless and self.music_loaded and not self.music_playing and self.current_time_ms >= 0 and self.playback_speed == 1.0:
+            target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+            try:
+                pygame.mixer.music.play(start=target_sec)
+                self.music_playing = True
+                self.audio_anchor_track_ms = self.current_time_ms
+                self.audio_anchor_perf_time = time.perf_counter()
+            except Exception:
+                pass
+
+        # Trigger hitsounds
+        if not self.audio_muted and self.hitsounds_enabled and self.sound_events:
+            while self.sound_event_idx < len(self.sound_events):
+                ev_time, ev_kind = self.sound_events[self.sound_event_idx]
+                if ev_time <= self.current_time_ms:
+                    if self.current_time_ms - ev_time <= 80.0:
+                        self.play_hitsound(ev_kind)
+                    self.sound_event_idx += 1
+                else:
+                    break
+
+        if self.current_time_ms > self.last_time:
+            self.seek_to(self.start_time)
 
     def render(self):
         self.screen.fill((16, 17, 24))
@@ -766,7 +1155,20 @@ class Visualizer:
         state_col = (70, 220, 120) if self.is_playing else (255, 180, 50)
         speed_str = f"Speed: {self.playback_speed:.2f}x  [{state_str}]"
         st_surf = self.font_bold.render(speed_str, True, state_col)
-        self.screen.blit(st_surf, (self.width - st_surf.get_width() - 16, 10))
+        st_x = self.width - st_surf.get_width() - 16
+        self.screen.blit(st_surf, (st_x, 10))
+
+        if self.audio_muted:
+            aud_text = "♫ Mute [U]"
+            aud_col = (251, 146, 60)
+        elif self.music_loaded:
+            aud_text = "♫ Music ON"
+            aud_col = (74, 222, 128)
+        else:
+            aud_text = "♫ Clicks"
+            aud_col = (148, 163, 184)
+        aud_surf = self.font_small.render(aud_text, True, aud_col)
+        self.screen.blit(aud_surf, (st_x - aud_surf.get_width() - 14, 13))
 
         # Engine source badge
         if self.active_source == "rust":
@@ -989,6 +1391,14 @@ class Visualizer:
             items.append(("ROW", "Курсор:", cursor_str, (220, 225, 240)))
             items.append(("ROW", "Дистанция:", dist_str, dist_col))
 
+        items.append(("SECTION", "// АУДИО & СИНХРОНИЗАЦИЯ"))
+        track_name = os.path.basename(self.audio_path) if self.audio_path else "Не найден (только клики)"
+        track_col = (74, 222, 128) if self.music_loaded else (251, 146, 60)
+        items.append(("ROW", "Трек:", track_name, track_col))
+        items.append(("ROW", "Смещение:", f"{self.audio_offset_ms:+.1f} мс [Alt+<-/->]", (220, 225, 240)))
+        vol_str = "Выключен [U]" if self.audio_muted else f"Трек {int(self.music_volume*100)}% | Клики {int(self.hitsound_volume*100)}% [U]"
+        items.append(("ROW", "Громкость:", vol_str, (167, 139, 250)))
+
         y_pos = 38
         val_x = 135
         for item in items:
@@ -1098,10 +1508,16 @@ class Visualizer:
                     self.build_slider_caches()
 
                 elif event.type == pygame.KEYDOWN:
+                    mods = pygame.key.get_mods()
+                    is_alt = bool(mods & pygame.KMOD_ALT)
+                    is_shift = bool(mods & pygame.KMOD_SHIFT)
+
                     if event.key == pygame.K_ESCAPE:
                         running = False
                     elif event.key == pygame.K_SPACE:
-                        self.is_playing = not self.is_playing
+                        self.toggle_playback()
+                    elif event.key == pygame.K_u:
+                        self.toggle_audio_mute()
                     elif event.key == pygame.K_m:
                         self.open_map_browser()
                     elif event.key in (pygame.K_PAGEUP, pygame.K_LEFTBRACKET):
@@ -1109,21 +1525,21 @@ class Visualizer:
                     elif event.key in (pygame.K_PAGEDOWN, pygame.K_RIGHTBRACKET):
                         self.switch_relative_map(1)
                     elif event.key == pygame.K_LEFT:
-                        mods = pygame.key.get_mods()
-                        step = 5000.0 if (mods & pygame.KMOD_SHIFT) else 2000.0
-                        self.seek_to(self.current_time_ms - step)
+                        if is_alt:
+                            self.adjust_audio_offset(-5.0)
+                        else:
+                            step = 5000.0 if is_shift else 2000.0
+                            self.seek_to(self.current_time_ms - step)
                     elif event.key == pygame.K_RIGHT:
-                        mods = pygame.key.get_mods()
-                        step = 5000.0 if (mods & pygame.KMOD_SHIFT) else 2000.0
-                        self.seek_to(self.current_time_ms + step)
+                        if is_alt:
+                            self.adjust_audio_offset(5.0)
+                        else:
+                            step = 5000.0 if is_shift else 2000.0
+                            self.seek_to(self.current_time_ms + step)
                     elif event.key == pygame.K_UP:
-                        if self.speed_idx < len(self.speed_options) - 1:
-                            self.speed_idx += 1
-                            self.playback_speed = self.speed_options[self.speed_idx]
+                        self.change_speed(1)
                     elif event.key == pygame.K_DOWN:
-                        if self.speed_idx > 0:
-                            self.speed_idx -= 1
-                            self.playback_speed = self.speed_options[self.speed_idx]
+                        self.change_speed(-1)
                     elif event.key in (pygame.K_r, pygame.K_HOME):
                         self.seek_to(self.start_time)
                     elif event.key == pygame.K_s:
@@ -1189,6 +1605,10 @@ def main():
     parser.add_argument("beatmap", nargs="?", default="tests/data/01_micro/2dearbrave.osu", help="Path to .osu beatmap")
     parser.add_argument("--replay", type=str, default=None, help="Path to .osr replay file to visualize alongside beatmap")
     parser.add_argument("--source", choices=["auto", "rust", "python"], default="auto", help="Data source engine (auto, rust, python)")
+    parser.add_argument("--audio", type=str, default=None, help="Explicit path to background audio file (.mp3 / .ogg)")
+    parser.add_argument("--no-audio", action="store_true", help="Disable music audio playback")
+    parser.add_argument("--no-hitsounds", action="store_true", help="Disable hitsounds (note click sounds)")
+    parser.add_argument("--offset", type=float, default=0.0, help="Universal audio offset in milliseconds (default: 0.0)")
     parser.add_argument("--test", action="store_true", help="Run automated test suite verifying Rust parser across corpus")
     parser.add_argument("--verify", action="store_true", help="Verify single map against Rust parser and exit")
     parser.add_argument("--headless", action="store_true", help="Run visualizer in headless dummy mode for testing")
@@ -1261,6 +1681,10 @@ def main():
         width=args.width,
         height=args.height,
         headless=args.headless,
+        audio_path=args.audio,
+        disable_audio=args.no_audio,
+        disable_hitsounds=args.no_hitsounds,
+        audio_offset=args.offset,
     )
     vis.run(max_frames=args.frames)
 

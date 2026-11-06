@@ -266,6 +266,53 @@ def test_tech_hud_docking_and_no_overlap():
     print("test_tech_hud_docking_and_no_overlap: OK")
 
 
+def test_audio_engine_and_synchronization():
+    map_path = "tests/data/03_spinners/realexit.osu"
+    vis = Visualizer(map_path, headless=True)
+
+    # 1. Audio and hitsounds initialization
+    assert vis.audio_available
+    assert "normal" in vis.hitsound_samples
+    assert len(vis.sound_events) > 100
+
+    # 2. Seeking and bisect sound event repositioning
+    vis.seek_to(15841.0)
+    assert vis.current_time_ms == 15841.0
+    assert vis.sound_event_idx > 0
+
+    # 3. Simulation step
+    prev_t = vis.current_time_ms
+    vis.step(50.0)
+    assert vis.current_time_ms == prev_t + 50.0
+
+    # 4. Mute toggle
+    assert not vis.audio_muted
+    vis.toggle_audio_mute()
+    assert vis.audio_muted
+    vis.toggle_audio_mute()
+    assert not vis.audio_muted
+
+    # 5. Audio offset adjustment
+    assert vis.audio_offset_ms == 0.0
+    vis.adjust_audio_offset(15.0)
+    assert vis.audio_offset_ms == 15.0
+    vis.adjust_audio_offset(-15.0)
+    assert vis.audio_offset_ms == 0.0
+
+    # 6. Playback speed change
+    vis.change_speed(1)
+    assert vis.playback_speed == 1.25
+    vis.change_speed(-1)
+    assert vis.playback_speed == 1.0
+
+    # 7. Render frame with HUD and audio info
+    vis.show_tech_hud = True
+    vis.update_playfield_layout()
+    vis.render()
+
+    print("test_audio_engine_and_synchronization: OK")
+
+
 if __name__ == "__main__":
     test_linear_curve()
     test_bezier_multi_segment()
@@ -278,4 +325,5 @@ if __name__ == "__main__":
     test_rust_verification_suite()
     test_visualizer_headless_playback_and_source_toggle()
     test_tech_hud_docking_and_no_overlap()
+    test_audio_engine_and_synchronization()
     print("\nALL AUTOMATED TESTS PASSED!")
