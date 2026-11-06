@@ -102,6 +102,7 @@ fn reads_difficulty_fields_in_their_section() {
             cs: 4.5,
             od: 7.75,
             hp: 6.25,
+            ar: 9.0,
         })
     );
 }
@@ -119,6 +120,7 @@ fn accepts_difficulty_range_boundaries() {
                 cs: value,
                 od: value,
                 hp: value,
+                ar: value,
             })
         );
     }
@@ -150,7 +152,12 @@ fn requires_each_difficulty_field() {
 
 #[test]
 fn rejects_invalid_difficulty_values_with_field_and_line() {
-    for field in ["CircleSize", "OverallDifficulty", "HPDrainRate"] {
+    for field in [
+        "CircleSize",
+        "OverallDifficulty",
+        "HPDrainRate",
+        "ApproachRate",
+    ] {
         for value in [
             "",
             "abc",
@@ -179,11 +186,16 @@ fn rejects_invalid_difficulty_values_with_field_and_line() {
 
 #[test]
 fn rejects_duplicate_difficulty_fields() {
-    for field in ["CircleSize", "OverallDifficulty", "HPDrainRate"] {
+    for field in [
+        "CircleSize",
+        "OverallDifficulty",
+        "HPDrainRate",
+        "ApproachRate",
+    ] {
         for separator in ["\n", "\n[Metadata]\nTitle: A\n[Difficulty]\n"] {
             let text = format!(
                 "osu file format v14\n[Difficulty]\n\
-                 CircleSize: 4\nOverallDifficulty: 5\nHPDrainRate: 6{separator}{field}: 7"
+                 CircleSize: 4\nOverallDifficulty: 5\nHPDrainRate: 6\nApproachRate: 8{separator}{field}: 7"
             );
             assert_eq!(
                 osu_difficulty(text.as_bytes()),
@@ -204,4 +216,28 @@ fn difficulty_parser_checks_header() {
         Err(RoseaError::UnsupportedVersion(13))
     );
     assert_eq!(osu_difficulty(b"\xff"), Err(RoseaError::InvalidEncoding));
+}
+
+#[test]
+fn reads_ar_boundaries_and_defaults_to_od() {
+    for (field, expected) in [
+        ("", 7.25),
+        ("ApproachRate: 0\n", 0.0),
+        ("ApproachRate: 10\n", 10.0),
+    ] {
+        let text = format!(
+            "osu file format v14\n[Difficulty]\n{field}\
+             CircleSize: 4\nHPDrainRate: 6\nOverallDifficulty: 7.25\n\
+             [Metadata]\nApproachRate: 9"
+        );
+        assert_eq!(
+            osu_difficulty(text.as_bytes()),
+            Ok(Difficulty {
+                cs: 4.0,
+                od: 7.25,
+                hp: 6.0,
+                ar: expected
+            })
+        );
+    }
 }

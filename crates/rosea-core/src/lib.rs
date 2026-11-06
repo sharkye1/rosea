@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod model;
 pub mod parse;
 
 pub const PROFILE_ID: &str = "rosea-mvp-v1";

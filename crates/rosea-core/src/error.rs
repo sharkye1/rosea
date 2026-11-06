@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::model::ObjectId;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum RoseaError {
     InvalidEncoding,
@@ -9,7 +11,26 @@ pub enum RoseaError {
     UnsupportedMode(u32),
     DuplicateField,
     MissingDifficultyField(&'static str),
-    InvalidDifficultyField { field: &'static str, line: usize },
+    InvalidDifficultyField {
+        field: &'static str,
+        line: usize,
+    },
+    EmptyBeatmap,
+    InvalidHitObjectField {
+        field: &'static str,
+        line: usize,
+        object_id: ObjectId,
+    },
+    UnsupportedHitObject {
+        line: usize,
+        object_id: ObjectId,
+        flags: u8,
+    },
+    ResourceLimit {
+        resource: &'static str,
+        limit: u64,
+        observed: u64,
+    },
 }
 
 impl fmt::Display for RoseaError {
@@ -35,6 +56,39 @@ impl fmt::Display for RoseaError {
                 write!(
                     f,
                     "Строка {line}: поле {field} должно быть конечным числом от 0 до 10"
+                )
+            }
+            Self::EmptyBeatmap => write!(f, "В карте нет объектов HitObjects"),
+            Self::InvalidHitObjectField {
+                field,
+                line,
+                object_id,
+            } => {
+                write!(
+                    f,
+                    "Строка {line}, объект {}: некорректное поле {field}",
+                    object_id.0
+                )
+            }
+            Self::UnsupportedHitObject {
+                line,
+                object_id,
+                flags,
+            } => {
+                write!(
+                    f,
+                    "Строка {line}, объект {}: тип {flags} не поддерживается, пока доступны только круги",
+                    object_id.0
+                )
+            }
+            Self::ResourceLimit {
+                resource,
+                limit,
+                observed,
+            } => {
+                write!(
+                    f,
+                    "Превышен лимит {resource}: {observed}, допустимо {limit}"
                 )
             }
         }

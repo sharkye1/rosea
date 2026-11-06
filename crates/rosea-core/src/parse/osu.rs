@@ -5,6 +5,7 @@ pub struct Difficulty {
     pub cs: f64,
     pub od: f64,
     pub hp: f64,
+    pub ar: f64,
 }
 
 pub fn osu_header(bytes: &[u8]) -> Result<u32, RoseaError> {
@@ -71,7 +72,7 @@ pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
     Ok(mode.unwrap_or(0))
 }
 
-/// Читает только CS, OD и HP; остальные параметры сложности пока пропускает.
+/// Читает CS, OD, HP и AR; при отсутствии AR использует OD.
 pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
     osu_header(bytes)?;
     let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
@@ -79,6 +80,7 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
     let mut cs = None;
     let mut od = None;
     let mut hp = None;
+    let mut ar = None;
 
     for (index, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -98,6 +100,7 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
             "CircleSize" => ("CircleSize", &mut cs),
             "OverallDifficulty" => ("OverallDifficulty", &mut od),
             "HPDrainRate" => ("HPDrainRate", &mut hp),
+            "ApproachRate" => ("ApproachRate", &mut ar),
             _ => continue,
         };
         if slot.is_some() {
@@ -114,9 +117,13 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
         *slot = Some(value);
     }
 
+    let cs = cs.ok_or(RoseaError::MissingDifficultyField("CircleSize"))?;
+    let od = od.ok_or(RoseaError::MissingDifficultyField("OverallDifficulty"))?;
+    let hp = hp.ok_or(RoseaError::MissingDifficultyField("HPDrainRate"))?;
     Ok(Difficulty {
-        cs: cs.ok_or(RoseaError::MissingDifficultyField("CircleSize"))?,
-        od: od.ok_or(RoseaError::MissingDifficultyField("OverallDifficulty"))?,
-        hp: hp.ok_or(RoseaError::MissingDifficultyField("HPDrainRate"))?,
+        cs,
+        od,
+        hp,
+        ar: ar.unwrap_or(od),
     })
 }
