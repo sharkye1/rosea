@@ -1,0 +1,1185 @@
+"""
+Rosea osu! Beatmap Visualizer and Parser Tester
+Supports:
+- All hit objects: Hit Circles, Sliders (L, B, P, C), Spinners
+- 512x384 osu! playfield with proper aspect ratio scaling and letterboxing
+- Full timing, SV multipliers, slider velocity, slider ticks, and repeats
+- Approach circles (AR preempt / fade-in), Circle Size (CS) scaling
+- Stacking calculation
+- Playback controls: Play/Pause (Space), Seek (Left/Right), Speed (Up/Down), Restart (R/Home)
+- Interactive timeline seekbar with object distribution ticks
+- Real-time Rust Parser verification badge and diagnostics overlay (Tab/F1, V)
+- Headless test mode for automated verification
+"""
+
+import math
+import os
+import sys
+import time
+from typing import List, Tuple, Optional, Dict, Any
+
+# Ensure paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+for p in (REPO_ROOT, SCRIPT_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+try:
+    from osu_parser import parse_osu_beatmap, Beatmap, HitObject, parse_osr_replay, Replay
+    from rust_bridge import (
+        verify_beatmap,
+        VerificationResult,
+        run_full_corpus_verification,
+        beatmap_from_rust_json,
+    )
+    from map_browser import MapBrowserManager, scan_all_maps
+except ImportError:
+    from scripts.osu_parser import (
+        parse_osu_beatmap,
+        Beatmap,
+        HitObject,
+        parse_osr_replay,
+        Replay,
+    )
+    from scripts.rust_bridge import (
+        verify_beatmap,
+        VerificationResult,
+        run_full_corpus_verification,
+        beatmap_from_rust_json,
+    )
+    from scripts.map_browser import MapBrowserManager, scan_all_maps
+
+import pygame
+
+
+class Visualizer:
+    def __init__(
+        self,
+        beatmap_path: str,
+        replay_path: Optional[str] = None,
+        source: str = "auto",
+        width: int = 1024,
+        height: int = 768,
+        headless: bool = False,
+    ):
+        self.beatmap_path = beatmap_path
+        self.replay_path = replay_path
+        self.requested_source = source
+        self.width = width
+        self.height = height
+        self.headless = headless
+        self.toast_message = ""
+        self.toast_until = 0.0
+
+        if self.headless:
+            os.environ["SDL_VIDEODRIVER"] = "dummy"
+
+        pygame.init()
+        pygame.display.set_caption(f"Rosea Visualizer - {os.path.basename(beatmap_path)}")
+
+        if self.headless:
+            self.screen = pygame.display.set_mode((self.width, self.height))
+        else:
+            self.screen = pygame.display.set_mode((self.width, self.height), pygame.RESIZABLE)
+
+        self.clock = pygame.time.Clock()
+        self.init_fonts()
+
+        # Playback & UI state
+        self.playback_speed: float = 1.0
+        self.speed_options: List[float] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        self.speed_idx: int = 3  # 1.0x
+        self.show_hud: bool = True
+        self.show_tech_hud: bool = False
+        self.show_verification_detail: bool = False
+        self.is_scrubbing: bool = False
+        self.slider_caches: Dict[int, Tuple[pygame.Surface, int, int]] = {}
+        self.btn_maps_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+        self.btn_tech_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+
+        # Map list for keyboard cycling ([ / ] or PageUp / PageDown)
+        self.all_map_files: List[str] = []
+        self.current_map_idx: int = 0
+        try:
+            entries = scan_all_maps(os.path.join(REPO_ROOT, "tests", "data"))
+            self.all_map_files = [e.file_path for e in entries]
+        except Exception:
+            pass
+
+        # Non-blocking Map Browser companion window
+        self.map_browser: Optional[MapBrowserManager] = None
+        if not self.headless:
+            try:
+                self.map_browser = MapBrowserManager(root_dir=os.path.join(REPO_ROOT, "tests", "data"))
+                self.map_browser.start()
+            except Exception as e:
+                print(f"Warning: could not start MapBrowser: {e}", file=sys.stderr)
+
+        # Initial beatmap load
+        self.load_beatmap(beatmap_path, replay_path)
+
+    def load_beatmap(self, beatmap_path: str, replay_path: Optional[str] = None):
+        """Dynamically load or switch beatmap on the fly without restarting window."""
+        norm_path = os.path.normpath(beatmap_path)
+        if not os.path.isfile(norm_path):
+            self.set_toast(f"File not found: {os.path.basename(beatmap_path)}", 3.0)
+            return
+
+        self.beatmap_path = norm_path
+        self.replay_path = replay_path
+        pygame.display.set_caption(f"Rosea Visualizer - {os.path.basename(norm_path)}")
+
+        # Parse with Python parser
+        try:
+            self.py_beatmap: Beatmap = parse_osu_beatmap(norm_path)
+        except Exception as e:
+            self.set_toast(f"Failed to parse map: {e}", 3.0)
+            return
+
+        # Verification with Rust parser
+        self.verification: VerificationResult = verify_beatmap(norm_path)
+        self.rust_beatmap: Optional[Beatmap] = self.verification.rust_beatmap
+
+        # Choose active data source
+        if self.requested_source == "rust":
+            if self.rust_beatmap:
+                self.beatmap = self.rust_beatmap
+                self.active_source = "rust"
+            else:
+                self.beatmap = self.py_beatmap
+                self.active_source = "python"
+                self.set_toast(
+                    f"Rust unavailable ({self.verification.reason[:40]}); using Python",
+                    3.5,
+                )
+        elif self.requested_source == "python":
+            self.beatmap = self.py_beatmap
+            self.active_source = "python"
+        else:  # "auto"
+            if self.rust_beatmap and self.verification.status == "PASS":
+                self.beatmap = self.rust_beatmap
+                self.active_source = "rust"
+            else:
+                self.beatmap = self.py_beatmap
+                self.active_source = "python"
+
+        # Load Replay (.osr)
+        self.replay: Optional[Replay] = None
+        self.show_replay = True
+        self.replay_trail = []
+        target_osr = replay_path
+        if not target_osr:
+            candidate = os.path.splitext(norm_path)[0] + ".osr"
+            if os.path.isfile(candidate):
+                target_osr = candidate
+        if target_osr and os.path.isfile(target_osr):
+            self.replay = parse_osr_replay(target_osr)
+
+        # Update index in all_map_files
+        for idx, p in enumerate(self.all_map_files):
+            if os.path.abspath(p) == os.path.abspath(norm_path):
+                self.current_map_idx = idx
+                break
+
+        # Playfield metrics & timing
+        self.update_playfield_layout()
+
+        first_time = self.beatmap.hit_objects[0].time if self.beatmap.hit_objects else 0.0
+        preempt, _ = self.beatmap.ar_preempt_fadein
+        self.start_time = max(0.0, first_time - preempt - 500.0)
+        self.last_time = (
+            max([o.end_time for o in self.beatmap.hit_objects] + [first_time + 1000.0])
+            + 1500.0
+        )
+        self.current_time_ms = self.start_time
+        self.is_playing = True
+
+        self.slider_caches.clear()
+        self.build_slider_caches()
+
+        engine_name = "Rust rosea-core" if self.active_source == "rust" else "Python Standalone"
+        replay_name = f" + Replay ({self.replay.player})" if self.replay else ""
+        self.set_toast(
+            f"▶ {self.beatmap.title} [{self.beatmap.version_name}] ({engine_name}{replay_name})",
+            3.0,
+        )
+
+    def open_map_browser(self):
+        """Open or bring to front the non-blocking map browser window."""
+        if self.map_browser:
+            self.map_browser.show()
+            self.set_toast("Окно выбора карты открыто", 1.5)
+        else:
+            self.set_toast("Map Browser недоступен в headless режиме", 2.0)
+
+    def switch_relative_map(self, delta: int):
+        """Quickly switch to previous/next map in the tests/data directory."""
+        if not self.all_map_files:
+            return
+        self.current_map_idx = (self.current_map_idx + delta) % len(self.all_map_files)
+        target = self.all_map_files[self.current_map_idx]
+        self.load_beatmap(target)
+
+    def set_toast(self, message: str, duration_sec: float = 2.5):
+        self.toast_message = message
+        self.toast_until = time.time() + duration_sec
+
+    def toggle_engine_source(self):
+        """Toggle between Rust parser data and Python parser data in real time."""
+        if self.active_source == "rust":
+            self.beatmap = self.py_beatmap
+            self.active_source = "python"
+            self.set_toast("Data source switched to: Python Parser (Standalone)", 2.5)
+            self.update_playfield_layout()
+            self.build_slider_caches()
+        else:
+            if self.rust_beatmap:
+                self.beatmap = self.rust_beatmap
+                self.active_source = "rust"
+                self.set_toast("Data source switched to: Rust rosea-core Parser", 2.5)
+                self.update_playfield_layout()
+                self.build_slider_caches()
+            else:
+                self.set_toast(
+                    f"Rust unavailable ({self.verification.reason[:45]})", 3.0
+                )
+
+    def init_fonts(self):
+        try:
+            self.font_main = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 18)
+            self.font_title = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 22, bold=True)
+            self.font_bold = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 16, bold=True)
+            self.font_small = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 13)
+            self.font_combo = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 20, bold=True)
+            self.font_spinner = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 36, bold=True)
+        except Exception:
+            self.font_main = pygame.font.Font(None, 20)
+            self.font_title = pygame.font.Font(None, 24)
+            self.font_bold = pygame.font.Font(None, 18)
+            self.font_small = pygame.font.Font(None, 14)
+            self.font_combo = pygame.font.Font(None, 22)
+            self.font_spinner = pygame.font.Font(None, 40)
+
+    def update_playfield_layout(self):
+        """Calculate playfield scaling and position with 512x384 aspect ratio."""
+        # Top HUD height ~60px, bottom timeline ~60px
+        hud_h = 70
+        timeline_h = 60
+        avail_w = self.width * 0.92
+        avail_h = (self.height - hud_h - timeline_h) * 0.92
+
+        scale_x = avail_w / 512.0
+        scale_y = avail_h / 384.0
+        self.scale = min(scale_x, scale_y)
+
+        pf_w = 512.0 * self.scale
+        pf_h = 384.0 * self.scale
+        self.offset_x = (self.width - pf_w) / 2.0
+        self.offset_y = hud_h + ((self.height - hud_h - timeline_h) - pf_h) / 2.0
+
+        self.pf_rect = pygame.Rect(
+            int(self.offset_x), int(self.offset_y), int(pf_w), int(pf_h)
+        )
+        self.screen_radius = max(8.0, self.beatmap.circle_radius * self.scale)
+
+    def osu_to_screen(self, x: float, y: float) -> Tuple[int, int]:
+        return int(self.offset_x + x * self.scale), int(self.offset_y + y * self.scale)
+
+    def build_slider_caches(self):
+        """Pre-render slider paths to surfaces for high performance."""
+        self.slider_caches.clear()
+        r = self.screen_radius
+        pad = int(r + 6)
+
+        for obj in self.beatmap.hit_objects:
+            if obj.kind != "slider" or not obj.path_points:
+                continue
+
+            # Compute screen coords of path points
+            pts = [self.osu_to_screen(p[0], p[1]) for p in obj.path_points]
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            min_x, max_x = min(xs) - pad, max(xs) + pad
+            min_y, max_y = min(ys) - pad, max(ys) + pad
+            surf_w = max(10, max_x - min_x)
+            surf_h = max(10, max_y - min_y)
+
+            surf = pygame.Surface((surf_w, surf_h), pygame.SRCALPHA)
+            combo_col = self.beatmap.combo_colours[obj.combo_index]
+
+            # Relative points
+            rel_pts = [(p[0] - min_x, p[1] - min_y) for p in pts]
+
+            # Step along path to stamp circles
+            step = max(1, int(r * 0.2))
+            for i in range(0, len(rel_pts), step):
+                pt = rel_pts[i]
+                # Outer border
+                pygame.draw.circle(surf, (220, 220, 220, 220), pt, int(r))
+            if rel_pts:
+                pygame.draw.circle(surf, (220, 220, 220, 220), rel_pts[-1], int(r))
+
+            # Inner track
+            for i in range(0, len(rel_pts), step):
+                pt = rel_pts[i]
+                pygame.draw.circle(surf, (40, 40, 48, 230), pt, int(r - 3.5))
+            if rel_pts:
+                pygame.draw.circle(surf, (40, 40, 48, 230), rel_pts[-1], int(r - 3.5))
+
+            # Inner colored tint
+            for i in range(0, len(rel_pts), step * 2):
+                pt = rel_pts[i]
+                pygame.draw.circle(
+                    surf,
+                    (combo_col[0], combo_col[1], combo_col[2], 90),
+                    pt,
+                    int(r * 0.55),
+                )
+
+            self.slider_caches[obj.id] = (surf, min_x, min_y)
+
+    def seek_to(self, time_ms: float):
+        self.current_time_ms = max(0.0, min(self.last_time, time_ms))
+
+    def step(self, dt_ms: float):
+        if self.is_playing:
+            self.current_time_ms += dt_ms * self.playback_speed
+            if self.current_time_ms > self.last_time:
+                self.current_time_ms = self.start_time
+
+    def render(self):
+        self.screen.fill((16, 17, 24))
+
+        # Draw Playfield Background and Border
+        pygame.draw.rect(self.screen, (24, 26, 36), self.pf_rect)
+        pygame.draw.rect(self.screen, (70, 75, 95), self.pf_rect, 2)
+
+        # Coordinate crosshair in center (256, 192)
+        cx, cy = self.osu_to_screen(256, 192)
+        pygame.draw.line(self.screen, (40, 43, 56), (cx - 20, cy), (cx + 20, cy), 1)
+        pygame.draw.line(self.screen, (40, 43, 56), (cx, cy - 20), (cx, cy + 20), 1)
+
+        # Render Hit Objects
+        self.render_hit_objects()
+
+        # Render Replay Cursor if active
+        if self.replay and self.show_replay:
+            self.render_replay_cursor()
+
+        # Render HUD & Diagnostics
+        if self.show_hud:
+            self.render_hud()
+
+        # Render Technical Inspector HUD if toggled
+        if self.show_tech_hud:
+            self.render_tech_hud()
+
+        # Render Timeline Seekbar
+        self.render_timeline()
+
+        # Render Toast notification
+        if self.toast_message and time.time() < self.toast_until:
+            self.render_toast()
+
+        # Render Verification Details if toggled
+        if self.show_verification_detail:
+            self.render_verification_overlay()
+
+    def render_replay_cursor(self):
+        pos, keys = self.replay.cursor_at(self.current_time_ms)
+        if pos is None:
+            return
+        sx, sy = self.osu_to_screen(pos[0], pos[1])
+
+        # Update trail
+        self.replay_trail.append((sx, sy))
+        if len(self.replay_trail) > 12:
+            self.replay_trail.pop(0)
+
+        n_trail = len(self.replay_trail)
+        for idx, (tx, ty) in enumerate(self.replay_trail):
+            frac = (idx + 1) / n_trail
+            alpha = int(frac * 160)
+            radius = max(2, int(frac * 5))
+            trail_surf = pygame.Surface(
+                (radius * 2 + 2, radius * 2 + 2), pygame.SRCALPHA
+            )
+            pygame.draw.circle(
+                trail_surf, (255, 220, 90, alpha), (radius + 1, radius + 1), radius
+            )
+            self.screen.blit(trail_surf, (tx - radius - 1, ty - radius - 1))
+
+        # Cursor ring (lights yellow when any key is pressed)
+        is_clicking = bool(keys & 15)
+        ring_col = (255, 235, 80) if is_clicking else (255, 255, 255)
+        pygame.draw.circle(self.screen, ring_col, (sx, sy), 11, 2)
+        pygame.draw.circle(self.screen, (255, 170, 40), (sx, sy), 5)
+
+    def render_key_overlay(self):
+        _, keys = self.replay.cursor_at(self.current_time_ms)
+        key_states = [
+            ("K1", bool(keys & 4)),
+            ("K2", bool(keys & 8)),
+            ("M1", bool(keys & 1)),
+            ("M2", bool(keys & 2)),
+        ]
+        kw, kh = 32, 28
+        start_x = self.width - (kw + 6) * 4 - 20
+        start_y = 75
+        for i, (label, active) in enumerate(key_states):
+            kx = start_x + i * (kw + 6)
+            bg_col = (255, 180, 50) if active else (35, 38, 52)
+            border_col = (255, 220, 100) if active else (70, 75, 100)
+            text_col = (20, 20, 20) if active else (180, 185, 200)
+            pygame.draw.rect(
+                self.screen, bg_col, (kx, start_y, kw, kh), border_radius=4
+            )
+            pygame.draw.rect(
+                self.screen, border_col, (kx, start_y, kw, kh), 1, border_radius=4
+            )
+            t_surf = self.font_bold.render(label, True, text_col)
+            self.screen.blit(
+                t_surf, t_surf.get_rect(center=(kx + kw // 2, start_y + kh // 2))
+            )
+
+    def render_toast(self):
+        rem = self.toast_until - time.time()
+        alpha = min(1.0, max(0.0, rem * 2.0))
+        t_surf = self.font_bold.render(self.toast_message, True, (255, 255, 255))
+        tw = t_surf.get_width() + 28
+        th = 36
+        tx = (self.width - tw) // 2
+        ty = self.height - 95
+        surf = pygame.Surface((tw, th), pygame.SRCALPHA)
+        surf.fill((25, 28, 40, int(alpha * 240)))
+        pygame.draw.rect(
+            surf, (100, 150, 255, int(alpha * 255)), (0, 0, tw, th), 1, border_radius=6
+        )
+        surf.blit(t_surf, (14, 8))
+        self.screen.blit(surf, (tx, ty))
+
+    def render_hit_objects(self):
+        t = self.current_time_ms
+        preempt, fade_in = self.beatmap.ar_preempt_fadein
+        r = self.screen_radius
+
+        # Find visible objects in reverse so earlier objects are drawn on top
+        visible_objects = []
+        for obj in self.beatmap.hit_objects:
+            appear_t = obj.time - preempt
+            # Fade out time after object ends
+            post_t = 250.0
+            disappear_t = obj.end_time + post_t
+
+            if appear_t <= t <= disappear_t:
+                visible_objects.append(obj)
+
+        # Draw in order of time
+        for obj in reversed(visible_objects):
+            if obj.kind == "slider":
+                self.render_slider(obj, t, preempt, fade_in, r)
+            elif obj.kind == "circle":
+                self.render_circle(obj, t, preempt, fade_in, r)
+            elif obj.kind == "spinner":
+                self.render_spinner(obj, t, preempt, fade_in)
+
+    def render_circle(
+        self, obj: HitObject, t: float, preempt: float, fade_in: float, r: float
+    ):
+        sx, sy = self.osu_to_screen(obj.stacked_x, obj.stacked_y)
+        combo_col = self.beatmap.combo_colours[obj.combo_index]
+
+        elapsed = t - (obj.time - preempt)
+        alpha = min(1.0, max(0.0, elapsed / fade_in))
+
+        # Hit circle fade out if t > obj.time
+        if t > obj.time:
+            fade_out_p = (t - obj.time) / 200.0
+            alpha = max(0.0, 1.0 - fade_out_p)
+
+        int_alpha = int(alpha * 255)
+        if int_alpha <= 0:
+            return
+
+        # Circle body
+        body_surf = pygame.Surface((int(r * 2 + 6), int(r * 2 + 6)), pygame.SRCALPHA)
+        center = (int(r + 3), int(r + 3))
+
+        # White border
+        pygame.draw.circle(body_surf, (255, 255, 255, int_alpha), center, int(r))
+        # Inner combo body
+        pygame.draw.circle(
+            body_surf,
+            (combo_col[0], combo_col[1], combo_col[2], int_alpha),
+            center,
+            int(r - 3),
+        )
+        # Inner accent
+        pygame.draw.circle(
+            body_surf,
+            (min(255, combo_col[0] + 50), min(255, combo_col[1] + 50), min(255, combo_col[2] + 50), int_alpha),
+            center,
+            int(r * 0.45),
+            2,
+        )
+
+        # Combo number
+        if t <= obj.time:
+            num_surf = self.font_combo.render(str(obj.combo_number), True, (255, 255, 255))
+            num_rect = num_surf.get_rect(center=center)
+            body_surf.blit(num_surf, num_rect)
+
+        self.screen.blit(body_surf, (sx - center[0], sy - center[1]))
+
+        # Approach Circle (shrinks from 3.5x to 1x radius)
+        if t < obj.time:
+            p = elapsed / preempt
+            app_scale = 1.0 + (1.0 - p) * 2.5
+            app_r = int(r * app_scale)
+            if app_r > r:
+                app_surf = pygame.Surface(
+                    (app_r * 2 + 4, app_r * 2 + 4), pygame.SRCALPHA
+                )
+                app_center = (app_r + 2, app_r + 2)
+                pygame.draw.circle(
+                    app_surf,
+                    (combo_col[0], combo_col[1], combo_col[2], int(min(1.0, alpha * 1.5) * 255)),
+                    app_center,
+                    app_r,
+                    2,
+                )
+                self.screen.blit(
+                    app_surf, (sx - app_center[0], sy - app_center[1])
+                )
+
+    def render_slider(
+        self, obj: HitObject, t: float, preempt: float, fade_in: float, r: float
+    ):
+        elapsed = t - (obj.time - preempt)
+        alpha = min(1.0, max(0.0, elapsed / fade_in))
+        if t > obj.end_time:
+            fade_out_p = (t - obj.end_time) / 200.0
+            alpha = max(0.0, 1.0 - fade_out_p)
+
+        int_alpha = int(alpha * 255)
+        if int_alpha <= 0:
+            return
+
+        combo_col = self.beatmap.combo_colours[obj.combo_index]
+
+        # Blit cached slider track
+        cached = self.slider_caches.get(obj.id)
+        if cached:
+            surf, mx, my = cached
+            # Stacking offset
+            dx = int((obj.stacked_x - obj.x) * self.scale)
+            dy = int((obj.stacked_y - obj.y) * self.scale)
+            if int_alpha < 255:
+                # Apply alpha
+                track_surf = surf.copy()
+                track_surf.set_alpha(int_alpha)
+                self.screen.blit(track_surf, (mx + dx, my + dy))
+            else:
+                self.screen.blit(surf, (mx + dx, my + dy))
+
+        # Slider Head and Tail
+        head_x, head_y = self.osu_to_screen(obj.stacked_x, obj.stacked_y)
+        tail_pos = obj.position_at_progress(1.0)
+        tail_x, tail_y = self.osu_to_screen(tail_pos[0], tail_pos[1])
+
+        # Tail circle
+        pygame.draw.circle(self.screen, (220, 220, 220), (tail_x, tail_y), int(r), 2)
+
+        # Repeat arrows if spans > 1
+        if obj.spans > 1:
+            # Head repeat arrow if odd remaining spans
+            # Tail repeat arrow if even remaining spans
+            arrow_color = (255, 230, 80)
+            pygame.draw.circle(self.screen, arrow_color, (tail_x, tail_y), int(r * 0.45), 2)
+            if obj.spans > 2:
+                pygame.draw.circle(self.screen, arrow_color, (head_x, head_y), int(r * 0.45), 2)
+
+        # Head circle
+        self.render_circle(obj, t, preempt, fade_in, r)
+
+        # Slider Ball and Follow Ring when slider is active
+        if obj.time <= t <= obj.end_time:
+            active_elapsed = t - obj.time
+            span_idx = int(active_elapsed / obj.span_duration) if obj.span_duration > 0 else 0
+            span_idx = min(span_idx, obj.spans - 1)
+            span_prog = (
+                (active_elapsed - span_idx * obj.span_duration) / obj.span_duration
+                if obj.span_duration > 0
+                else 0.0
+            )
+
+            # Reversing direction on odd spans
+            curve_prog = 1.0 - span_prog if (span_idx % 2 == 1) else span_prog
+
+            bx, by = obj.position_at_progress(curve_prog)
+            bsx, bsy = self.osu_to_screen(bx, by)
+
+            # Follow ring
+            pulse = math.sin(t * 0.015) * 3.0
+            follow_r = int(r * 1.5 + pulse)
+            pygame.draw.circle(self.screen, (255, 255, 255, 140), (bsx, bsy), follow_r, 2)
+
+            # Ball
+            pygame.draw.circle(self.screen, (255, 255, 255), (bsx, bsy), int(r * 0.85))
+            pygame.draw.circle(self.screen, (20, 20, 30), (bsx, bsy), int(r * 0.55))
+
+    def render_spinner(self, obj: HitObject, t: float, preempt: float, fade_in: float):
+        sx, sy = self.osu_to_screen(256, 192)
+        total_dur = obj.spinner_end_time - obj.time
+        if total_dur <= 0:
+            return
+
+        elapsed = t - (obj.time - preempt)
+        alpha = min(1.0, max(0.0, elapsed / fade_in))
+        if t > obj.spinner_end_time:
+            alpha = max(0.0, 1.0 - (t - obj.spinner_end_time) / 200.0)
+
+        int_alpha = int(alpha * 255)
+        if int_alpha <= 0:
+            return
+
+        spin_r = int(140 * self.scale)
+
+        # Outer ring
+        pygame.draw.circle(self.screen, (200, 200, 220), (sx, sy), spin_r, 3)
+
+        # Spinning blades / progress
+        if t >= obj.time:
+            prog = min(1.0, (t - obj.time) / total_dur)
+            # Rotating crosshairs
+            angle = (t - obj.time) * 0.01
+            for k in range(4):
+                a = angle + k * (math.pi / 2.0)
+                px = sx + int(math.cos(a) * spin_r * 0.8)
+                py = sy + int(math.sin(a) * spin_r * 0.8)
+                pygame.draw.line(self.screen, (255, 180, 50), (sx, sy), (px, py), 2)
+
+            # Progress gauge ring
+            inner_r = int(spin_r * 0.9)
+            rect = pygame.Rect(sx - inner_r, sy - inner_r, inner_r * 2, inner_r * 2)
+            pygame.draw.arc(self.screen, (0, 230, 255), rect, 0, prog * 2.0 * math.pi, 5)
+
+            # Spinner Text
+            txt = self.font_spinner.render("SPIN!", True, (255, 255, 255))
+            self.screen.blit(txt, txt.get_rect(center=(sx, sy - spin_r - 25)))
+        else:
+            # Preempt warning
+            p = elapsed / preempt
+            warn_r = int(spin_r * (1.0 + (1.0 - p) * 1.5))
+            pygame.draw.circle(self.screen, (255, 120, 50), (sx, sy), warn_r, 2)
+
+    def render_hud(self):
+        # Top HUD bar
+        hud_h = 70
+        hud_rect = pygame.Rect(0, 0, self.width, hud_h)
+        pygame.draw.rect(self.screen, (20, 22, 30), hud_rect)
+        pygame.draw.line(self.screen, (50, 55, 75), (0, hud_h), (self.width, hud_h), 1)
+
+        # Title & Artist
+        title_str = f"{self.beatmap.artist} - {self.beatmap.title} [{self.beatmap.version_name}]"
+        t_surf = self.font_title.render(title_str, True, (240, 240, 245))
+        self.screen.blit(t_surf, (16, 8))
+
+        # Difficulty & Stats
+        un_tp, act_tp = self.beatmap.get_timing_at(self.current_time_ms)
+        bpm_str = f"{un_tp.bpm:.1f}" if un_tp else "120.0"
+        sv_str = f"{act_tp.sv_multiplier:.2f}x" if act_tp else "1.00x"
+
+        replay_info = ""
+        if self.replay:
+            replay_info = f"  |  Replay: {self.replay.player} ({self.replay.score:,}) [C: Cursor]"
+
+        stats_str = (
+            f"CS: {self.beatmap.cs:.1f}  AR: {self.beatmap.ar:.1f}  "
+            f"OD: {self.beatmap.od:.1f}  HP: {self.beatmap.hp:.1f}  |  "
+            f"BPM: {bpm_str}  SV: {sv_str}  |  Objects: {len(self.beatmap.hit_objects)}"
+            f"{replay_info}"
+        )
+        s_surf = self.font_small.render(stats_str, True, (160, 165, 185))
+        self.screen.blit(s_surf, (16, 38))
+
+        # Right side: Speed and Play/Pause status
+        state_str = "PLAYING" if self.is_playing else "PAUSED"
+        state_col = (70, 220, 120) if self.is_playing else (255, 180, 50)
+        speed_str = f"Speed: {self.playback_speed:.2f}x  [{state_str}]"
+        st_surf = self.font_bold.render(speed_str, True, state_col)
+        self.screen.blit(st_surf, (self.width - st_surf.get_width() - 16, 10))
+
+        # Engine source badge
+        if self.active_source == "rust":
+            badge_text = "Source: Rust rosea-mvp-v1 [S: Switch to Python]"
+            badge_col = (30, 130, 60)
+        else:
+            badge_text = "Source: Python Standalone [S: Switch to Rust]"
+            badge_col = (25, 95, 160)
+
+        b_surf = self.font_small.render(badge_text, True, (255, 255, 255))
+        badge_w = b_surf.get_width() + 16
+        badge_h = 24
+        badge_x = self.width - badge_w - 16
+        badge_y = 36
+        pygame.draw.rect(
+            self.screen, badge_col, (badge_x, badge_y, badge_w, badge_h), border_radius=4
+        )
+        self.screen.blit(b_surf, (badge_x + 8, badge_y + 4))
+
+        # Maps Button [M] Карты
+        btn_maps_text = "[M] Карты"
+        m_surf = self.font_small.render(btn_maps_text, True, (255, 255, 255))
+        m_w = m_surf.get_width() + 16
+        m_h = 24
+        m_x = badge_x - m_w - 10
+        m_y = 36
+        self.btn_maps_rect = pygame.Rect(m_x, m_y, m_w, m_h)
+
+        mx, my = pygame.mouse.get_pos()
+        is_m_hover = self.btn_maps_rect.collidepoint(mx, my)
+        m_col = (190, 24, 93) if is_m_hover else (130, 20, 65)
+        pygame.draw.rect(self.screen, m_col, self.btn_maps_rect, border_radius=4)
+        pygame.draw.rect(self.screen, (244, 114, 182), self.btn_maps_rect, 1, border_radius=4)
+        self.screen.blit(m_surf, (m_x + 8, m_y + 4))
+
+        # Tech Info Button [T] Тех. инфо
+        btn_tech_text = "[T] Тех. инфо"
+        t_surf = self.font_small.render(btn_tech_text, True, (255, 255, 255))
+        t_w = t_surf.get_width() + 16
+        t_h = 24
+        t_x = m_x - t_w - 10
+        t_y = 36
+        self.btn_tech_rect = pygame.Rect(t_x, t_y, t_w, t_h)
+
+        is_t_hover = self.btn_tech_rect.collidepoint(mx, my)
+        t_col = (59, 130, 246) if (self.show_tech_hud or is_t_hover) else (30, 64, 140)
+        pygame.draw.rect(self.screen, t_col, self.btn_tech_rect, border_radius=4)
+        pygame.draw.rect(self.screen, (96, 165, 250), self.btn_tech_rect, 1, border_radius=4)
+        self.screen.blit(t_surf, (t_x + 8, t_y + 4))
+
+        # Replay Key Overlay if replay is active
+        if self.replay and self.show_replay:
+            self.render_key_overlay()
+
+    def render_timeline(self):
+        timeline_y = self.height - 52
+        timeline_h = 24
+        pad_x = 20
+        bar_w = self.width - pad_x * 2
+
+        # Seekbar background
+        bar_rect = pygame.Rect(pad_x, timeline_y, bar_w, timeline_h)
+        pygame.draw.rect(self.screen, (28, 30, 42), bar_rect, border_radius=4)
+        pygame.draw.rect(self.screen, (60, 65, 85), bar_rect, 1, border_radius=4)
+
+        # Object tick markers on timeline
+        dur = max(1.0, self.last_time)
+        for obj in self.beatmap.hit_objects:
+            tx = pad_x + int((obj.time / dur) * bar_w)
+            if pad_x <= tx <= pad_x + bar_w:
+                col = (80, 160, 255) if obj.kind == "circle" else (255, 200, 50)
+                pygame.draw.line(self.screen, col, (tx, timeline_y + 2), (tx, timeline_y + timeline_h - 3), 1)
+
+        # Progress fill
+        prog = max(0.0, min(1.0, self.current_time_ms / dur))
+        fill_w = int(bar_w * prog)
+        if fill_w > 0:
+            fill_rect = pygame.Rect(pad_x, timeline_y, fill_w, timeline_h)
+            pygame.draw.rect(self.screen, (50, 120, 220), fill_rect, border_radius=4)
+
+        # Scrubber handle
+        handle_x = pad_x + fill_w
+        pygame.draw.circle(self.screen, (255, 255, 255), (handle_x, timeline_y + timeline_h // 2), 7)
+        pygame.draw.circle(self.screen, (50, 120, 220), (handle_x, timeline_y + timeline_h // 2), 4)
+
+        # Time labels & comprehensive controls hint
+        cur_min = int(self.current_time_ms // 60000)
+        cur_sec = (self.current_time_ms % 60000) / 1000.0
+        tot_min = int(self.last_time // 60000)
+        tot_sec = (self.last_time % 60000) / 1000.0
+
+        time_str = (
+            f"{cur_min:02d}:{cur_sec:06.3f} / {tot_min:02d}:{tot_sec:06.3f}  "
+            f"[Space: Pause | \u2190/\u2192: Seek | \u2191/\u2193: Speed | T: Инфо | M: Карты | [/]: Карта | S: Engine | C: Cursor | V: Verify | Tab: HUD]"
+        )
+        t_surf = self.font_small.render(time_str, True, (160, 165, 185))
+        self.screen.blit(t_surf, (pad_x, self.height - 22))
+
+    def render_tech_hud(self):
+        """Render in-depth technical inspection overlay with real-time parser/math metrics."""
+        panel_w = 450
+        panel_h = min(470, self.height - 140)
+        panel_x = 16
+        panel_y = 76
+
+        surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        surf.fill((14, 16, 24, 235))
+        pygame.draw.rect(surf, (70, 75, 105), (0, 0, panel_w, panel_h), 1, border_radius=6)
+
+        # Header
+        head_txt = self.font_bold.render("🛠 Технический инспектор (T: скрыть)", True, (244, 114, 182))
+        surf.blit(head_txt, (14, 10))
+
+        # 1. Engine & File info
+        t = self.current_time_ms
+        engine_str = "Rust (rosea-core v14)" if self.active_source == "rust" else "Python Standalone"
+        eng_col = (74, 222, 128) if self.active_source == "rust" else (56, 189, 248)
+
+        # 2. Timing calculations
+        un_tp, act_tp = self.beatmap.get_timing_at(t)
+        bpm = un_tp.bpm if un_tp else 120.0
+        beat_len = un_tp.beat_length if un_tp else 500.0
+        sv = act_tp.sv_multiplier if act_tp else 1.0
+        tp_line = un_tp.line if un_tp else "?"
+
+        # 3. Hit Windows formulas (osu!stable)
+        od = self.beatmap.od
+        w300 = 80.0 - 6.0 * od
+        w100 = 140.0 - 8.0 * od
+        w50 = 200.0 - 10.0 * od
+
+        # 4. CS & AR metrics
+        cs = self.beatmap.cs
+        ar = self.beatmap.ar
+        circle_r_osu = 54.4 - 4.48 * cs
+        circle_r_screen = circle_r_osu * self.scale
+        preempt, fade_in = self.beatmap.ar_preempt_fadein
+
+        # 5. Active / upcoming hit object
+        active_obj = None
+        for obj in self.beatmap.hit_objects:
+            if obj.time - preempt <= t <= obj.end_time + 100.0:
+                active_obj = obj
+                break
+        if not active_obj:
+            for obj in self.beatmap.hit_objects:
+                if obj.time > t:
+                    active_obj = obj
+                    break
+
+        # 6. Replay metrics
+        cursor_str = "—"
+        dist_str = "—"
+        if self.replay:
+            pos, keys = self.replay.cursor_at(t)
+            if pos:
+                cursor_str = f"({pos[0]:.1f}, {pos[1]:.1f}) osu!px"
+                if active_obj:
+                    dx = pos[0] - active_obj.x
+                    dy = pos[1] - active_obj.y
+                    dist = math.hypot(dx, dy)
+                    in_circle = "✔ ВНУТРИ" if dist <= circle_r_osu else "ВНЕ КРУГА"
+                    dist_str = f"{dist:.1f} osu!px [{in_circle}]"
+
+        lines = [
+            ("Движок:", engine_str, eng_col),
+            ("Файл:", os.path.basename(self.beatmap_path), (220, 225, 240)),
+            ("Время карты:", f"{t:08.2f} мс  ({t/1000.0:.2f} сек)", (250, 204, 21)),
+            ("─── ⏱ Тайминг & Скорость ───", "", (100, 110, 140)),
+            ("BPM / BeatLen:", f"{bpm:.1f} BPM  ({beat_len:.2f} мс)", (220, 225, 240)),
+            ("Скорость слайдеров (SV):", f"{sv:.2f}x  (TimingPoint строка {tp_line})", (220, 225, 240)),
+            ("─── 📐 Сложность & Окна попаданий (OD/AR/CS) ───", "", (100, 110, 140)),
+            ("Радиус круга (CS):", f"{circle_r_osu:.2f} osu!px  ({circle_r_screen:.1f} px на экране)", (220, 225, 240)),
+            ("Появление круга (AR):", f"Preempt {preempt:.1f} мс, FadeIn {fade_in:.1f} мс", (220, 225, 240)),
+            ("Окна точности (OD):", f"300: ±{w300:.1f}мс | 100: ±{w100:.1f}мс | 50: ±{w50:.1f}мс", (167, 139, 250)),
+        ]
+
+        if active_obj:
+            obj_kind_str = active_obj.kind.capitalize()
+            if active_obj.kind == "slider":
+                obj_kind_str = f"Slider ({active_obj.curve_type}, spans={active_obj.spans}, len={active_obj.declared_length:.1f})"
+            lines.append(("─── 🎯 Активный объект ноты ───", "", (100, 110, 140)))
+            lines.append(("Объект:", f"#{active_obj.id} [Строка {active_obj.line}]: {obj_kind_str}", (244, 114, 182)))
+            lines.append(("Время начала:", f"{active_obj.time:.1f} мс (дельта {active_obj.time - t:+.1f} мс)", (220, 225, 240)))
+            lines.append(("Координаты:", f"({active_obj.x:.1f}, {active_obj.y:.1f}) osu!px", (220, 225, 240)))
+        else:
+            lines.append(("─── 🎯 Активный объект ноты ───", "", (100, 110, 140)))
+            lines.append(("Объект:", "Нет активных объектов на этом времени", (140, 145, 165)))
+
+        if self.replay:
+            lines.append(("─── 🎮 Реплей игрока ───", "", (100, 110, 140)))
+            lines.append(("Курсор:", cursor_str, (220, 225, 240)))
+            lines.append(("Дистанция до цели:", dist_str, (220, 225, 240)))
+
+        y_pos = 36
+        for item in lines:
+            if y_pos + 18 > panel_h:
+                break
+            label, val, val_col = item
+            if not val:
+                lbl_surf = self.font_small.render(label, True, val_col)
+                surf.blit(lbl_surf, (14, y_pos))
+                y_pos += 20
+            else:
+                lbl_surf = self.font_small.render(label, True, (148, 163, 184))
+                surf.blit(lbl_surf, (14, y_pos))
+                val_surf = self.font_small.render(val, True, val_col)
+                surf.blit(val_surf, (175, y_pos))
+                y_pos += 18
+
+        self.screen.blit(surf, (panel_x, panel_y))
+
+    def render_verification_overlay(self):
+        """Show full comparison report between Rust and Python parsers."""
+        overlay_w = min(800, self.width - 60)
+        overlay_h = min(480, self.height - 120)
+        ox = (self.width - overlay_w) // 2
+        oy = (self.height - overlay_h) // 2
+
+        surf = pygame.Surface((overlay_w, overlay_h), pygame.SRCALPHA)
+        surf.fill((16, 18, 26, 245))
+        pygame.draw.rect(surf, (100, 110, 150), (0, 0, overlay_w, overlay_h), 2)
+
+        # Header
+        head = self.font_title.render("Rust rosea-core Parser Diagnostics", True, (255, 255, 255))
+        surf.blit(head, (20, 15))
+
+        st = self.verification.status
+        col = (70, 220, 120) if st == "PASS" else ((255, 180, 50) if st == "SKIPPED_UNSUPPORTED" else (240, 70, 70))
+        st_surf = self.font_bold.render(f"Status: {st}", True, col)
+        surf.blit(st_surf, (20, 48))
+
+        active_str = f"Active Rendering Data: {'Rust Parser (rosea-core)' if self.active_source == 'rust' else 'Python Parser (Standalone)'}"
+        act_surf = self.font_small.render(active_str, True, (100, 220, 255))
+        surf.blit(act_surf, (350, 52))
+
+        lines = [
+            f"Beatmap: {os.path.basename(self.beatmap_path)}",
+            f"Total Objects in Map: {len(self.py_beatmap.hit_objects)}",
+            f"Timing Points: {len(self.py_beatmap.timing_points)}",
+            f"Rust Supported Subset: {'Yes (Circles & L-Sliders)' if self.verification.rust_supported else 'No (Map contains B/P/C curves, spinners, or non-finite data)'}",
+            "",
+            "Verification Summary:",
+            f"  {self.verification.reason}",
+        ]
+
+        if self.verification.mismatches:
+            lines.append("")
+            lines.append("Discrepancies:")
+            for m in self.verification.mismatches[:8]:
+                lines.append(f"  • {m}")
+
+        y_off = 80
+        for line in lines:
+            txt = self.font_main.render(line, True, (210, 215, 230))
+            surf.blit(txt, (20, y_off))
+            y_off += 24
+
+        close_hint = self.font_small.render("Press 'V' or 'Tab' to close this overlay  |  Press 'S' to toggle Engine", True, (140, 145, 165))
+        surf.blit(close_hint, (20, overlay_h - 28))
+
+        self.screen.blit(surf, (ox, oy))
+
+    def handle_mouse_seek(self, mouse_x: int):
+        pad_x = 20
+        bar_w = self.width - pad_x * 2
+        frac = max(0.0, min(1.0, (mouse_x - pad_x) / bar_w))
+        self.seek_to(frac * self.last_time)
+
+    def run(self, max_frames: Optional[int] = None):
+        running = True
+        frame_count = 0
+        last_ticks = pygame.time.get_ticks()
+
+        while running:
+            # Check for map selection from non-blocking companion window
+            if self.map_browser:
+                new_map = self.map_browser.get_selected_map()
+                if new_map:
+                    self.load_beatmap(new_map)
+
+            current_ticks = pygame.time.get_ticks()
+            dt = current_ticks - last_ticks
+            last_ticks = current_ticks
+            dt = min(100, max(1, dt))
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+
+                elif event.type == pygame.VIDEORESIZE:
+                    self.width = max(640, event.w)
+                    self.height = max(480, event.h)
+                    self.screen = pygame.display.set_mode(
+                        (self.width, self.height), pygame.RESIZABLE
+                    )
+                    self.update_playfield_layout()
+                    self.build_slider_caches()
+
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+                    elif event.key == pygame.K_SPACE:
+                        self.is_playing = not self.is_playing
+                    elif event.key == pygame.K_m:
+                        self.open_map_browser()
+                    elif event.key in (pygame.K_PAGEUP, pygame.K_LEFTBRACKET):
+                        self.switch_relative_map(-1)
+                    elif event.key in (pygame.K_PAGEDOWN, pygame.K_RIGHTBRACKET):
+                        self.switch_relative_map(1)
+                    elif event.key == pygame.K_LEFT:
+                        mods = pygame.key.get_mods()
+                        step = 5000.0 if (mods & pygame.KMOD_SHIFT) else 2000.0
+                        self.seek_to(self.current_time_ms - step)
+                    elif event.key == pygame.K_RIGHT:
+                        mods = pygame.key.get_mods()
+                        step = 5000.0 if (mods & pygame.KMOD_SHIFT) else 2000.0
+                        self.seek_to(self.current_time_ms + step)
+                    elif event.key == pygame.K_UP:
+                        if self.speed_idx < len(self.speed_options) - 1:
+                            self.speed_idx += 1
+                            self.playback_speed = self.speed_options[self.speed_idx]
+                    elif event.key == pygame.K_DOWN:
+                        if self.speed_idx > 0:
+                            self.speed_idx -= 1
+                            self.playback_speed = self.speed_options[self.speed_idx]
+                    elif event.key in (pygame.K_r, pygame.K_HOME):
+                        self.seek_to(self.start_time)
+                    elif event.key == pygame.K_s:
+                        self.toggle_engine_source()
+                    elif event.key == pygame.K_c:
+                        if self.replay:
+                            self.show_replay = not self.show_replay
+                            self.set_toast(
+                                f"Replay cursor {'enabled' if self.show_replay else 'disabled'}",
+                                1.5,
+                            )
+                        else:
+                            self.set_toast("No .osr replay available for this map", 2.0)
+                    elif event.key == pygame.K_v:
+                        self.show_verification_detail = not self.show_verification_detail
+                    elif event.key == pygame.K_t:
+                        self.show_tech_hud = not self.show_tech_hud
+                        self.set_toast(
+                            f"Технический инспектор {'включён' if self.show_tech_hud else 'выключен'}",
+                            1.5,
+                        )
+                    elif event.key in (pygame.K_TAB, pygame.K_F1):
+                        self.show_hud = not self.show_hud
+
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 1:
+                        mx, my = event.pos
+                        if self.btn_maps_rect.collidepoint(mx, my):
+                            self.open_map_browser()
+                        elif self.btn_tech_rect.collidepoint(mx, my):
+                            self.show_tech_hud = not self.show_tech_hud
+                            self.set_toast(
+                                f"Технический инспектор {'включён' if self.show_tech_hud else 'выключен'}",
+                                1.5,
+                            )
+                        elif my >= self.height - 60:
+                            self.is_scrubbing = True
+                            self.handle_mouse_seek(mx)
+
+                elif event.type == pygame.MOUSEBUTTONUP:
+                    if event.button == 1:
+                        self.is_scrubbing = False
+
+                elif event.type == pygame.MOUSEMOTION:
+                    if self.is_scrubbing:
+                        self.handle_mouse_seek(event.pos[0])
+
+            self.step(dt)
+            self.render()
+            pygame.display.flip()
+
+            frame_count += 1
+            if max_frames and frame_count >= max_frames:
+                break
+
+            self.clock.tick(60)
+
+        if self.map_browser:
+            self.map_browser.hide()
+        pygame.quit()
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Rosea osu! Beatmap Visualizer & Tester")
+    parser.add_argument("beatmap", nargs="?", default="tests/data/01_micro/2dearbrave.osu", help="Path to .osu beatmap")
+    parser.add_argument("--replay", type=str, default=None, help="Path to .osr replay file to visualize alongside beatmap")
+    parser.add_argument("--source", choices=["auto", "rust", "python"], default="auto", help="Data source engine (auto, rust, python)")
+    parser.add_argument("--test", action="store_true", help="Run automated test suite verifying Rust parser across corpus")
+    parser.add_argument("--verify", action="store_true", help="Verify single map against Rust parser and exit")
+    parser.add_argument("--headless", action="store_true", help="Run visualizer in headless dummy mode for testing")
+    parser.add_argument("--frames", type=int, default=None, help="Exit after N frames (useful for automated testing)")
+    parser.add_argument("--width", type=int, default=1024, help="Window width")
+    parser.add_argument("--height", type=int, default=768, help="Window height")
+
+    args = parser.parse_args()
+
+    if args.test:
+        print("=== Running Rosea Rust Parser Verification Test Suite ===")
+        report = run_full_corpus_verification()
+        print(f"Total Maps Tested: {report['total']}")
+        print(f"Fully Verified with Rust: {len(report['passed'])}")
+        for r in report['passed']:
+            print(f"  [PASS] {os.path.basename(r.file_path)}: {r.reason}")
+        print(f"\nSkipped (Gracefully rejected unsupported curves/spinners): {len(report['skipped'])}")
+        for r in report['skipped']:
+            print(f"  [SKIP] {os.path.basename(r.file_path)}: {r.reason}")
+        print(f"\nFailed: {len(report['failed'])}")
+        for r in report['failed']:
+            print(f"  [FAIL] {os.path.basename(r.file_path)}: {r.reason}")
+        if report['failed']:
+            sys.exit(1)
+        print("\nAll tests passed successfully!")
+        return
+
+    if args.verify:
+        res = verify_beatmap(args.beatmap)
+        print(f"Verification Report for {args.beatmap}:")
+        print(f"  Status: {res.status}")
+        print(f"  Reason: {res.reason}")
+        if res.mismatches:
+            print("  Discrepancies:")
+            for m in res.mismatches:
+                print(f"    - {m}")
+        return
+
+    # Visualizer mode
+    beatmap_path = args.beatmap
+    replay_path = args.replay
+
+    # If the user passed a .osr replay as the first positional argument,
+    # automatically look for a matching .osu beatmap next to it!
+    if beatmap_path.lower().endswith(".osr") and replay_path is None:
+        candidate_osu = os.path.splitext(beatmap_path)[0] + ".osu"
+        if os.path.isfile(candidate_osu):
+            replay_path = beatmap_path
+            beatmap_path = candidate_osu
+            print(f"Notice: Detected .osr file, automatically paired with '{beatmap_path}'")
+
+    if not os.path.isfile(beatmap_path):
+        print(f"Error: Beatmap file '{beatmap_path}' not found.", file=sys.stderr)
+        # Search for possible matches to help the user
+        filename = os.path.basename(beatmap_path)
+        matches = []
+        for root, _, files in os.walk("tests/data"):
+            if filename in files:
+                matches.append(os.path.join(root, filename).replace("\\", "/"))
+        if matches:
+            print(f"Did you mean one of these?", file=sys.stderr)
+            for m in matches:
+                print(f"  python scripts/visualizer.py {m}", file=sys.stderr)
+        sys.exit(1)
+
+    vis = Visualizer(
+        beatmap_path,
+        replay_path=replay_path,
+        source=args.source,
+        width=args.width,
+        height=args.height,
+        headless=args.headless,
+    )
+    vis.run(max_frames=args.frames)
+
+
+if __name__ == "__main__":
+    main()

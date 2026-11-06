@@ -22,6 +22,37 @@ pub struct Circle {
     pub hit_sound: u8,
 }
 
+/// Тип пути из файла; пока разбирается только линейный L.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CurveKind {
+    Linear,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum HitObjectKind {
+    Circle,
+    Slider {
+        kind: CurveKind,
+        // Исходные мировые координаты, включая голову слайдера первой точкой.
+        controls: Vec<Point>,
+        // Число полных проходов; разворотов на один меньше.
+        spans: u32,
+        declared_length: f64,
+    },
+}
+
+/// Общие поля круга и слайдера до подготовки геометрии и времён.
+#[derive(Debug, PartialEq)]
+pub struct HitObject {
+    pub id: ObjectId,
+    pub line: usize,
+    pub position: Point,
+    pub start_time: f64,
+    pub flags: u8,
+    pub hit_sound: u8,
+    pub kind: HitObjectKind,
+}
+
 /// Исходная timing point. Смысл beat_length зависит от флага uninherited:
 /// true — положительная длительность бита в мс;
 /// false — отрицательный обратный множитель скорости в процентах.
