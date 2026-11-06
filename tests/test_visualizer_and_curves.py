@@ -230,6 +230,42 @@ def test_visualizer_headless_playback_and_source_toggle():
     print("test_visualizer_headless_playback_and_source_toggle: OK")
 
 
+def test_tech_hud_docking_and_no_overlap():
+    map_path = "tests/data/01_micro/2dearbrave.osu"
+    vis = Visualizer(map_path, headless=True)
+
+    # 1. Closed HUD: full playfield
+    orig_pf = vis.pf_rect.copy()
+    assert not vis.show_tech_hud
+
+    # 2. Toggle HUD on (default left dock)
+    vis.toggle_tech_hud()
+    assert vis.show_tech_hud
+    assert vis.tech_hud_dock == "left"
+    # Zero overlap check
+    assert not vis.pf_rect.colliderect(vis.tech_panel_rect)
+    assert vis.pf_rect.x > vis.tech_panel_rect.right
+
+    # Render frame with inspector active
+    vis.render()
+
+    # 3. Toggle dock to right
+    vis.toggle_tech_hud_dock()
+    assert vis.tech_hud_dock == "right"
+    # Zero overlap check
+    assert not vis.pf_rect.colliderect(vis.tech_panel_rect)
+    assert vis.pf_rect.right < vis.tech_panel_rect.x
+
+    vis.render()
+
+    # 4. Toggle HUD off: returns to full playfield
+    vis.toggle_tech_hud()
+    assert not vis.show_tech_hud
+    assert vis.pf_rect == orig_pf
+
+    print("test_tech_hud_docking_and_no_overlap: OK")
+
+
 if __name__ == "__main__":
     test_linear_curve()
     test_bezier_multi_segment()
@@ -241,4 +277,5 @@ if __name__ == "__main__":
     test_beatmap_from_rust_json()
     test_rust_verification_suite()
     test_visualizer_headless_playback_and_source_toggle()
+    test_tech_hud_docking_and_no_overlap()
     print("\nALL AUTOMATED TESTS PASSED!")

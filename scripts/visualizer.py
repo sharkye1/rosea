@@ -97,6 +97,10 @@ class Visualizer:
         self.slider_caches: Dict[int, Tuple[pygame.Surface, int, int]] = {}
         self.btn_maps_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+        self.tech_hud_dock: str = "left"
+        self.tech_panel_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+        self.btn_tech_dock_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+        self.btn_tech_close_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
 
         # Map list for keyboard cycling ([ / ] or PageUp / PageDown)
         self.all_map_files: List[str] = []
@@ -201,7 +205,7 @@ class Visualizer:
         engine_name = "Rust rosea-core" if self.active_source == "rust" else "Python Standalone"
         replay_name = f" + Replay ({self.replay.player})" if self.replay else ""
         self.set_toast(
-            f"▶ {self.beatmap.title} [{self.beatmap.version_name}] ({engine_name}{replay_name})",
+            f">> {self.beatmap.title} [{self.beatmap.version_name}] ({engine_name}{replay_name})",
             3.0,
         )
 
@@ -245,6 +249,24 @@ class Visualizer:
                     f"Rust unavailable ({self.verification.reason[:45]})", 3.0
                 )
 
+    def toggle_tech_hud(self):
+        """Toggle technical inspector overlay and re-scale playfield so they do not overlap."""
+        self.show_tech_hud = not self.show_tech_hud
+        self.update_playfield_layout()
+        self.build_slider_caches()
+        self.set_toast(
+            f"Технический инспектор {'включён' if self.show_tech_hud else 'выключен'}",
+            1.5,
+        )
+
+    def toggle_tech_hud_dock(self):
+        """Toggle dock side of technical inspector between left and right sidebar."""
+        self.tech_hud_dock = "right" if self.tech_hud_dock == "left" else "left"
+        self.update_playfield_layout()
+        self.build_slider_caches()
+        side_name = "справа" if self.tech_hud_dock == "right" else "слева"
+        self.set_toast(f"Панель инспектора закреплена {side_name}", 1.5)
+
     def init_fonts(self):
         try:
             self.font_main = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 18)
@@ -263,20 +285,51 @@ class Visualizer:
 
     def update_playfield_layout(self):
         """Calculate playfield scaling and position with 512x384 aspect ratio."""
-        # Top HUD height ~60px, bottom timeline ~60px
         hud_h = 70
         timeline_h = 60
-        avail_w = self.width * 0.92
-        avail_h = (self.height - hud_h - timeline_h) * 0.92
+        total_avail_h = max(200, self.height - hud_h - timeline_h)
 
-        scale_x = avail_w / 512.0
-        scale_y = avail_h / 384.0
-        self.scale = min(scale_x, scale_y)
+        if self.show_tech_hud:
+            # Dedicated side dock width
+            panel_w = min(400, max(330, int(self.width * 0.35)))
+            panel_h = total_avail_h - 14
+            panel_y = hud_h + 7
 
-        pf_w = 512.0 * self.scale
-        pf_h = 384.0 * self.scale
-        self.offset_x = (self.width - pf_w) / 2.0
-        self.offset_y = hud_h + ((self.height - hud_h - timeline_h) - pf_h) / 2.0
+            margin = 14
+            avail_w = max(200, self.width - panel_w - margin * 3)
+            avail_h = total_avail_h * 0.94
+
+            scale_x = avail_w / 512.0
+            scale_y = avail_h / 384.0
+            self.scale = min(scale_x, scale_y)
+
+            pf_w = 512.0 * self.scale
+            pf_h = 384.0 * self.scale
+
+            remaining_w = self.width - panel_w - margin * 2
+
+            if self.tech_hud_dock == "left":
+                panel_x = margin
+                self.offset_x = (panel_w + margin) + (remaining_w - pf_w) / 2.0
+            else:
+                panel_x = self.width - panel_w - margin
+                self.offset_x = margin + (remaining_w - pf_w) / 2.0
+
+            self.tech_panel_rect = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
+            self.offset_y = hud_h + (total_avail_h - pf_h) / 2.0
+        else:
+            avail_w = self.width * 0.92
+            avail_h = total_avail_h * 0.92
+
+            scale_x = avail_w / 512.0
+            scale_y = avail_h / 384.0
+            self.scale = min(scale_x, scale_y)
+
+            pf_w = 512.0 * self.scale
+            pf_h = 384.0 * self.scale
+            self.offset_x = (self.width - pf_w) / 2.0
+            self.offset_y = hud_h + (total_avail_h - pf_h) / 2.0
+            self.tech_panel_rect = pygame.Rect(0, 0, 0, 0)
 
         self.pf_rect = pygame.Rect(
             int(self.offset_x), int(self.offset_y), int(pf_w), int(pf_h)
@@ -425,7 +478,11 @@ class Visualizer:
             ("M2", bool(keys & 2)),
         ]
         kw, kh = 32, 28
-        start_x = self.width - (kw + 6) * 4 - 20
+        total_keys_w = (kw + 6) * 4 - 6
+        if self.show_tech_hud and self.tech_hud_dock == "right":
+            start_x = self.tech_panel_rect.x - total_keys_w - 14
+        else:
+            start_x = self.width - (kw + 6) * 4 - 20
         start_y = 75
         for i, (label, active) in enumerate(key_states):
             kx = start_x + i * (kw + 6)
@@ -809,19 +866,46 @@ class Visualizer:
         self.screen.blit(t_surf, (pad_x, self.height - 22))
 
     def render_tech_hud(self):
-        """Render in-depth technical inspection overlay with real-time parser/math metrics."""
-        panel_w = 450
-        panel_h = min(470, self.height - 140)
-        panel_x = 16
-        panel_y = 76
+        """Render in-depth technical inspection overlay as a side dock without overlapping playfield."""
+        panel_x = self.tech_panel_rect.x
+        panel_y = self.tech_panel_rect.y
+        panel_w = self.tech_panel_rect.width
+        panel_h = self.tech_panel_rect.height
 
         surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-        surf.fill((14, 16, 24, 235))
-        pygame.draw.rect(surf, (70, 75, 105), (0, 0, panel_w, panel_h), 1, border_radius=6)
+        surf.fill((14, 16, 24, 240))
+        pygame.draw.rect(surf, (55, 62, 85), (0, 0, panel_w, panel_h), 1, border_radius=6)
 
-        # Header
-        head_txt = self.font_bold.render("🛠 Технический инспектор (T: скрыть)", True, (244, 114, 182))
-        surf.blit(head_txt, (14, 10))
+        # Header Title
+        head_txt = self.font_bold.render("ТЕХНИЧЕСКИЙ ИНСПЕКТОР", True, (244, 114, 182))
+        surf.blit(head_txt, (14, 12))
+
+        # Dock Toggle Button: [-> Справа] / [<- Слева]
+        dock_btn_text = "[-> Справа]" if self.tech_hud_dock == "left" else "[<- Слева]"
+        dock_surf = self.font_small.render(dock_btn_text, True, (160, 180, 220))
+        dw = dock_surf.get_width() + 10
+        dh = 20
+        dx = panel_w - dw - 32
+        dy = 10
+        self.btn_tech_dock_rect = pygame.Rect(panel_x + dx, panel_y + dy, dw, dh)
+
+        mx, my = pygame.mouse.get_pos()
+        is_dock_hover = self.btn_tech_dock_rect.collidepoint(mx, my)
+        pygame.draw.rect(surf, (40, 50, 75) if is_dock_hover else (25, 30, 48), (dx, dy, dw, dh), border_radius=3)
+        pygame.draw.rect(surf, (80, 95, 140), (dx, dy, dw, dh), 1, border_radius=3)
+        surf.blit(dock_surf, (dx + 5, dy + 2))
+
+        # Close Button: X
+        close_txt = self.font_bold.render("X", True, (244, 114, 114))
+        cw = 20
+        ch = 20
+        cx = panel_w - 26
+        cy = 10
+        self.btn_tech_close_rect = pygame.Rect(panel_x + cx, panel_y + cy, cw, ch)
+        is_close_hover = self.btn_tech_close_rect.collidepoint(mx, my)
+        pygame.draw.rect(surf, (60, 25, 35) if is_close_hover else (35, 20, 28), (cx, cy, cw, ch), border_radius=3)
+        pygame.draw.rect(surf, (160, 60, 80), (cx, cy, cw, ch), 1, border_radius=3)
+        surf.blit(close_txt, close_txt.get_rect(center=(cx + cw // 2, cy + ch // 2)))
 
         # 1. Engine & File info
         t = self.current_time_ms
@@ -861,8 +945,9 @@ class Visualizer:
                     break
 
         # 6. Replay metrics
-        cursor_str = "—"
-        dist_str = "—"
+        cursor_str = "-"
+        dist_str = "-"
+        dist_col = (220, 225, 240)
         if self.replay:
             pos, keys = self.replay.cursor_at(t)
             if pos:
@@ -871,53 +956,56 @@ class Visualizer:
                     dx = pos[0] - active_obj.x
                     dy = pos[1] - active_obj.y
                     dist = math.hypot(dx, dy)
-                    in_circle = "✔ ВНУТРИ" if dist <= circle_r_osu else "ВНЕ КРУГА"
-                    dist_str = f"{dist:.1f} osu!px [{in_circle}]"
+                    in_circle = "[ВНУТРИ]" if dist <= circle_r_osu else "[ВНЕ КРУГА]"
+                    dist_col = (74, 222, 128) if dist <= circle_r_osu else (251, 146, 60)
+                    dist_str = f"{dist:.1f} osu!px  {in_circle}"
 
-        lines = [
-            ("Движок:", engine_str, eng_col),
-            ("Файл:", os.path.basename(self.beatmap_path), (220, 225, 240)),
-            ("Время карты:", f"{t:08.2f} мс  ({t/1000.0:.2f} сек)", (250, 204, 21)),
-            ("─── ⏱ Тайминг & Скорость ───", "", (100, 110, 140)),
-            ("BPM / BeatLen:", f"{bpm:.1f} BPM  ({beat_len:.2f} мс)", (220, 225, 240)),
-            ("Скорость слайдеров (SV):", f"{sv:.2f}x  (TimingPoint строка {tp_line})", (220, 225, 240)),
-            ("─── 📐 Сложность & Окна попаданий (OD/AR/CS) ───", "", (100, 110, 140)),
-            ("Радиус круга (CS):", f"{circle_r_osu:.2f} osu!px  ({circle_r_screen:.1f} px на экране)", (220, 225, 240)),
-            ("Появление круга (AR):", f"Preempt {preempt:.1f} мс, FadeIn {fade_in:.1f} мс", (220, 225, 240)),
-            ("Окна точности (OD):", f"300: ±{w300:.1f}мс | 100: ±{w100:.1f}мс | 50: ±{w50:.1f}мс", (167, 139, 250)),
+        items = [
+            ("ROW", "Движок:", engine_str, eng_col),
+            ("ROW", "Файл:", os.path.basename(self.beatmap_path), (220, 225, 240)),
+            ("ROW", "Время карты:", f"{t:08.2f} мс ({t/1000.0:.2f} сек)", (250, 204, 21)),
+            ("SECTION", "// ТАЙМИНГ & СКОРОСТЬ"),
+            ("ROW", "BPM / BeatLen:", f"{bpm:.1f} BPM ({beat_len:.2f} мс)", (220, 225, 240)),
+            ("ROW", "Скорость (SV):", f"{sv:.2f}x (TP строка {tp_line})", (220, 225, 240)),
+            ("SECTION", "// СЛОЖНОСТЬ (OD / AR / CS)"),
+            ("ROW", "Радиус CS:", f"{circle_r_osu:.2f} osu!px ({circle_r_screen:.1f} px)", (220, 225, 240)),
+            ("ROW", "Появление AR:", f"Preempt {preempt:.1f} мс, FadeIn {fade_in:.1f} мс", (220, 225, 240)),
+            ("ROW", "Окна OD:", f"300: ±{w300:.1f}мс | 100: ±{w100:.1f}мс | 50: ±{w50:.1f}мс", (167, 139, 250)),
+            ("SECTION", "// АКТИВНЫЙ ОБЪЕКТ"),
         ]
 
         if active_obj:
             obj_kind_str = active_obj.kind.capitalize()
             if active_obj.kind == "slider":
-                obj_kind_str = f"Slider ({active_obj.curve_type}, spans={active_obj.spans}, len={active_obj.declared_length:.1f})"
-            lines.append(("─── 🎯 Активный объект ноты ───", "", (100, 110, 140)))
-            lines.append(("Объект:", f"#{active_obj.id} [Строка {active_obj.line}]: {obj_kind_str}", (244, 114, 182)))
-            lines.append(("Время начала:", f"{active_obj.time:.1f} мс (дельта {active_obj.time - t:+.1f} мс)", (220, 225, 240)))
-            lines.append(("Координаты:", f"({active_obj.x:.1f}, {active_obj.y:.1f}) osu!px", (220, 225, 240)))
+                obj_kind_str = f"Slider ({active_obj.curve_type}, sp={active_obj.spans}, len={active_obj.declared_length:.1f})"
+            items.append(("ROW", "Объект:", f"#{active_obj.id} [Строка {active_obj.line}]: {obj_kind_str}", (244, 114, 182)))
+            items.append(("ROW", "Время начала:", f"{active_obj.time:.1f} мс (дельта {active_obj.time - t:+.1f} мс)", (220, 225, 240)))
+            items.append(("ROW", "Координаты:", f"({active_obj.x:.1f}, {active_obj.y:.1f}) osu!px", (220, 225, 240)))
         else:
-            lines.append(("─── 🎯 Активный объект ноты ───", "", (100, 110, 140)))
-            lines.append(("Объект:", "Нет активных объектов на этом времени", (140, 145, 165)))
+            items.append(("ROW", "Объект:", "Нет активных объектов", (140, 145, 165)))
 
         if self.replay:
-            lines.append(("─── 🎮 Реплей игрока ───", "", (100, 110, 140)))
-            lines.append(("Курсор:", cursor_str, (220, 225, 240)))
-            lines.append(("Дистанция до цели:", dist_str, (220, 225, 240)))
+            items.append(("SECTION", "// РЕПЛЕЙ ИГРОКА"))
+            items.append(("ROW", "Курсор:", cursor_str, (220, 225, 240)))
+            items.append(("ROW", "Дистанция:", dist_str, dist_col))
 
-        y_pos = 36
-        for item in lines:
+        y_pos = 38
+        val_x = 135
+        for item in items:
             if y_pos + 18 > panel_h:
                 break
-            label, val, val_col = item
-            if not val:
-                lbl_surf = self.font_small.render(label, True, val_col)
-                surf.blit(lbl_surf, (14, y_pos))
+            if item[0] == "SECTION":
+                y_pos += 4
+                pygame.draw.line(surf, (45, 52, 75), (14, y_pos + 8), (panel_w - 14, y_pos + 8), 1)
+                sec_surf = self.font_small.render(item[1], True, (120, 135, 175))
+                surf.blit(sec_surf, (14, y_pos))
                 y_pos += 20
             else:
+                _, label, val, val_col = item
                 lbl_surf = self.font_small.render(label, True, (148, 163, 184))
                 surf.blit(lbl_surf, (14, y_pos))
                 val_surf = self.font_small.render(val, True, val_col)
-                surf.blit(val_surf, (175, y_pos))
+                surf.blit(val_surf, (val_x, y_pos))
                 y_pos += 18
 
         self.screen.blit(surf, (panel_x, panel_y))
@@ -960,7 +1048,7 @@ class Visualizer:
             lines.append("")
             lines.append("Discrepancies:")
             for m in self.verification.mismatches[:8]:
-                lines.append(f"  • {m}")
+                lines.append(f"  * {m}")
 
         y_off = 80
         for line in lines:
@@ -1052,11 +1140,7 @@ class Visualizer:
                     elif event.key == pygame.K_v:
                         self.show_verification_detail = not self.show_verification_detail
                     elif event.key == pygame.K_t:
-                        self.show_tech_hud = not self.show_tech_hud
-                        self.set_toast(
-                            f"Технический инспектор {'включён' if self.show_tech_hud else 'выключен'}",
-                            1.5,
-                        )
+                        self.toggle_tech_hud()
                     elif event.key in (pygame.K_TAB, pygame.K_F1):
                         self.show_hud = not self.show_hud
 
@@ -1066,11 +1150,11 @@ class Visualizer:
                         if self.btn_maps_rect.collidepoint(mx, my):
                             self.open_map_browser()
                         elif self.btn_tech_rect.collidepoint(mx, my):
-                            self.show_tech_hud = not self.show_tech_hud
-                            self.set_toast(
-                                f"Технический инспектор {'включён' if self.show_tech_hud else 'выключен'}",
-                                1.5,
-                            )
+                            self.toggle_tech_hud()
+                        elif self.show_tech_hud and self.btn_tech_close_rect.collidepoint(mx, my):
+                            self.toggle_tech_hud()
+                        elif self.show_tech_hud and self.btn_tech_dock_rect.collidepoint(mx, my):
+                            self.toggle_tech_hud_dock()
                         elif my >= self.height - 60:
                             self.is_scrubbing = True
                             self.handle_mouse_seek(mx)
