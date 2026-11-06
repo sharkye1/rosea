@@ -104,6 +104,7 @@ class Visualizer:
         self.slider_caches: Dict[int, Tuple[pygame.Surface, int, int]] = {}
         self.btn_maps_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+        self.btn_skip_rect: Optional[pygame.Rect] = None
         self.tech_hud_dock: str = "left"
         self.tech_panel_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_dock_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
@@ -218,7 +219,9 @@ class Visualizer:
 
         first_time = self.beatmap.hit_objects[0].time if self.beatmap.hit_objects else 0.0
         preempt, _ = self.beatmap.ar_preempt_fadein
-        self.start_time = max(0.0, first_time - preempt - 500.0)
+        # In osu!, playback starts from the beginning of the audio track (t = 0.0 ms),
+        # or earlier if early hit objects require approach circle lead-in before 0.0 ms.
+        self.start_time = min(0.0, first_time - preempt - 500.0)
         self.last_time = (
             max([o.end_time for o in self.beatmap.hit_objects] + [first_time + 1000.0])
             + 1500.0
@@ -361,11 +364,21 @@ class Visualizer:
             except Exception:
                 pass
 
-    def resolve_audio_file(self, bm_path: str, audio_filename: str, artist: str, title: str) -> Optional[str]:
-        """Smart audio resolver: explicit path -> same folder -> user's osu! Songs directory."""
+    def resolve_audio_file(
+        self,
+        bm_path: str,
+        audio_filename: str,
+        artist: str,
+        title: str,
+        beatmapset_id: Optional[int] = None,
+        beatmap_id: Optional[int] = None,
+        version_name: Optional[str] = None,
+    ) -> Optional[str]:
+        """Smart audio resolver: explicit path -> same folder -> user's osu! Songs directory (set ID -> title/artist)."""
         if self.explicit_audio_path and os.path.isfile(self.explicit_audio_path):
             return self.explicit_audio_path
 
+        # 1. Same folder as beatmap
         folder = os.path.dirname(os.path.abspath(bm_path))
         if audio_filename:
             cand = os.path.join(folder, audio_filename)
@@ -374,7 +387,7 @@ class Visualizer:
 
         if os.path.isdir(folder):
             for f in os.listdir(folder):
-                if f.lower().endswith((".mp3", ".ogg")) and not any(k in f.lower() for k in ("hit", "slider", "spin")):
+                if f.lower().endswith((".mp3", ".ogg", ".wav")) and not any(k in f.lower() for k in ("hit", "slider", "spin")):
                     full = os.path.join(folder, f)
                     if os.path.getsize(full) > 200000:
                         return full
@@ -383,23 +396,59 @@ class Visualizer:
         if not os.path.isdir(songs_dir):
             return None
 
+        # 2. Priority 1 for Songs folder: match by BeatmapSetID (exact folder name or prefix)
+        if beatmapset_id and beatmapset_id > 0:
+            sid_str = str(beatmapset_id)
+            for sdir in os.listdir(songs_dir):
+                if sdir == sid_str or sdir.startswith(f"{sid_str} ") or sdir.startswith(f"{sid_str}_"):
+                    cand_folder = os.path.join(songs_dir, sdir)
+                    if os.path.isdir(cand_folder):
+                        if audio_filename:
+                            cand = os.path.join(cand_folder, audio_filename)
+                            if os.path.isfile(cand):
+                                return cand
+                        for f in os.listdir(cand_folder):
+                            if f.lower().endswith((".mp3", ".ogg", ".wav")) and not any(k in f.lower() for k in ("hit", "slider", "spin")):
+                                full = os.path.join(cand_folder, f)
+                                if os.path.getsize(full) > 200000:
+                                    return full
+
+        # 3. Match by Title / Artist with verification of .osu content
         clean_title = re.sub(r"[^a-zA-Z0-9]", "", title).lower()
         clean_artist = re.sub(r"[^a-zA-Z0-9]", "", artist).lower()
 
         best_folder = None
         best_score = 0
         for sdir in os.listdir(songs_dir):
+            cand_folder = os.path.join(songs_dir, sdir)
+            if not os.path.isdir(cand_folder):
+                continue
             sd_clean = re.sub(r"[^a-zA-Z0-9]", "", sdir).lower()
             score = 0
-            if clean_title and len(clean_title) >= 4 and clean_title[:8] in sd_clean:
+            if clean_title and len(clean_title) >= 4 and clean_title in sd_clean:
+                score += 30
+            elif clean_title and len(clean_title) >= 4 and clean_title[:8] in sd_clean:
                 score += 10
-            if clean_artist and len(clean_artist) >= 3 and clean_artist[:6] in sd_clean:
+            if clean_artist and len(clean_artist) >= 3 and clean_artist in sd_clean:
+                score += 15
+            elif clean_artist and len(clean_artist) >= 3 and clean_artist[:6] in sd_clean:
                 score += 5
+
+            # If score is good, verify if this folder contains matching .osu
+            if score >= 15 and version_name:
+                try:
+                    for ofile in os.listdir(cand_folder):
+                        if ofile.endswith(".osu") and version_name.lower() in ofile.lower():
+                            score += 50
+                            break
+                except Exception:
+                    pass
+
             if score > best_score:
                 best_score = score
-                best_folder = os.path.join(songs_dir, sdir)
+                best_folder = cand_folder
 
-        if best_folder and best_score >= 10:
+        if best_folder and best_score >= 15:
             if audio_filename:
                 cand = os.path.join(best_folder, audio_filename)
                 if os.path.isfile(cand):
@@ -407,7 +456,7 @@ class Visualizer:
             for f in os.listdir(best_folder):
                 if f.lower().endswith((".mp3", ".ogg", ".wav")) and not any(k in f.lower() for k in ("hit", "slider", "spin")):
                     full = os.path.join(best_folder, f)
-                    if os.path.getsize(full) > 250000:
+                    if os.path.getsize(full) > 200000:
                         return full
         return None
 
@@ -434,6 +483,9 @@ class Visualizer:
             getattr(self.beatmap, "audio_filename", ""),
             getattr(self.beatmap, "artist", ""),
             getattr(self.beatmap, "title", ""),
+            beatmapset_id=getattr(self.beatmap, "beatmapset_id", None),
+            beatmap_id=getattr(self.beatmap, "beatmap_id", None),
+            version_name=getattr(self.beatmap, "version_name", None),
         )
 
         if audio_file and os.path.isfile(audio_file):
@@ -449,10 +501,15 @@ class Visualizer:
         self.audio_anchor_track_ms = self.current_time_ms
         self.audio_anchor_perf_time = time.perf_counter()
 
-        if self.is_playing and self.music_loaded and self.current_time_ms >= 0 and self.playback_speed == 1.0:
-            target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+        lead_in = getattr(self.beatmap, "audio_lead_in", 0)
+        if self.is_playing and self.music_loaded and self.current_time_ms >= lead_in and self.playback_speed == 1.0:
+            target_sec = max(0.0, (self.current_time_ms - lead_in + self.audio_offset_ms) / 1000.0)
             try:
                 pygame.mixer.music.play(start=target_sec)
+                try:
+                    pygame.mixer.music.set_pos(target_sec)
+                except Exception:
+                    pass
                 self.music_playing = True
             except Exception:
                 pass
@@ -527,10 +584,15 @@ class Visualizer:
         """Adjust universal audio offset (Alt + Left/Right arrows)."""
         self.audio_offset_ms += delta_ms
         self.set_toast(f"Смещение звука: {self.audio_offset_ms:+.1f} мс", 1.5)
-        if self.music_playing and self.playback_speed == 1.0 and self.current_time_ms >= 0:
-            target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+        lead_in = getattr(self.beatmap, "audio_lead_in", 0)
+        if self.music_playing and self.playback_speed == 1.0 and self.current_time_ms >= lead_in:
+            target_sec = max(0.0, (self.current_time_ms - lead_in + self.audio_offset_ms) / 1000.0)
             try:
                 pygame.mixer.music.play(start=target_sec)
+                try:
+                    pygame.mixer.music.set_pos(target_sec)
+                except Exception:
+                    pass
                 self.audio_anchor_track_ms = self.current_time_ms
                 self.audio_anchor_perf_time = time.perf_counter()
             except Exception:
@@ -548,16 +610,21 @@ class Visualizer:
         else:
             self.audio_anchor_track_ms = self.current_time_ms
             self.audio_anchor_perf_time = time.perf_counter()
-            if self.music_loaded and self.current_time_ms >= 0 and self.playback_speed == 1.0:
+            lead_in = getattr(self.beatmap, "audio_lead_in", 0)
+            if self.music_loaded and self.current_time_ms >= lead_in and self.playback_speed == 1.0:
                 if self.music_playing:
                     try:
                         pygame.mixer.music.unpause()
                     except Exception:
                         pass
                 else:
-                    target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+                    target_sec = max(0.0, (self.current_time_ms - lead_in + self.audio_offset_ms) / 1000.0)
                     try:
                         pygame.mixer.music.play(start=target_sec)
+                        try:
+                            pygame.mixer.music.set_pos(target_sec)
+                        except Exception:
+                            pass
                         self.music_playing = True
                     except Exception:
                         pass
@@ -580,14 +647,30 @@ class Visualizer:
                     pass
             self.set_toast(f"Скорость {self.playback_speed:.2f}x (музыка заглушена)", 1.5)
         else:
-            if self.music_loaded and self.current_time_ms >= 0 and self.is_playing:
-                target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+            lead_in = getattr(self.beatmap, "audio_lead_in", 0)
+            if self.music_loaded and self.current_time_ms >= lead_in and self.is_playing:
+                target_sec = max(0.0, (self.current_time_ms - lead_in + self.audio_offset_ms) / 1000.0)
                 try:
                     pygame.mixer.music.play(start=target_sec)
+                    try:
+                        pygame.mixer.music.set_pos(target_sec)
+                    except Exception:
+                        pass
                     self.music_playing = True
                 except Exception:
                     pass
             self.set_toast("Скорость 1.00x (музыка в синхроне)", 1.5)
+
+    def skip_intro(self):
+        """Skip beatmap intro to just before the first note appears."""
+        if not self.beatmap or not self.beatmap.hit_objects:
+            return
+        first_time = self.beatmap.hit_objects[0].time
+        preempt, _ = self.beatmap.ar_preempt_fadein
+        target = max(0.0, first_time - preempt - 600.0)
+        if self.current_time_ms < target - 500.0:
+            self.seek_to(target)
+            self.set_toast(f"⏭ Интро пропущено ({target/1000.0:.2f}с)", 1.5)
 
     def init_fonts(self):
         try:
@@ -724,10 +807,15 @@ class Visualizer:
             self.sound_event_idx = bisect.bisect_left(times, self.current_time_ms)
 
         if self.music_loaded:
-            if self.current_time_ms >= 0 and self.playback_speed == 1.0:
-                target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+            lead_in = getattr(self.beatmap, "audio_lead_in", 0)
+            if self.current_time_ms >= lead_in and self.playback_speed == 1.0:
+                target_sec = max(0.0, (self.current_time_ms - lead_in + self.audio_offset_ms) / 1000.0)
                 try:
                     pygame.mixer.music.play(start=target_sec)
+                    try:
+                        pygame.mixer.music.set_pos(target_sec)
+                    except Exception:
+                        pass
                     if not self.is_playing:
                         pygame.mixer.music.pause()
                         self.music_playing = False
@@ -756,20 +844,28 @@ class Visualizer:
             delta_ms = (perf_now - self.audio_anchor_perf_time) * 1000.0 * self.playback_speed
             self.current_time_ms = self.audio_anchor_track_ms + delta_ms
 
-            # Hardware audio drift correction
+            # Hardware audio drift correction & track completion check
             if self.playback_speed == 1.0:
-                hw_pos = pygame.mixer.music.get_pos()
-                if hw_pos >= 0:
-                    expected_time = self.audio_anchor_track_ms + hw_pos
-                    drift = self.current_time_ms - expected_time
-                    if abs(drift) > 20.0:
-                        self.audio_anchor_perf_time += (drift / 1000.0) * 0.1
+                if not pygame.mixer.music.get_busy():
+                    self.music_playing = False
+                else:
+                    hw_pos = pygame.mixer.music.get_pos()
+                    if hw_pos >= 0:
+                        expected_time = self.audio_anchor_track_ms + hw_pos
+                        drift = self.current_time_ms - expected_time
+                        if abs(drift) > 20.0:
+                            self.audio_anchor_perf_time += (drift / 1000.0) * 0.1
 
-        # Start audio when crossing 0.0 ms in interactive mode
-        if not self.headless and self.music_loaded and not self.music_playing and self.current_time_ms >= 0 and self.playback_speed == 1.0:
-            target_sec = max(0.0, (self.current_time_ms + self.audio_offset_ms) / 1000.0)
+        # Start audio when crossing lead_in ms in interactive mode
+        lead_in = getattr(self.beatmap, "audio_lead_in", 0)
+        if not self.headless and self.music_loaded and not self.music_playing and self.current_time_ms >= lead_in and self.playback_speed == 1.0:
+            target_sec = max(0.0, (self.current_time_ms - lead_in + self.audio_offset_ms) / 1000.0)
             try:
                 pygame.mixer.music.play(start=target_sec)
+                try:
+                    pygame.mixer.music.set_pos(target_sec)
+                except Exception:
+                    pass
                 self.music_playing = True
                 self.audio_anchor_track_ms = self.current_time_ms
                 self.audio_anchor_perf_time = time.perf_counter()
@@ -1219,6 +1315,25 @@ class Visualizer:
         pygame.draw.rect(self.screen, (96, 165, 250), self.btn_tech_rect, 1, border_radius=4)
         self.screen.blit(t_surf, (t_x + 8, t_y + 4))
 
+        # Skip Intro Button (shown during intro before first note)
+        self.btn_skip_rect = None
+        if self.beatmap and self.beatmap.hit_objects:
+            first_time = self.beatmap.hit_objects[0].time
+            preempt, _ = self.beatmap.ar_preempt_fadein
+            skip_target = max(0.0, first_time - preempt - 600.0)
+            if self.current_time_ms < skip_target - 800.0 and skip_target > 2500.0:
+                sk_surf = self.font_small.render("⏭ Пропустить [X]", True, (255, 255, 255))
+                sk_w = sk_surf.get_width() + 16
+                sk_h = 24
+                sk_x = t_x - sk_w - 10
+                sk_y = 36
+                self.btn_skip_rect = pygame.Rect(sk_x, sk_y, sk_w, sk_h)
+                is_sk_hover = self.btn_skip_rect.collidepoint(mx, my)
+                sk_col = (234, 88, 12) if is_sk_hover else (180, 60, 10)
+                pygame.draw.rect(self.screen, sk_col, self.btn_skip_rect, border_radius=4)
+                pygame.draw.rect(self.screen, (251, 146, 60), self.btn_skip_rect, 1, border_radius=4)
+                self.screen.blit(sk_surf, (sk_x + 8, sk_y + 4))
+
         # Replay Key Overlay if replay is active
         if self.replay and self.show_replay:
             self.render_key_overlay()
@@ -1262,7 +1377,7 @@ class Visualizer:
 
         time_str = (
             f"{cur_min:02d}:{cur_sec:06.3f} / {tot_min:02d}:{tot_sec:06.3f}  "
-            f"[Space: Pause | \u2190/\u2192: Seek | \u2191/\u2193: Speed | T: Инфо | M: Карты | [/]: Карта | S: Engine | C: Cursor | V: Verify | Tab: HUD]"
+            f"[Space: Pause | X: Пропустить интро | -/+: Оффсет | \u2190/\u2192: Seek | \u2191/\u2193: Speed | T: Инфо | M: Карты | S: Engine | Tab: HUD]"
         )
         t_surf = self.font_small.render(time_str, True, (160, 165, 185))
         self.screen.blit(t_surf, (pad_x, self.height - 22))
@@ -1395,7 +1510,11 @@ class Visualizer:
         track_name = os.path.basename(self.audio_path) if self.audio_path else "Не найден (только клики)"
         track_col = (74, 222, 128) if self.music_loaded else (251, 146, 60)
         items.append(("ROW", "Трек:", track_name, track_col))
-        items.append(("ROW", "Смещение:", f"{self.audio_offset_ms:+.1f} мс [Alt+<-/->]", (220, 225, 240)))
+        lead_in = getattr(self.beatmap, "audio_lead_in", 0)
+        set_id = getattr(self.beatmap, "beatmapset_id", 0)
+        if set_id > 0:
+            items.append(("ROW", "SetID / LeadIn:", f"{set_id} / {lead_in} мс", (220, 225, 240)))
+        items.append(("ROW", "Смещение:", f"{self.audio_offset_ms:+.1f} мс [- / + / Alt+\u2190\u2192]", (220, 225, 240)))
         vol_str = "Выключен [U]" if self.audio_muted else f"Трек {int(self.music_volume*100)}% | Клики {int(self.hitsound_volume*100)}% [U]"
         items.append(("ROW", "Громкость:", vol_str, (167, 139, 250)))
 
@@ -1542,6 +1661,12 @@ class Visualizer:
                         self.change_speed(-1)
                     elif event.key in (pygame.K_r, pygame.K_HOME):
                         self.seek_to(self.start_time)
+                    elif event.key == pygame.K_x:
+                        self.skip_intro()
+                    elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                        self.adjust_audio_offset(-5.0)
+                    elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                        self.adjust_audio_offset(5.0)
                     elif event.key == pygame.K_s:
                         self.toggle_engine_source()
                     elif event.key == pygame.K_c:
@@ -1563,7 +1688,9 @@ class Visualizer:
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:
                         mx, my = event.pos
-                        if self.btn_maps_rect.collidepoint(mx, my):
+                        if self.btn_skip_rect and self.btn_skip_rect.collidepoint(mx, my):
+                            self.skip_intro()
+                        elif self.btn_maps_rect.collidepoint(mx, my):
                             self.open_map_browser()
                         elif self.btn_tech_rect.collidepoint(mx, my):
                             self.toggle_tech_hud()

@@ -310,6 +310,20 @@ def test_audio_engine_and_synchronization():
     vis.update_playfield_layout()
     vis.render()
 
+    # 8. Test BeatmapSetID resolution & Skip Intro on personal map
+    vis_06 = Visualizer("tests/data/06_personal/1.osu", headless=True)
+    assert vis_06.beatmap.beatmapset_id == 1049899
+    assert vis_06.beatmap.beatmap_id == 2444814
+    assert vis_06.start_time == 0.0
+    assert vis_06.current_time_ms == 0.0
+    if vis_06.audio_path:
+        assert "1049899" in vis_06.audio_path
+
+    # Test skip_intro jumps to correct offset before first note
+    vis_06.skip_intro()
+    expected_target = 4892.0 - vis_06.beatmap.ar_preempt_fadein[0] - 600.0
+    assert abs(vis_06.current_time_ms - expected_target) < 1.0
+
     print("test_audio_engine_and_synchronization: OK")
 
 

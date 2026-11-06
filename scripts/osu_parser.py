@@ -424,6 +424,8 @@ class Beatmap:
         self.artist = "Unknown"
         self.creator = "Unknown"
         self.version_name = "Normal"
+        self.beatmap_id = 0
+        self.beatmapset_id = 0
 
         # Difficulty
         self.cs = 4.0
@@ -547,6 +549,16 @@ def parse_osu_beatmap(file_path: str) -> Beatmap:
                     bm.creator = v
                 elif k == "Version":
                     bm.version_name = v
+                elif k == "BeatmapID":
+                    try:
+                        bm.beatmap_id = int(v)
+                    except ValueError:
+                        pass
+                elif k == "BeatmapSetID":
+                    try:
+                        bm.beatmapset_id = int(v)
+                    except ValueError:
+                        pass
 
         elif current_section == "Difficulty":
             if ":" in line:
