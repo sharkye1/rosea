@@ -19,7 +19,11 @@ import re
 import os
 import sys
 import time
+import warnings
 from typing import List, Tuple, Optional, Dict, Any
+
+# Suppress harmless pkg_resources deprecation warning inside pygame
+warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
 
 # Ensure paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -325,6 +329,10 @@ class Visualizer:
         try:
             if not pygame.mixer.get_init():
                 pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+                try:
+                    pygame.mixer.set_num_channels(32)
+                except Exception:
+                    pass
             self.audio_available = True
             self.init_hitsounds()
         except Exception:
@@ -336,34 +344,65 @@ class Visualizer:
         """Load skin hitsounds or synthesize crisp procedural click sounds."""
         if not self.audio_available:
             return
+
+        def _safe_load_sound(path: str) -> Optional[pygame.mixer.Sound]:
+            if not os.path.isfile(path):
+                return None
+            try:
+                # In osu! skins, silent dummy files are 44-byte WAV headers with 0 audio payload.
+                # Calling pygame.mixer.Sound on 0-sample files causes native crashes in SDL_mixer.
+                if os.path.getsize(path) <= 44:
+                    return None
+                snd = pygame.mixer.Sound(path)
+                if getattr(snd, "get_length", lambda: 0.0)() < 0.005:
+                    return None
+                if len(snd.get_raw()) == 0:
+                    return None
+                return snd
+            except Exception:
+                return None
+
         skins_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Skins")
         if os.path.isdir(skins_dir):
             skin_candidates = []
-            for sname in os.listdir(skins_dir):
-                if "WhiteCat" in sname:
-                    skin_candidates.insert(0, os.path.join(skins_dir, sname))
-                else:
-                    skin_candidates.append(os.path.join(skins_dir, sname))
+            try:
+                for sname in os.listdir(skins_dir):
+                    p = os.path.join(skins_dir, sname)
+                    if os.path.isdir(p):
+                        if "WhiteCat" in sname:
+                            skin_candidates.insert(0, p)
+                        else:
+                            skin_candidates.append(p)
+            except Exception:
+                pass
 
             for skin_path in skin_candidates:
-                norm = os.path.join(skin_path, "normal-hitnormal.wav")
-                if os.path.isfile(norm):
-                    try:
-                        self.hitsound_samples["normal"] = pygame.mixer.Sound(norm)
-                        whistle = os.path.join(skin_path, "normal-hitwhistle.wav")
-                        finish = os.path.join(skin_path, "normal-hitfinish.wav")
-                        clap = os.path.join(skin_path, "normal-hitclap.wav")
-                        if os.path.isfile(whistle):
-                            self.hitsound_samples["whistle"] = pygame.mixer.Sound(whistle)
-                        if os.path.isfile(finish):
-                            self.hitsound_samples["finish"] = pygame.mixer.Sound(finish)
-                        if os.path.isfile(clap):
-                            self.hitsound_samples["clap"] = pygame.mixer.Sound(clap)
-                        break
-                    except Exception:
-                        pass
+                norm_snd = _safe_load_sound(os.path.join(skin_path, "normal-hitnormal.wav"))
+                if norm_snd:
+                    self.hitsound_samples["normal"] = norm_snd
+                    for kind, fname in [
+                        ("whistle", "normal-hitwhistle.wav"),
+                        ("finish", "normal-hitfinish.wav"),
+                        ("clap", "normal-hitclap.wav"),
+                    ]:
+                        cand_snd = _safe_load_sound(os.path.join(skin_path, fname))
+                        if cand_snd:
+                            self.hitsound_samples[kind] = cand_snd
+                    break
 
-        # Procedural fallback
+            needed = [k for k in ["whistle", "finish", "clap"] if k not in self.hitsound_samples]
+            if needed:
+                for skin_path in skin_candidates:
+                    for kind in list(needed):
+                        fname = f"normal-hit{kind}.wav"
+                        cand_snd = _safe_load_sound(os.path.join(skin_path, fname))
+                        if cand_snd:
+                            self.hitsound_samples[kind] = cand_snd
+                            needed.remove(kind)
+                    if not needed:
+                        break
+
+        # Procedural fallback for normal hit sound
         if "normal" not in self.hitsound_samples:
             sr = 44100
             dur = 0.04
@@ -575,7 +614,7 @@ class Visualizer:
         if self.audio_muted or not self.hitsounds_enabled or not self.audio_available:
             return
         snd = self.hitsound_samples.get(kind) or self.hitsound_samples.get("normal")
-        if snd:
+        if snd and getattr(snd, "get_length", lambda: 1.0)() >= 0.005:
             try:
                 chan = pygame.mixer.find_channel()
                 if chan:

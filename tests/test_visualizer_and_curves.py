@@ -358,6 +358,23 @@ def test_osu_stable_pairs_and_browser():
     print("test_osu_stable_pairs_and_browser: OK")
 
 
+def test_safe_hitsound_playback_with_dummy_wav():
+    """Verify that 44-byte silent WAV files used in osu skins never crash SDL_mixer."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dummy_wav = os.path.join(tmpdir, "normal-hitwhistle.wav")
+        riff_header = bytes.fromhex("524946462400000057415645666d7420100000000100020044ac000010b10200040010006461746100000000")
+        with open(dummy_wav, "wb") as f_out:
+            f_out.write(riff_header)
+        assert os.path.getsize(dummy_wav) == 44
+        vis = Visualizer("tests/data/01_micro/2dearbrave.osu", headless=True)
+        vis.play_hitsound("whistle")
+        vis.play_hitsound("nonexistent")
+        for _ in range(30):
+            vis.step(50.0)
+    print("test_safe_hitsound_playback_with_dummy_wav: OK")
+
+
 if __name__ == "__main__":
     test_linear_curve()
     test_bezier_multi_segment()
@@ -372,4 +389,5 @@ if __name__ == "__main__":
     test_tech_hud_docking_and_no_overlap()
     test_audio_engine_and_synchronization()
     test_osu_stable_pairs_and_browser()
+    test_safe_hitsound_playback_with_dummy_wav()
     print("\nALL AUTOMATED TESTS PASSED!")
