@@ -384,6 +384,57 @@ def test_safe_hitsound_playback_with_dummy_wav():
     print("test_safe_hitsound_playback_with_dummy_wav: OK")
 
 
+def test_tech_hud_click_badges():
+    """Verify that in Technical Inspector mode, replay and live clicks display up to 5 badges with timing and judgement."""
+    vis = Visualizer(
+        "tests/data/06_personal/1.osu",
+        replay_path="tests/data/06_personal/1.osr",
+        headless=True,
+    )
+    assert len(vis.replay_clicks) > 0, "Replay clicks must be precomputed"
+    assert len(vis.replay_clicks) == len(vis.replay_click_times)
+
+    # Check structure of precomputed clicks
+    first_gameplay_click = next(c for c in vis.replay_clicks if c.time_ms > 4000.0)
+    assert first_gameplay_click.key in ("K1", "K2", "M1", "M2")
+    assert first_gameplay_click.result in ("300", "100", "50", "Miss")
+    assert first_gameplay_click.delta_ms is not None
+    assert f"({first_gameplay_click.delta_ms:+.1f}ms {first_gameplay_click.result})" in first_gameplay_click.badge_text
+
+    # Default: tech HUD is off, rendering should work cleanly
+    assert not vis.show_tech_hud
+    vis.render()
+
+    # Enable Technical HUD
+    vis.show_tech_hud = True
+    vis.seek_to(10000.0)
+    vis.render()
+
+    # Query latest click and verify
+    latest = vis.get_latest_click_at(10000.0)
+    assert latest is not None
+    assert latest.time_ms <= 10000.0
+
+    # Verify at most 5 recent clicks within 2500ms are rendered
+    t = 10000.0
+    recent = [c for c in vis.replay_clicks if c.time_ms <= t and t - c.time_ms <= 2500.0][-5:]
+    assert 0 < len(recent) <= 5
+
+    # Test live click recording
+    vis.seek_to(4892.0)
+    vis.record_live_click("K1")
+    assert len(vis.live_clicks) == 1
+    assert vis.live_clicks[0].key == "K1"
+    assert "K1" in vis.live_clicks[0].badge_text
+    vis.render()
+
+    # Seeking backwards prunes future live clicks
+    vis.seek_to(3000.0)
+    assert len(vis.live_clicks) == 0
+
+    print("test_tech_hud_click_badges: OK")
+
+
 if __name__ == "__main__":
     test_linear_curve()
     test_bezier_multi_segment()
@@ -399,4 +450,5 @@ if __name__ == "__main__":
     test_audio_engine_and_synchronization()
     test_osu_stable_pairs_and_browser()
     test_safe_hitsound_playback_with_dummy_wav()
+    test_tech_hud_click_badges()
     print("\nALL AUTOMATED TESTS PASSED!")

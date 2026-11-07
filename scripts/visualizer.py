@@ -62,6 +62,30 @@ except ImportError:
 import pygame
 
 
+class ClickEvent:
+    """Represents a replay or interactive key press event with timing judgement."""
+
+    def __init__(
+        self,
+        time_ms: float,
+        x: float,
+        y: float,
+        key: str,
+        delta_ms: Optional[float],
+        result: str,
+        color: Tuple[int, int, int],
+        badge_text: str,
+    ):
+        self.time_ms = time_ms
+        self.x = x
+        self.y = y
+        self.key = key
+        self.delta_ms = delta_ms
+        self.result = result
+        self.color = color
+        self.badge_text = badge_text
+
+
 class Visualizer:
     def __init__(
         self,
@@ -120,6 +144,11 @@ class Visualizer:
         self.tech_panel_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_dock_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_close_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+
+        # Click Badges & Real-time Judgements (Last 5 Clicks on Playfield in Tech HUD)
+        self.replay_clicks: List[ClickEvent] = []
+        self.replay_click_times: List[float] = []
+        self.live_clicks: List[ClickEvent] = []
 
         # Audio & High-Resolution Clock State
         self.audio_available: bool = False
@@ -225,6 +254,13 @@ class Visualizer:
                 target_osr = candidate
         if target_osr and os.path.isfile(target_osr):
             self.replay = parse_osr_replay(target_osr)
+
+        # Precompute replay clicks and reset live click buffer
+        self.live_clicks = []
+        self.replay_clicks = []
+        self.replay_click_times = []
+        if self.replay:
+            self.precompute_replay_clicks()
 
         # Update index in all_map_entries / all_map_files
         if self.all_map_entries:
@@ -749,6 +785,15 @@ class Visualizer:
             self.seek_to(target)
             self.set_toast(f"⏭ Интро пропущено ({target/1000.0:.2f}с)", 1.5)
 
+    def can_skip_intro(self) -> bool:
+        """Check if intro skip is currently available."""
+        if not self.beatmap or not self.beatmap.hit_objects:
+            return False
+        first_time = self.beatmap.hit_objects[0].time
+        preempt, _ = self.beatmap.ar_preempt_fadein
+        target = max(0.0, first_time - preempt - 600.0)
+        return self.current_time_ms < target - 800.0 and target > 2500.0
+
     def init_fonts(self):
         try:
             self.font_main = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 18)
@@ -757,6 +802,7 @@ class Visualizer:
             self.font_small = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 13)
             self.font_combo = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 20, bold=True)
             self.font_spinner = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 36, bold=True)
+            self.font_click = pygame.font.SysFont("Segoe UI, Arial, sans-serif", 13, bold=True)
         except Exception:
             self.font_main = pygame.font.Font(None, 20)
             self.font_title = pygame.font.Font(None, 24)
@@ -764,6 +810,7 @@ class Visualizer:
             self.font_small = pygame.font.Font(None, 14)
             self.font_combo = pygame.font.Font(None, 22)
             self.font_spinner = pygame.font.Font(None, 40)
+            self.font_click = pygame.font.Font(None, 14)
 
     def update_playfield_layout(self):
         """Calculate playfield scaling and position with 512x384 aspect ratio."""
@@ -879,6 +926,9 @@ class Visualizer:
         self.audio_anchor_track_ms = self.current_time_ms
         self.audio_anchor_perf_time = time.perf_counter()
 
+        if self.live_clicks:
+            self.live_clicks = [c for c in self.live_clicks if c.time_ms <= self.current_time_ms]
+
         if self.sound_events:
             times = [x[0] for x in self.sound_events]
             self.sound_event_idx = bisect.bisect_left(times, self.current_time_ms)
@@ -982,6 +1032,10 @@ class Visualizer:
         if self.replay and self.show_replay:
             self.render_replay_cursor()
 
+        # Render Recent Click Badges on Playfield (Technical Inspector mode)
+        if self.show_tech_hud:
+            self.render_recent_clicks()
+
         # Render HUD & Diagnostics
         if self.show_hud:
             self.render_hud()
@@ -1032,12 +1086,20 @@ class Visualizer:
         pygame.draw.circle(self.screen, (255, 170, 40), (sx, sy), 5)
 
     def render_key_overlay(self):
-        _, keys = self.replay.cursor_at(self.current_time_ms)
+        keys = 0
+        if self.replay:
+            _, keys = self.replay.cursor_at(self.current_time_ms)
+        pressed = pygame.key.get_pressed()
+        m_pressed = pygame.mouse.get_pressed()
+        k1_active = bool(keys & 4) or pressed[pygame.K_z] or pressed[pygame.K_d]
+        k2_active = bool(keys & 8) or pressed[pygame.K_x] or pressed[pygame.K_f]
+        m1_active = bool(keys & 1) or m_pressed[0]
+        m2_active = bool(keys & 2) or m_pressed[2]
         key_states = [
-            ("K1", bool(keys & 4)),
-            ("K2", bool(keys & 8)),
-            ("M1", bool(keys & 1)),
-            ("M2", bool(keys & 2)),
+            ("K1", k1_active),
+            ("K2", k2_active),
+            ("M1", m1_active),
+            ("M2", m2_active),
         ]
         kw, kh = 32, 28
         total_keys_w = (kw + 6) * 4 - 6
@@ -1061,6 +1123,339 @@ class Visualizer:
             self.screen.blit(
                 t_surf, t_surf.get_rect(center=(kx + kw // 2, start_y + kh // 2))
             )
+
+    def precompute_replay_clicks(self):
+        """Extract and evaluate all key press clicks in replay against beatmap hit objects."""
+        if not self.replay or not self.replay.frames or not self.beatmap:
+            self.replay_clicks = []
+            self.replay_click_times = []
+            return
+
+        od = getattr(self.beatmap, "od", 8.0)
+        cs = getattr(self.beatmap, "cs", 4.0)
+        w300 = 80.0 - 6.0 * od
+        w100 = 140.0 - 8.0 * od
+        w50 = 200.0 - 10.0 * od
+        circle_r = 54.4 - 4.48 * cs
+
+        raw_clicks = []
+        prev_keys = 0
+        for frame in self.replay.frames:
+            curr_keys = frame.keys
+            for bit, name in [(4, "K1"), (8, "K2"), (1, "M1"), (2, "M2")]:
+                if (curr_keys & bit) and not (prev_keys & bit):
+                    # Prefer K1 / K2 if keyboard set mouse bit as alias
+                    if bit == 1 and (curr_keys & 4):
+                        continue
+                    if bit == 2 and (curr_keys & 8):
+                        continue
+                    raw_clicks.append((frame.time_ms, frame.x, frame.y, name))
+            prev_keys = curr_keys
+
+        events: List[ClickEvent] = []
+        hit_objects = [
+            obj for obj in self.beatmap.hit_objects
+            if obj.kind in ("circle", "slider")
+        ]
+        used_objects = set()
+
+        for click_time, cx, cy, key in raw_clicks:
+            best_idx = None
+            best_delta = 999999.0
+            best_dist = 999999.0
+
+            for idx, obj in enumerate(hit_objects):
+                if idx in used_objects:
+                    continue
+                delta = click_time - obj.time
+                if delta < -w50 - 60.0:
+                    break
+                if -w50 <= delta <= w50:
+                    obj_x = getattr(obj, "stacked_x", obj.x)
+                    obj_y = getattr(obj, "stacked_y", obj.y)
+                    dist = math.hypot(cx - obj_x, cy - obj_y)
+                    if dist <= circle_r:
+                        if best_idx is None or abs(delta) < abs(best_delta):
+                            best_idx = idx
+                            best_delta = delta
+                            best_dist = dist
+                    elif best_idx is None:
+                        if abs(delta) < abs(best_delta):
+                            best_delta = delta
+                            best_dist = dist
+
+            if best_idx is not None:
+                if abs(best_delta) <= w300:
+                    res = "300"
+                    col = (56, 189, 248)
+                elif abs(best_delta) <= w100:
+                    res = "100"
+                    col = (74, 222, 128)
+                elif abs(best_delta) <= w50:
+                    res = "50"
+                    col = (251, 146, 60)
+                else:
+                    res = "Miss"
+                    col = (248, 113, 113)
+                used_objects.add(best_idx)
+                sign = "+" if best_delta >= 0 else ""
+                badge_text = f"{key} ({sign}{best_delta:.1f}ms {res})"
+                events.append(ClickEvent(click_time, cx, cy, key, best_delta, res, col, badge_text))
+            else:
+                near_delta = None
+                for idx, obj in enumerate(hit_objects):
+                    if idx in used_objects:
+                        continue
+                    d = click_time - obj.time
+                    if near_delta is None or abs(d) < abs(near_delta):
+                        near_delta = d
+                if near_delta is not None and abs(near_delta) <= 300.0:
+                    sign = "+" if near_delta >= 0 else ""
+                    badge_text = f"{key} ({sign}{near_delta:.1f}ms Miss)"
+                    events.append(ClickEvent(click_time, cx, cy, key, near_delta, "Miss", (248, 113, 113), badge_text))
+                else:
+                    badge_text = f"{key} (Miss)"
+                    events.append(ClickEvent(click_time, cx, cy, key, None, "Miss", (248, 113, 113), badge_text))
+
+        self.replay_clicks = events
+        self.replay_click_times = [e.time_ms for e in events]
+
+    def record_live_click(self, key_name: str):
+        """Record an interactive user click (Z, X, LMB, RMB) with timing judgement."""
+        if not self.beatmap:
+            return
+        t = self.current_time_ms
+        mx, my = pygame.mouse.get_pos()
+        if self.pf_rect.collidepoint(mx, my):
+            cx = (mx - self.offset_x) / self.scale
+            cy = (my - self.offset_y) / self.scale
+        elif self.replay:
+            pos, _ = self.replay.cursor_at(t)
+            cx, cy = pos if pos else (256.0, 192.0)
+        else:
+            cx = (mx - self.offset_x) / self.scale
+            cy = (my - self.offset_y) / self.scale
+
+        od = getattr(self.beatmap, "od", 8.0)
+        cs = getattr(self.beatmap, "cs", 4.0)
+        w300 = 80.0 - 6.0 * od
+        w100 = 140.0 - 8.0 * od
+        w50 = 200.0 - 10.0 * od
+        circle_r = 54.4 - 4.48 * cs
+
+        best_obj = None
+        best_delta = 999999.0
+        for obj in self.beatmap.hit_objects:
+            if obj.kind in ("circle", "slider"):
+                delta = t - obj.time
+                if -w50 <= delta <= w50:
+                    obj_x = getattr(obj, "stacked_x", obj.x)
+                    obj_y = getattr(obj, "stacked_y", obj.y)
+                    dist = math.hypot(cx - obj_x, cy - obj_y)
+                    if dist <= circle_r:
+                        if best_obj is None or abs(delta) < abs(best_delta):
+                            best_obj = obj
+                            best_delta = delta
+
+        if best_obj is not None:
+            if abs(best_delta) <= w300:
+                res = "300"
+                col = (56, 189, 248)
+            elif abs(best_delta) <= w100:
+                res = "100"
+                col = (74, 222, 128)
+            elif abs(best_delta) <= w50:
+                res = "50"
+                col = (251, 146, 60)
+            else:
+                res = "Miss"
+                col = (248, 113, 113)
+            sign = "+" if best_delta >= 0 else ""
+            badge_text = f"{key_name} ({sign}{best_delta:.1f}ms {res})"
+            ev = ClickEvent(t, cx, cy, key_name, best_delta, res, col, badge_text)
+        else:
+            ev = ClickEvent(t, cx, cy, key_name, None, "Miss", (248, 113, 113), f"{key_name} (Miss)")
+
+        self.live_clicks.append(ev)
+
+    def get_latest_click_at(self, t: float) -> Optional[ClickEvent]:
+        """Find the latest click event that occurred at or before time t within 3000ms."""
+        latest: Optional[ClickEvent] = None
+        if self.replay_clicks and self.replay_click_times:
+            idx = bisect.bisect_right(self.replay_click_times, t)
+            if idx > 0:
+                c = self.replay_clicks[idx - 1]
+                if t - c.time_ms <= 3000.0:
+                    latest = c
+        for c in self.live_clicks:
+            if c.time_ms <= t and (t - c.time_ms <= 3000.0):
+                if latest is None or c.time_ms > latest.time_ms:
+                    latest = c
+        return latest
+
+    def render_recent_clicks(self):
+        """Render floating badges on the playfield for up to the last 5 clicks when Technical HUD is active."""
+        if not self.show_tech_hud:
+            return
+
+        t = self.current_time_ms
+        active_clicks: List[ClickEvent] = []
+
+        # Replay clicks up to current_time_ms
+        if self.replay_clicks and self.replay_click_times:
+            idx = bisect.bisect_right(self.replay_click_times, t)
+            for c in reversed(self.replay_clicks[:idx]):
+                age = t - c.time_ms
+                if age > 2500.0:
+                    break
+                active_clicks.append(c)
+
+        # Interactive live clicks
+        for c in self.live_clicks:
+            age = t - c.time_ms
+            if 0.0 <= age <= 2500.0:
+                active_clicks.append(c)
+
+        if not active_clicks:
+            return
+
+        # Sort chronologically and keep only up to the last 5 clicks
+        active_clicks.sort(key=lambda c: c.time_ms)
+        visible_clicks = active_clicks[-5:]
+        n = len(visible_clicks)
+
+        for rank, click in enumerate(visible_clicks):
+            age = max(0.0, t - click.time_ms)
+            recency_alpha = 0.55 + 0.45 * ((rank + 1) / n)
+            time_alpha = 1.0 if age <= 1500.0 else max(0.0, (2500.0 - age) / 1000.0)
+            overall_alpha = min(1.0, max(0.0, recency_alpha * time_alpha))
+            if overall_alpha <= 0.02:
+                continue
+
+            sx, sy = self.osu_to_screen(click.x, click.y)
+            self._render_single_click_badge(click, sx, sy, overall_alpha, age)
+
+    def _render_single_click_badge(
+        self, click: ClickEvent, sx: int, sy: int, alpha: float, age: float
+    ):
+        """Render a single click hitpoint and floating pill badge at (sx, sy)."""
+        # 1. Hit dot and ripple at exact click point (sx, sy)
+        dot_surf = pygame.Surface((36, 36), pygame.SRCALPHA)
+        center = (18, 18)
+        col = click.color
+
+        # Inner dot
+        pygame.draw.circle(
+            dot_surf,
+            (col[0], col[1], col[2], int(230 * alpha)),
+            center,
+            4,
+        )
+        # Small white center pip
+        pygame.draw.circle(
+            dot_surf,
+            (255, 255, 255, int(220 * alpha)),
+            center,
+            2,
+        )
+        # Outer ring
+        pygame.draw.circle(
+            dot_surf,
+            (col[0], col[1], col[2], int(160 * alpha)),
+            center,
+            7,
+            1,
+        )
+        # Expansion ripple during initial 220ms
+        if age < 220.0:
+            rip_prog = age / 220.0
+            rip_r = int(7 + rip_prog * 9)
+            rip_alpha = int((1.0 - rip_prog) * 200 * alpha)
+            if rip_alpha > 0 and rip_r <= 17:
+                pygame.draw.circle(
+                    dot_surf,
+                    (col[0], col[1], col[2], rip_alpha),
+                    center,
+                    rip_r,
+                    1,
+                )
+        self.screen.blit(dot_surf, (sx - 18, sy - 18))
+
+        # 2. Prepare badge text
+        tag_surf = self.font_click.render(click.key, True, (255, 255, 255))
+        tag_w = tag_surf.get_width() + 10
+        tag_h = 18
+
+        if click.delta_ms is not None:
+            sign = "+" if click.delta_ms >= 0 else ""
+            timing_str = f"({sign}{click.delta_ms:.1f}ms "
+            timing_surf = self.font_click.render(timing_str, True, (215, 225, 240))
+            res_str = f"{click.result})"
+            res_surf = self.font_click.render(res_str, True, col)
+        else:
+            timing_surf = self.font_click.render("(", True, (215, 225, 240))
+            res_str = f"{click.result})"
+            res_surf = self.font_click.render(res_str, True, col)
+
+        pad_x = 7
+        total_w = pad_x * 2 + tag_w + 4 + timing_surf.get_width() + res_surf.get_width()
+        total_h = 24
+
+        badge = pygame.Surface((total_w, total_h), pygame.SRCALPHA)
+        # Translucent dark body
+        pygame.draw.rect(
+            badge,
+            (16, 19, 28, int(225 * alpha)),
+            (0, 0, total_w, total_h),
+            border_radius=5,
+        )
+        # Accent border colored by judgement
+        pygame.draw.rect(
+            badge,
+            (col[0], col[1], col[2], int(190 * alpha)),
+            (0, 0, total_w, total_h),
+            1,
+            border_radius=5,
+        )
+
+        # Key Tag Box
+        tag_box = pygame.Rect(pad_x, (total_h - tag_h) // 2, tag_w, tag_h)
+        pygame.draw.rect(
+            badge,
+            (35, 42, 60, int(240 * alpha)),
+            tag_box,
+            border_radius=4,
+        )
+        pygame.draw.rect(
+            badge,
+            (85, 100, 135, int(180 * alpha)),
+            tag_box,
+            1,
+            border_radius=4,
+        )
+        badge.blit(tag_surf, tag_surf.get_rect(center=tag_box.center))
+
+        # Timing and Judgement text
+        tx = pad_x + tag_w + 4
+        ty = (total_h - timing_surf.get_height()) // 2
+        badge.blit(timing_surf, (tx, ty))
+        tx += timing_surf.get_width()
+        badge.blit(res_surf, (tx, ty))
+
+        # Set overall alpha for the badge
+        badge.set_alpha(int(255 * alpha))
+
+        # 3. Position badge
+        bx = int(sx - total_w // 2)
+        by = int(sy - total_h - 6)
+        if by < self.pf_rect.y + 4:
+            by = int(sy + 12)
+
+        # Clamp inside playfield bounds
+        bx = max(self.pf_rect.x + 4, min(self.pf_rect.right - total_w - 4, bx))
+        by = max(self.pf_rect.y + 4, min(self.pf_rect.bottom - total_h - 4, by))
+
+        self.screen.blit(badge, (bx, by))
 
     def render_toast(self):
         rem = self.toast_until - time.time()
@@ -1584,6 +1979,14 @@ class Visualizer:
             items.append(("SECTION", "// РЕПЛЕЙ ИГРОКА"))
             items.append(("ROW", "Курсор:", cursor_str, (220, 225, 240)))
             items.append(("ROW", "Дистанция:", dist_str, dist_col))
+            latest_click = self.get_latest_click_at(t)
+            if latest_click:
+                items.append(("ROW", "Посл. клик:", latest_click.badge_text, latest_click.color))
+        else:
+            latest_click = self.get_latest_click_at(t)
+            if latest_click:
+                items.append(("SECTION", "// ИНСПЕКЦИЯ КЛИКОВ"))
+                items.append(("ROW", "Посл. клик:", latest_click.badge_text, latest_click.color))
 
         items.append(("SECTION", "// АУДИО & СИНХРОНИЗАЦИЯ"))
         track_name = os.path.basename(self.audio_path) if self.audio_path else "Не найден (только клики)"
@@ -1748,8 +2151,13 @@ class Visualizer:
                         self.set_speed(1.0)
                     elif event.key in (pygame.K_r, pygame.K_HOME):
                         self.seek_to(self.start_time)
-                    elif event.key == pygame.K_x:
-                        self.skip_intro()
+                    elif event.key in (pygame.K_z, pygame.K_d):
+                        self.record_live_click("K1")
+                    elif event.key in (pygame.K_x, pygame.K_f):
+                        if self.can_skip_intro() and event.key == pygame.K_x:
+                            self.skip_intro()
+                        else:
+                            self.record_live_click("K2")
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                         self.adjust_audio_offset(-5.0)
                     elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
@@ -1773,8 +2181,8 @@ class Visualizer:
                         self.show_hud = not self.show_hud
 
                 elif event.type == pygame.MOUSEBUTTONDOWN:
+                    mx, my = event.pos
                     if event.button == 1:
-                        mx, my = event.pos
                         if self.btn_skip_rect and self.btn_skip_rect.collidepoint(mx, my):
                             self.skip_intro()
                         elif self.btn_maps_rect.collidepoint(mx, my):
@@ -1788,6 +2196,11 @@ class Visualizer:
                         elif my >= self.height - 60:
                             self.is_scrubbing = True
                             self.handle_mouse_seek(mx)
+                        elif self.pf_rect.collidepoint(mx, my):
+                            self.record_live_click("M1")
+                    elif event.button == 3:
+                        if self.pf_rect.collidepoint(mx, my):
+                            self.record_live_click("M2")
 
                 elif event.type == pygame.MOUSEBUTTONUP:
                     if event.button == 1:
