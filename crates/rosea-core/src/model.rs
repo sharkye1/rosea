@@ -74,3 +74,10 @@ pub struct TimingPoint {
     pub uninherited: bool,
     pub effects: u32,
 }
+
+/// Интервал перерыва между объектами в мс.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BreakPeriod {
+    pub start_time: f64,
+    pub end_time: f64,
+}

@@ -40,6 +40,10 @@ pub enum RoseaError {
         field: &'static str,
         line: usize,
     },
+    InvalidBreakField {
+        field: &'static str,
+        line: usize,
+    },
     InvalidSliderLength {
         line: usize,
         object_id: ObjectId,
@@ -125,6 +129,9 @@ impl fmt::Display for RoseaError {
             }
             Self::InvalidTimingPointField { field, line } => {
                 write!(f, "Строка {line}: некорректное поле timing point {field}")
+            }
+            Self::InvalidBreakField { field, line } => {
+                write!(f, "Строка {line}: некорректное поле перерыва {field}")
             }
             Self::InvalidSliderLength { line, object_id } => {
                 write!(
