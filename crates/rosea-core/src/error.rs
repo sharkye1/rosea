@@ -29,6 +29,10 @@ pub enum RoseaError {
         object_id: ObjectId,
         flags: u8,
     },
+    UnsupportedSliderSyntax {
+        line: usize,
+        object_id: ObjectId,
+    },
     InvalidTimingPointField {
         field: &'static str,
         line: usize,
@@ -100,6 +104,13 @@ impl fmt::Display for RoseaError {
                 write!(
                     f,
                     "Строка {line}, объект {}: тип объекта или кривая не поддерживается (type={flags})",
+                    object_id.0
+                )
+            }
+            Self::UnsupportedSliderSyntax { line, object_id } => {
+                write!(
+                    f,
+                    "Строка {line}, объект {}: синтаксис пути слайдера не поддерживается",
                     object_id.0
                 )
             }

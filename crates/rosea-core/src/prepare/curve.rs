@@ -1,10 +1,45 @@
-//! Геометрия L по SPEC §14.2: нормализация, префиксы расстояний и заданная длина.
+//! Геометрия L/B: нормализация, аппроксимация Безье и выборка по длине пути.
 
 use crate::error::RoseaError;
 use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point};
 
 const MAX_CONTROLS: usize = 4096;
 const MAX_COORDINATE: f32 = 1_000_000.0;
+const MAX_VERTICES: usize = 2_000_000;
+const MAX_INTERPOLATIONS: usize = 20_000_000;
+const MAX_DEPTH: u32 = 32;
+
+/// Счётчики общие для всех путей одного вызова подготовки карты.
+#[derive(Default)]
+pub(super) struct PathBudget {
+    vertices: usize,
+    interpolations: usize,
+}
+
+impl PathBudget {
+    fn check_vertices(&self, count: usize) -> Result<(), RoseaError> {
+        if count > MAX_VERTICES - self.vertices {
+            return Err(RoseaError::ResourceLimit {
+                resource: "prepared_vertices",
+                limit: MAX_VERTICES as u64,
+                observed: (self.vertices + count) as u64,
+            });
+        }
+        Ok(())
+    }
+
+    fn reserve_interpolations(&mut self, count: usize) -> Result<(), RoseaError> {
+        if count > MAX_INTERPOLATIONS - self.interpolations {
+            return Err(RoseaError::ResourceLimit {
+                resource: "bezier_interpolations",
+                limit: MAX_INTERPOLATIONS as u64,
+                observed: (self.interpolations + count) as u64,
+            });
+        }
+        self.interpolations += count;
+        Ok(())
+    }
+}
 
 /// Неизменяемый путь в координатах относительно нормализованного начала объекта.
 /// Один и тот же путь предназначен для игровой логики и растеризатора.
@@ -90,8 +125,33 @@ impl PreparedPath {
     }
 }
 
-/// Готовит геометрию одного L-слайдера по SPEC §14.2; времена и число проходов здесь не применяются.
+/// Готовит только L-путь; для L/B используется slider_path.
 pub fn linear_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
+    if !matches!(
+        object.kind,
+        HitObjectKind::Slider {
+            kind: CurveKind::Linear,
+            ..
+        }
+    ) {
+        return Err(RoseaError::InvalidHitObjectField {
+            field: "type",
+            line: object.line,
+            object_id: object.id,
+        });
+    }
+    slider_path(object)
+}
+
+/// Готовит один L/B-путь. Времена и число проходов здесь не применяются.
+pub fn slider_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
+    path_with_budget(object, &mut PathBudget::default())
+}
+
+pub(super) fn path_with_budget(
+    object: &HitObject,
+    budget: &mut PathBudget,
+) -> Result<PreparedPath, RoseaError> {
     let invalid = |field| RoseaError::InvalidHitObjectField {
         field,
         line: object.line,
@@ -102,7 +162,7 @@ pub fn linear_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
         object_id: object.id,
     };
     let HitObjectKind::Slider {
-        kind: CurveKind::Linear,
+        kind,
         controls,
         declared_length,
         ..
@@ -138,11 +198,14 @@ pub fn linear_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
     if controls[0] != object.position {
         return Err(invalid("curvePoints"));
     }
-    // y=512 намеренно: это граница legacy-нормализации, заданная в SPEC, а не высота поля.
+    // y=512 — граница legacy-нормализации исходных координат.
     let origin = Point {
         x: object.position.x.clamp(0.0, 512.0).trunc() as i32 as f32,
         y: object.position.y.clamp(0.0, 512.0).trunc() as i32 as f32,
     };
+    if *kind == CurveKind::Linear {
+        budget.check_vertices(controls.len())?;
+    }
     let mut vertices = Vec::with_capacity(controls.len() + 1);
     vertices.push(Point { x: 0.0, y: 0.0 });
     for point in &controls[1..] {
@@ -150,6 +213,9 @@ pub fn linear_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
             x: (point.x.trunc() as i32 as f32) - origin.x,
             y: (point.y.trunc() as i32 as f32) - origin.y,
         });
+    }
+    if *kind == CurveKind::Bezier {
+        vertices = bezier_path(&vertices, budget)?;
     }
     // Флаг сохраняется до удаления дублей: одинаковый конец запрещает удлинение.
     let duplicate_end =
@@ -199,12 +265,14 @@ pub fn linear_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
         if !end.x.is_finite() || !end.y.is_finite() {
             return Err(numerical());
         }
+        budget.check_vertices(vertices.len() + 1)?;
         vertices.push(end);
         cumulative_lengths.push(*declared_length);
         length = *declared_length;
     }
     // Последний префикс после обрезки/удлинения уже равен объявленной длине.
     // Не пересчитываем его по округлённой f32-вершине.
+    budget.vertices += vertices.len();
     Ok(PreparedPath {
         origin,
         vertices,
@@ -213,6 +281,81 @@ pub fn linear_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
         object_id: object.id,
         line: object.line,
     })
+}
+
+fn bezier_path(controls: &[Point], budget: &mut PathBudget) -> Result<Vec<Point>, RoseaError> {
+    let mut vertices = Vec::new();
+    let mut start = 0;
+    for index in 0..controls.len() {
+        if index + 1 == controls.len() || controls[index] == controls[index + 1] {
+            let segment: Vec<_> = controls[start..=index]
+                .iter()
+                .map(|point| [f64::from(point.x), f64::from(point.y)])
+                .collect();
+            approximate_bezier(&segment, 0, &mut vertices, budget)?;
+            start = index + 1;
+        }
+    }
+    Ok(vertices)
+}
+
+fn approximate_bezier(
+    controls: &[[f64; 2]],
+    depth: u32,
+    vertices: &mut Vec<Point>,
+    budget: &mut PathBudget,
+) -> Result<(), RoseaError> {
+    let degree = controls.len() - 1;
+    let first = controls[0];
+    let last = controls[degree];
+    // Сравниваем с равномерной параметризацией хорды: одного расстояния до прямой мало.
+    let flat = degree == 0
+        || controls.iter().enumerate().all(|(index, point)| {
+            let fraction = index as f64 / degree as f64;
+            let dx = point[0] - (first[0] + (last[0] - first[0]) * fraction);
+            let dy = point[1] - (first[1] + (last[1] - first[1]) * fraction);
+            dx * dx + dy * dy <= 0.25 * 0.25
+        });
+    if flat {
+        for value in [first, last] {
+            let point = Point {
+                x: value[0] as f32,
+                y: value[1] as f32,
+            };
+            if vertices.last() != Some(&point) {
+                budget.check_vertices(vertices.len() + 1)?;
+                vertices.push(point);
+            }
+        }
+        return Ok(());
+    }
+    if depth == MAX_DEPTH {
+        return Err(RoseaError::ResourceLimit {
+            resource: "bezier_depth",
+            limit: u64::from(MAX_DEPTH),
+            observed: u64::from(depth) + 1,
+        });
+    }
+    // Полное число соседних средних известно заранее; проверяем бюджет до выделения дочерних наборов.
+    budget.reserve_interpolations(degree * (degree + 1) / 2)?;
+    let mut level = controls.to_vec();
+    let mut left = Vec::with_capacity(controls.len());
+    let mut right = Vec::with_capacity(controls.len());
+    left.push(first);
+    right.push(last);
+    for size in (1..controls.len()).rev() {
+        for index in 0..size {
+            level[index] = [
+                (level[index][0] + level[index + 1][0]) / 2.0,
+                (level[index][1] + level[index + 1][1]) / 2.0,
+            ];
+        }
+        left.push(level[0]);
+        right.push(level[size - 1]);
+    }
+    right.reverse();
+    approximate_bezier(&left, depth + 1, vertices, budget)?;
+    approximate_bezier(&right, depth + 1, vertices, budget)
 }
 
 fn segment_length(start: Point, end: Point) -> f64 {
@@ -226,5 +369,91 @@ fn interpolate(start: Point, end: Point, fraction: f64) -> Point {
     Point {
         x: (f64::from(start.x) + (f64::from(end.x) - f64::from(start.x)) * fraction) as f32,
         y: (f64::from(start.y) + (f64::from(end.y) - f64::from(start.y)) * fraction) as f32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flatness_includes_the_boundary_and_subdivides_above_it() {
+        for (height, expected_count) in [(0.25, 2), (0.250001, 3)] {
+            let mut vertices = Vec::new();
+            approximate_bezier(
+                &[[0.0, 0.0], [0.5, height], [1.0, 0.0]],
+                0,
+                &mut vertices,
+                &mut PathBudget::default(),
+            )
+            .unwrap();
+            assert_eq!(vertices.len(), expected_count);
+        }
+    }
+
+    #[test]
+    fn depth_limit_rejects_unfinished_curve_but_accepts_a_flat_leaf() {
+        let mut vertices = Vec::new();
+        let mut budget = PathBudget::default();
+        assert_eq!(
+            approximate_bezier(
+                &[[0.0, 0.0], [50.0, 100.0], [100.0, 0.0]],
+                MAX_DEPTH,
+                &mut vertices,
+                &mut budget
+            ),
+            Err(RoseaError::ResourceLimit {
+                resource: "bezier_depth",
+                limit: 32,
+                observed: 33,
+            })
+        );
+        assert!(vertices.is_empty());
+        assert_eq!(budget.interpolations, 0);
+        approximate_bezier(
+            &[[0.0, 0.0], [100.0, 0.0]],
+            MAX_DEPTH,
+            &mut vertices,
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(vertices.len(), 2);
+    }
+
+    #[test]
+    fn exhausted_budgets_fail_before_emitting_vertices_or_splitting() {
+        let mut vertices = Vec::new();
+        let mut budget = PathBudget {
+            vertices: MAX_VERTICES,
+            interpolations: 0,
+        };
+        assert_eq!(
+            approximate_bezier(&[[0.0, 0.0]], 0, &mut vertices, &mut budget),
+            Err(RoseaError::ResourceLimit {
+                resource: "prepared_vertices",
+                limit: 2_000_000,
+                observed: 2_000_001,
+            })
+        );
+        assert!(vertices.is_empty());
+        budget = PathBudget {
+            vertices: 0,
+            interpolations: MAX_INTERPOLATIONS - 3,
+        };
+        // Один вызов тратит последние три операции; следующий уже не должен менять счётчик.
+        let controls = [[0.0, 0.0], [0.5, 0.5], [1.0, 0.0]];
+        approximate_bezier(&controls, 0, &mut vertices, &mut budget).unwrap();
+        assert_eq!(budget.interpolations, MAX_INTERPOLATIONS);
+        let before = vertices.clone();
+        assert_eq!(
+            approximate_bezier(&controls, 0, &mut vertices, &mut budget),
+            Err(RoseaError::ResourceLimit {
+                resource: "bezier_interpolations",
+                limit: 20_000_000,
+                observed: 20_000_003,
+            })
+        );
+        assert_eq!(vertices, before);
+        assert_eq!(budget.interpolations, MAX_INTERPOLATIONS);
     }
 }

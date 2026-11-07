@@ -1,4 +1,4 @@
-//! Чтение кругов и L-слайдеров. Построение пути и вычисление длительности относятся к prepare.
+//! Чтение кругов и L/B-слайдеров. Построение пути и времён относится к prepare.
 
 use crate::error::RoseaError;
 use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point};
@@ -10,7 +10,7 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_CONTROLS: usize = 4096;
 const MAX_SPANS: u32 = 10_000;
 
-/// Читает смешанный список кругов и L-слайдеров по (start_time, исходный ID).
+/// Читает смешанный список кругов и L/B-слайдеров по (start_time, исходный ID).
 pub fn osu_hit_objects(bytes: &[u8]) -> Result<Vec<HitObject>, RoseaError> {
     parse_objects(bytes, true)
 }
@@ -156,9 +156,16 @@ fn parse_slider(
     // Последний hitSample может содержать запятые в имени файла.
     let mut fields = tail.splitn(6, ',').map(str::trim);
     let mut curve = fields.next().unwrap_or("").split('|').map(str::trim);
-    match curve.next().unwrap_or("") {
+    let kind = match curve.next().unwrap_or("") {
         "" => return Err(invalid("curveType")),
-        "L" => {}
+        "L" => CurveKind::Linear,
+        "B" => CurveKind::Bezier,
+        value if value.starts_with(['L', 'B', 'P', 'C']) && value.len() > 1 => {
+            return Err(RoseaError::UnsupportedSliderSyntax {
+                line,
+                object_id: id,
+            });
+        }
         _ => {
             return Err(RoseaError::UnsupportedHitObject {
                 line,
@@ -166,7 +173,7 @@ fn parse_slider(
                 flags,
             });
         }
-    }
+    };
     let spans: u32 = fields
         .next()
         .unwrap_or("")
@@ -193,6 +200,13 @@ fn parse_slider(
     // Голова — первая контрольная точка. Лимит учитывает и её, до роста Vec.
     let mut controls = vec![position];
     for point in curve {
+        // Маркеры типов внутри пути относятся к расширенному формату, а не к координатам.
+        if point.starts_with(['L', 'B', 'P', 'C']) {
+            return Err(RoseaError::UnsupportedSliderSyntax {
+                line,
+                object_id: id,
+            });
+        }
         if controls.len() == MAX_CONTROLS {
             return Err(RoseaError::ResourceLimit {
                 resource: "slider_control_points",
@@ -236,7 +250,7 @@ fn parse_slider(
     }
     validate_hit_sample(fields.next().unwrap_or(""), line, id)?;
     Ok(HitObjectKind::Slider {
-        kind: CurveKind::Linear,
+        kind,
         controls,
         spans,
         declared_length: if declared_length == 0.0 {

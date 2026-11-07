@@ -22,10 +22,11 @@ pub struct Circle {
     pub hit_sound: u8,
 }
 
-/// Тип пути из файла; пока разбирается только линейный L.
+/// Поддерживаемые типы пути: ломаная L и кривая Безье B.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CurveKind {
     Linear,
+    Bezier,
 }
 
 #[derive(Debug, PartialEq)]

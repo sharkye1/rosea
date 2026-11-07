@@ -1,14 +1,14 @@
 //! Скорость слайдеров и времена вложенных частей. Арифметика сохраняет дробные миллисекунды.
 
 use crate::error::RoseaError;
-use crate::model::{HitObject, HitObjectKind, ObjectId, Point, TimingPoint};
+use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point, TimingPoint};
 use crate::parse::Difficulty;
 
-use super::{PreparedPath, linear_path};
+use super::PreparedPath;
+use super::curve::{PathBudget, path_with_budget};
 
 const MAX_OBJECTS: usize = 100_000;
 const MAX_TIMING_POINTS: usize = 100_000;
-const MAX_VERTICES: usize = 2_000_000;
 const MAX_EVENTS: usize = 2_000_000;
 const MAX_SPANS: u32 = 10_000;
 const MAX_TIME: f64 = 86_400_000.0;
@@ -85,8 +85,32 @@ impl PreparedSlider {
     }
 }
 
-/// Готовит все L-слайдеры карты; круги пропускаются. Лимиты вершин и частей общие для вызова.
+/// Прежний вход только для L-слайдеров; смешанные L/B-карты готовятся через sliders.
 pub fn linear_sliders(
+    objects: &[HitObject],
+    difficulty: &Difficulty,
+    timing_points: &[TimingPoint],
+) -> Result<Vec<PreparedSlider>, RoseaError> {
+    for object in objects {
+        if matches!(
+            object.kind,
+            HitObjectKind::Slider {
+                kind: CurveKind::Bezier,
+                ..
+            }
+        ) {
+            return Err(RoseaError::InvalidHitObjectField {
+                field: "type",
+                line: object.line,
+                object_id: object.id,
+            });
+        }
+    }
+    sliders(objects, difficulty, timing_points)
+}
+
+/// Готовит L/B-слайдеры карты, пропуская круги. Бюджеты геометрии и частей общие для вызова.
+pub fn sliders(
     objects: &[HitObject],
     difficulty: &Difficulty,
     timing_points: &[TimingPoint],
@@ -164,7 +188,7 @@ pub fn linear_sliders(
     let mut next_point = 0;
     let mut beat_length = None;
     let mut speed_multiplier = 1.0;
-    let mut used_vertices = 0;
+    let mut path_budget = PathBudget::default();
     let mut used_events = 0;
     let mut prepared = Vec::with_capacity(sliders.len());
     for object in sliders {
@@ -205,15 +229,7 @@ pub fn linear_sliders(
             object_id: object.id,
             message: "До начала слайдера не задан BPM",
         })?;
-        let path = linear_path(object)?;
-        if path.vertices().len() > MAX_VERTICES - used_vertices {
-            return Err(RoseaError::ResourceLimit {
-                resource: "prepared_vertices",
-                limit: MAX_VERTICES as u64,
-                observed: (used_vertices + path.vertices().len()) as u64,
-            });
-        }
-        used_vertices += path.vertices().len();
+        let path = path_with_budget(object, &mut path_budget)?;
         let timing = slider_timing(
             object,
             &path,

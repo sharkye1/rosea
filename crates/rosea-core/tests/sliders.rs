@@ -1,4 +1,4 @@
-//! Проверяем чтение L-слайдеров, общие ID с кругами и пределы исходных данных.
+//! Чтение L/B-слайдеров, общие ID с кругами и пределы исходных данных.
 
 use rosea_core::error::RoseaError;
 use rosea_core::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point};
@@ -83,6 +83,76 @@ fn preserves_degenerate_controls_zero_length_and_pass_count() {
 }
 
 #[test]
+fn reads_bezier_controls_and_keeps_segment_separators() {
+    let text = map("0,0,200,2,0,B|100:0|100:0|100:100,3,200\n1,2,100,1,0");
+    let objects = osu_hit_objects(text.as_bytes()).unwrap();
+    assert_eq!(objects[1].id, ObjectId(0));
+    assert_eq!(
+        objects[1].kind,
+        HitObjectKind::Slider {
+            kind: CurveKind::Bezier,
+            controls: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 100.0, y: 0.0 },
+                Point { x: 100.0, y: 0.0 },
+                Point { x: 100.0, y: 100.0 },
+            ],
+            spans: 3,
+            declared_length: 200.0,
+        }
+    );
+    assert!(matches!(
+        osu_circles(text.as_bytes()),
+        Err(RoseaError::UnsupportedHitObject { .. })
+    ));
+}
+
+#[test]
+fn rejects_extended_slider_syntax_with_source_context() {
+    for curve in [
+        "B3|100:0",
+        "B2|100:0",
+        "B|100:0|L|200:0",
+        "B|P|100:0",
+        "L|100:0|B3|200:0",
+    ] {
+        let text = map(&format!("0,0,0,1,0\n0,0,0,2,0,{curve},1,100"));
+        assert_eq!(
+            osu_hit_objects(text.as_bytes()),
+            Err(RoseaError::UnsupportedSliderSyntax {
+                line: 4,
+                object_id: ObjectId(1),
+            }),
+            "{curve}"
+        );
+    }
+    for (tail, field) in [
+        ("B,1,100", "curvePoints"),
+        ("B|NaN:0,1,100", "curvePoints"),
+        ("B|100:0,0,100", "slides"),
+        ("B|100:0,1,-1", "length"),
+    ] {
+        let text = map(&format!("0,0,0,2,0,{tail}"));
+        assert_eq!(
+            osu_hit_objects(text.as_bytes()),
+            Err(RoseaError::InvalidHitObjectField {
+                field,
+                line: 3,
+                object_id: ObjectId(0),
+            })
+        );
+    }
+    let text = map(&format!("0,0,0,2,0,B{},1,100", "|1:1".repeat(4096)));
+    assert!(matches!(
+        osu_hit_objects(text.as_bytes()),
+        Err(RoseaError::ResourceLimit {
+            resource: "slider_control_points",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn rejects_missing_or_invalid_slider_fields_with_source_context() {
     let cases = [
         ("", "curveType"),
@@ -120,7 +190,7 @@ fn rejects_missing_or_invalid_slider_fields_with_source_context() {
 
 #[test]
 fn rejects_other_curves_and_ambiguous_base_types() {
-    for curve in ["B", "P", "C", "X"] {
+    for curve in ["P", "C", "X"] {
         let text = map(&format!("256,192,1000,2,0,{curve}|300:200,1,100"));
         assert_eq!(
             osu_hit_objects(text.as_bytes()),
