@@ -1,4 +1,4 @@
-//! Чтение кругов и L-слайдеров. Построение пути и вычисление длительности относятся к prepare.
+//! Чтение кругов, L/B/P-слайдеров и спиннеров. Построение пути и времён относится к prepare.
 
 use crate::error::RoseaError;
 use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point};
@@ -10,15 +10,15 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_CONTROLS: usize = 4096;
 const MAX_SPANS: u32 = 10_000;
 
-/// Читает смешанный список кругов и L-слайдеров по (start_time, исходный ID).
+/// Читает смешанный список кругов, L/B/P-слайдеров и спиннеров по (start_time, исходный ID).
 pub fn osu_hit_objects(bytes: &[u8]) -> Result<Vec<HitObject>, RoseaError> {
     parse_objects(bytes, true)
 }
 
-// Старый вход osu_circles использует тот же разбор, сохраняя отказ на слайдерах.
+// Старый вход osu_circles использует тот же разбор, сохраняя отказ на слайдерах и спиннерах.
 pub(super) fn parse_objects(
     bytes: &[u8],
-    allow_sliders: bool,
+    allow_complex: bool,
 ) -> Result<Vec<HitObject>, RoseaError> {
     osu_mode(bytes)?;
     let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
@@ -50,9 +50,9 @@ pub(super) fn parse_objects(
                 observed: objects.len() as u64 + 1,
             });
         }
-        // ID назначается до сортировки и общий для кругов и слайдеров.
+        // ID назначается до сортировки и общий для кругов, слайдеров и спиннеров.
         let id = ObjectId(objects.len() as u32);
-        objects.push(parse_object(line, index + 1, id, allow_sliders)?);
+        objects.push(parse_object(line, index + 1, id, allow_complex)?);
     }
     if objects.is_empty() {
         return Err(RoseaError::EmptyBeatmap);
@@ -69,7 +69,7 @@ fn parse_object(
     line: &str,
     line_number: usize,
     id: ObjectId,
-    allow_sliders: bool,
+    allow_complex: bool,
 ) -> Result<HitObject, RoseaError> {
     let invalid = |field| RoseaError::InvalidHitObjectField {
         field,
@@ -100,7 +100,10 @@ fn parse_object(
         .map_err(|_| invalid("type"))?;
     // Флаги new-combo и цвета не входят в маску базового типа.
     let base_type = flags & (1 | 2 | 8 | 128);
-    if base_type != 1 && !(allow_sliders && base_type == 2) {
+    let is_circle = base_type == 1;
+    let is_slider = allow_complex && base_type == 2;
+    let is_spinner = allow_complex && base_type == 8;
+    if !is_circle && !is_slider && !is_spinner {
         return Err(RoseaError::UnsupportedHitObject {
             line: line_number,
             object_id: id,
@@ -123,11 +126,13 @@ fn parse_object(
     }
     let position = Point { x, y };
     let tail = fields.next().unwrap_or("");
-    let kind = if base_type == 1 {
+    let kind = if is_circle {
         validate_hit_sample(tail, line_number, id)?;
         HitObjectKind::Circle
-    } else {
+    } else if is_slider {
         parse_slider(tail, position, line_number, id, flags)?
+    } else {
+        parse_spinner(tail, start_time, line_number, id)?
     };
     Ok(HitObject {
         id,
@@ -138,6 +143,34 @@ fn parse_object(
         flags,
         hit_sound,
         kind,
+    })
+}
+
+fn parse_spinner(
+    tail: &str,
+    start_time: f64,
+    line: usize,
+    id: ObjectId,
+) -> Result<HitObjectKind, RoseaError> {
+    let invalid = |field| RoseaError::InvalidHitObjectField {
+        field,
+        line,
+        object_id: id,
+    };
+    if tail.is_empty() {
+        return Err(invalid("endTime"));
+    }
+    let (end_str, sample_str) = match tail.split_once(',') {
+        Some((end, sample)) => (end.trim(), sample.trim()),
+        None => (tail.trim(), ""),
+    };
+    let end: f64 = end_str.parse().map_err(|_| invalid("endTime"))?;
+    if !end.is_finite() || end < start_time {
+        return Err(invalid("endTime"));
+    }
+    validate_hit_sample(sample_str, line, id)?;
+    Ok(HitObjectKind::Spinner {
+        end: if end == 0.0 { 0.0 } else { end },
     })
 }
 
@@ -156,9 +189,17 @@ fn parse_slider(
     // Последний hitSample может содержать запятые в имени файла.
     let mut fields = tail.splitn(6, ',').map(str::trim);
     let mut curve = fields.next().unwrap_or("").split('|').map(str::trim);
-    match curve.next().unwrap_or("") {
+    let kind = match curve.next().unwrap_or("") {
         "" => return Err(invalid("curveType")),
-        "L" => {}
+        "L" => CurveKind::Linear,
+        "B" => CurveKind::Bezier,
+        "P" => CurveKind::PerfectCurve,
+        value if value.starts_with(['L', 'B', 'P', 'C']) && value.len() > 1 => {
+            return Err(RoseaError::UnsupportedSliderSyntax {
+                line,
+                object_id: id,
+            });
+        }
         _ => {
             return Err(RoseaError::UnsupportedHitObject {
                 line,
@@ -166,7 +207,7 @@ fn parse_slider(
                 flags,
             });
         }
-    }
+    };
     let spans: u32 = fields
         .next()
         .unwrap_or("")
@@ -193,6 +234,13 @@ fn parse_slider(
     // Голова — первая контрольная точка. Лимит учитывает и её, до роста Vec.
     let mut controls = vec![position];
     for point in curve {
+        // Маркеры типов внутри пути относятся к расширенному формату, а не к координатам.
+        if point.starts_with(['L', 'B', 'P', 'C']) {
+            return Err(RoseaError::UnsupportedSliderSyntax {
+                line,
+                object_id: id,
+            });
+        }
         if controls.len() == MAX_CONTROLS {
             return Err(RoseaError::ResourceLimit {
                 resource: "slider_control_points",
@@ -236,7 +284,7 @@ fn parse_slider(
     }
     validate_hit_sample(fields.next().unwrap_or(""), line, id)?;
     Ok(HitObjectKind::Slider {
-        kind: CurveKind::Linear,
+        kind,
         controls,
         spans,
         declared_length: if declared_length == 0.0 {

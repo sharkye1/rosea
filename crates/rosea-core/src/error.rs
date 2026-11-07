@@ -9,9 +9,12 @@ use crate::model::ObjectId;
 pub enum RoseaError {
     InvalidEncoding,
     InvalidHeader,
-    UnsupportedVersion(u32),
+    UnsupportedBeatmapVersion(u32),
     InvalidMode,
     UnsupportedMode(u32),
+    InvalidStackLeniency {
+        line: usize,
+    },
     DuplicateField,
     MissingDifficultyField(&'static str),
     InvalidDifficultyField {
@@ -29,9 +32,26 @@ pub enum RoseaError {
         object_id: ObjectId,
         flags: u8,
     },
+    UnsupportedSliderSyntax {
+        line: usize,
+        object_id: ObjectId,
+    },
     InvalidTimingPointField {
         field: &'static str,
         line: usize,
+    },
+    InvalidSliderLength {
+        line: usize,
+        object_id: ObjectId,
+    },
+    NumericalError {
+        line: usize,
+        object_id: ObjectId,
+    },
+    PreprocessError {
+        line: usize,
+        object_id: ObjectId,
+        message: &'static str,
     },
     ResourceLimit {
         resource: &'static str,
@@ -45,12 +65,18 @@ impl fmt::Display for RoseaError {
         match self {
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),
-            Self::UnsupportedVersion(version) => {
+            Self::UnsupportedBeatmapVersion(version) => {
                 write!(f, "Версия v{version} не поддерживается, нужна v14")
             }
             Self::InvalidMode => write!(f, "В поле Mode должно быть целое неотрицательное число"),
             Self::UnsupportedMode(mode) => {
                 write!(f, "Режим {mode} не поддерживается, нужен Mode: 0")
+            }
+            Self::InvalidStackLeniency { line } => {
+                write!(
+                    f,
+                    "Строка {line}: StackLeniency должен быть конечным числом от 0 до 1"
+                )
             }
             Self::DuplicateField => write!(f, "Поддерживаемое поле указано повторно"),
             Self::MissingDifficultyField(field) => {
@@ -90,8 +116,36 @@ impl fmt::Display for RoseaError {
                     object_id.0
                 )
             }
+            Self::UnsupportedSliderSyntax { line, object_id } => {
+                write!(
+                    f,
+                    "Строка {line}, объект {}: синтаксис пути слайдера не поддерживается",
+                    object_id.0
+                )
+            }
             Self::InvalidTimingPointField { field, line } => {
                 write!(f, "Строка {line}: некорректное поле timing point {field}")
+            }
+            Self::InvalidSliderLength { line, object_id } => {
+                write!(
+                    f,
+                    "Строка {line}, объект {}: длина слайдера должна быть конечной и неотрицательной",
+                    object_id.0
+                )
+            }
+            Self::NumericalError { line, object_id } => {
+                write!(
+                    f,
+                    "Строка {line}, объект {}: некорректный численный результат при подготовке или выборке объекта",
+                    object_id.0
+                )
+            }
+            Self::PreprocessError {
+                line,
+                object_id,
+                message,
+            } => {
+                write!(f, "Строка {line}, объект {}: {message}", object_id.0)
             }
             Self::ResourceLimit {
                 resource,

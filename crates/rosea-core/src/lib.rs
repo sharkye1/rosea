@@ -5,6 +5,7 @@
 pub mod error;
 pub mod model;
 pub mod parse;
+pub mod prepare;
 
 pub const PROFILE_ID: &str = "rosea-mvp-v1";
 

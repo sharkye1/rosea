@@ -87,13 +87,10 @@ fn parse_timing_point(line: &str, line_number: usize) -> Result<TimingPoint, Ros
         1 => true,
         _ => return Err(invalid("uninherited")),
     };
-    // У обычной точки beatLength положителен; у inherited — отрицателен.
-    // Обратный множитель сохраняем как записан; перевод в скорость оставляем для prepare.
+    // У обычной точки beatLength положителен. У inherited сохраняем любой конечный:
+    // отрицательный задаёт обратный множитель, неотрицательный сбрасывает скорость.
     let beat_length: f64 = values[1].parse().map_err(|_| invalid("beatLength"))?;
-    if !beat_length.is_finite()
-        || (uninherited && beat_length <= 0.0)
-        || (!uninherited && beat_length >= 0.0)
-    {
+    if !beat_length.is_finite() || (uninherited && beat_length <= 0.0) {
         return Err(invalid("beatLength"));
     }
     let meter: u32 = values[2].parse().map_err(|_| invalid("meter"))?;

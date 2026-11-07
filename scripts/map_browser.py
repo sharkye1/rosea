@@ -156,9 +156,10 @@ def fast_scan_beatmap(path: str) -> Optional[MapEntry]:
                                 has_sliders = True
                                 if len(fields) >= 6:
                                     tail = fields[5].strip()
-                                    if tail and not tail.startswith("L|") and not tail.startswith("L,"):
+                                    # Rust rosea-core supports L, B, and P sliders (only C is unsupported)
+                                    if tail and tail[0] in ('C', 'c'):
                                         has_complex_objects = True
-                            elif base_type in (8, 128) or base_type not in (1, 2):
+                            elif base_type not in (1, 2, 8, 128):
                                 has_complex_objects = True
                         except ValueError:
                             pass
@@ -230,7 +231,7 @@ def scan_all_maps(
 
                 category = f"osu! {rep.source_folder}"
                 display = f"{bm['artist']} - {bm['title']} [{bm['version']}]"
-                rust_ok = (bm["sliders"] == 0 and bm["spinners"] == 0)
+                rust_ok = True
 
                 entry = MapEntry(
                     file_path=osu_path,

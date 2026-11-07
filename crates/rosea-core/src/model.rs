@@ -22,10 +22,12 @@ pub struct Circle {
     pub hit_sound: u8,
 }
 
-/// Тип пути из файла; пока разбирается только линейный L.
+/// Поддерживаемые типы пути: ломаная L, кривая Безье B и дуга окружности P.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CurveKind {
     Linear,
+    Bezier,
+    PerfectCurve,
 }
 
 #[derive(Debug, PartialEq)]
@@ -39,9 +41,13 @@ pub enum HitObjectKind {
         spans: u32,
         declared_length: f64,
     },
+    Spinner {
+        // Время окончания спиннера в мс.
+        end: f64,
+    },
 }
 
-/// Общие поля круга и слайдера до подготовки геометрии и времён.
+/// Общие поля круга, слайдера и спиннера до подготовки геометрии и времён.
 #[derive(Debug, PartialEq)]
 pub struct HitObject {
     pub id: ObjectId,
@@ -55,7 +61,7 @@ pub struct HitObject {
 
 /// Исходная timing point. Смысл beat_length зависит от флага uninherited:
 /// true — положительная длительность бита в мс;
-/// false — отрицательный обратный множитель скорости в процентах.
+/// false — обратный множитель скорости в процентах; неотрицательное значение сбрасывает скорость.
 #[derive(Debug, PartialEq)]
 pub struct TimingPoint {
     pub line: usize,

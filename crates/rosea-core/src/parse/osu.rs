@@ -31,7 +31,7 @@ pub fn osu_header(bytes: &[u8]) -> Result<u32, RoseaError> {
             .ok_or(RoseaError::InvalidHeader)?;
         let version: u32 = version.parse().map_err(|_| RoseaError::InvalidHeader)?;
         if version != 14 {
-            return Err(RoseaError::UnsupportedVersion(version));
+            return Err(RoseaError::UnsupportedBeatmapVersion(version));
         }
         return Ok(version);
     }
@@ -80,6 +80,53 @@ pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
 
     // Отсутствующий Mode означает Standard по правилам формата.
     Ok(mode.unwrap_or(0))
+}
+
+/// Читает StackLeniency из General; без поля или секции возвращает 0.7.
+pub fn osu_stack_leniency(bytes: &[u8]) -> Result<f32, RoseaError> {
+    const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+    osu_mode(bytes)?;
+    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let mut in_general = false;
+    let mut leniency = None;
+
+    for (index, raw_line) in text.lines().enumerate() {
+        if raw_line.len() > MAX_LINE_BYTES {
+            return Err(RoseaError::ResourceLimit {
+                resource: "osu_line_bytes",
+                limit: MAX_LINE_BYTES as u64,
+                observed: raw_line.len() as u64,
+            });
+        }
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_general = line == "[General]";
+            continue;
+        }
+        if !in_general {
+            continue;
+        }
+        let (key, value) = line.split_once(':').unwrap_or((line, ""));
+        if key.trim() != "StackLeniency" {
+            continue;
+        }
+        // Повторная секция General не разрешает второе объявление того же поля.
+        if leniency.is_some() {
+            return Err(RoseaError::DuplicateField);
+        }
+        let invalid = || RoseaError::InvalidStackLeniency { line: index + 1 };
+        let value: f32 = value.trim().parse().map_err(|_| invalid())?;
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(invalid());
+        }
+        leniency = Some(value);
+    }
+
+    Ok(leniency.unwrap_or(0.7))
 }
 
 /// Читает сложность; при отсутствии AR использует OD.

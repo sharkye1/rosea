@@ -124,6 +124,8 @@ def beatmap_from_rust_json(
             bm.preview_time = raw_bm.preview_time
             bm.stack_leniency = raw_bm.stack_leniency
             bm.combo_colours = list(raw_bm.combo_colours)
+            bm.beatmapset_id = raw_bm.beatmapset_id
+            bm.beatmap_id = raw_bm.beatmap_id
         except Exception:
             pass
 
@@ -176,7 +178,14 @@ def beatmap_from_rust_json(
 
         if kind == "slider":
             curve_str = str(ro.get("curve_kind", "linear"))
-            curve_type = "L" if curve_str == "linear" else "B"
+            if curve_str == "linear":
+                curve_type = "L"
+            elif curve_str == "bezier":
+                curve_type = "B"
+            elif curve_str in ("perfect", "perfect_curve"):
+                curve_type = "P"
+            else:
+                curve_type = "L"
             controls = [(float(p["x"]), float(p["y"])) for p in ro.get("controls", [])]
             spans = int(ro.get("spans", 1))
             length = float(ro.get("declared_length", 0.0))
@@ -269,10 +278,10 @@ def verify_beatmap(file_path: str) -> VerificationResult:
     # Check for unsupported raw objects
     has_unsupported_raw = bool(getattr(py_bm, "unsupported_objects", []))
 
-    # Rust currently supports Circle and Linear Slider (L)
+    # Rust supports Circle, Linear (L), Bezier (B), Perfect Curve (P), and Spinner
     rust_supported = (
         not has_unsupported_raw
-        and all(k in ("circle", "slider_L") for k in kinds)
+        and all(k in ("circle", "slider_L", "slider_B", "slider_P", "spinner") for k in kinds)
         and len(py_bm.hit_objects) > 0
     )
     res.rust_supported = rust_supported
@@ -283,7 +292,7 @@ def verify_beatmap(file_path: str) -> VerificationResult:
     if not rust_supported:
         # Rust should return an error (UnsupportedHitObject)
         if rust_out.get("status") == "error":
-            unsupported_kinds = [k for k in kinds if k not in ("circle", "slider_L")]
+            unsupported_kinds = [k for k in kinds if k not in ("circle", "slider_L", "slider_B", "slider_P", "spinner")]
             if has_unsupported_raw and not unsupported_kinds:
                 unsupported_kinds.append("unsupported_flags_or_malformed")
             res.status = "SKIPPED_UNSUPPORTED"
@@ -412,9 +421,11 @@ def verify_beatmap(file_path: str) -> VerificationResult:
                 )
                 break
             if ro["kind"] == "slider":
-                if ro.get("curve_kind") != "linear" or po.curve_type != "L":
+                curve_str = str(ro.get("curve_kind", "linear"))
+                expected_type = {"linear": "L", "bezier": "B", "perfect": "P"}.get(curve_str, "")
+                if expected_type != po.curve_type:
                     res.mismatches.append(
-                        f"Obj[{i}] slider curve mismatch: Rust={ro.get('curve_kind')}, Py={po.curve_type}"
+                        f"Obj[{i}] slider curve mismatch: Rust={curve_str}, Py={po.curve_type}"
                     )
                     break
                 if ro.get("spans") != po.spans:
@@ -439,6 +450,17 @@ def verify_beatmap(file_path: str) -> VerificationResult:
                             f"Obj[{i}] control[{ci}] mismatch: Rust=({rc['x']},{rc['y']}), Py={pc}"
                         )
                         break
+            elif ro["kind"] == "spinner":
+                if po.kind != "spinner":
+                    res.mismatches.append(f"Obj[{i}] kind mismatch: Rust=spinner, Py={po.kind}")
+                    break
+                r_end = float(ro.get("spinner_end_time", ro.get("end_time", 0.0)))
+                p_end = getattr(po, "spinner_end_time", getattr(po, "end_time", 0.0))
+                if abs(r_end - p_end) > 1e-3:
+                    res.mismatches.append(
+                        f"Obj[{i}] spinner end mismatch: Rust={r_end}, Py={p_end}"
+                    )
+                    break
 
     if res.mismatches:
         res.status = "FAIL"

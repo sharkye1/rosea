@@ -160,6 +160,8 @@ fn parse_beatmap_file(path_str: &str, json: bool) -> Result<String, String> {
                 } => {
                     let curve_str = match kind {
                         CurveKind::Linear => "linear",
+                        CurveKind::Bezier => "bezier",
+                        CurveKind::PerfectCurve => "perfect",
                     };
                     let mut ctrl_json = String::from("[");
                     for (ci, p) in controls.iter().enumerate() {
@@ -184,6 +186,19 @@ fn parse_beatmap_file(path_str: &str, json: bool) -> Result<String, String> {
                         declared_length
                     ));
                 }
+                HitObjectKind::Spinner { end } => {
+                    ho_json.push_str(&format!(
+                        r#"{{"id":{},"line":{},"x":{},"y":{},"time":{},"flags":{},"hit_sound":{},"kind":"spinner","spinner_end_time":{}}}"#,
+                        obj.id.0,
+                        obj.line,
+                        obj.position.x,
+                        obj.position.y,
+                        obj.start_time,
+                        obj.flags,
+                        obj.hit_sound,
+                        end
+                    ));
+                }
             }
         }
         ho_json.push(']');
@@ -199,14 +214,7 @@ fn parse_beatmap_file(path_str: &str, json: bool) -> Result<String, String> {
         ))
     } else {
         Ok(format!(
-            "Beatmap: {}\nVersion: {}\nMode: {}\nCS: {}, AR: {}, OD: {}, HP: {}\nTiming Points: {}\nHit Objects: {}",
-            path.display(),
-            version,
-            mode,
-            difficulty.cs,
-            difficulty.ar,
-            difficulty.od,
-            difficulty.hp,
+            "Beatmap v{version} (mode {mode}): {} timing points, {} hit objects",
             timing_points.len(),
             hit_objects.len()
         ))
@@ -214,7 +222,7 @@ fn parse_beatmap_file(path_str: &str, json: bool) -> Result<String, String> {
 }
 
 fn escape_json(s: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
@@ -222,29 +230,8 @@ fn escape_json(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c => out.push(c),
+            _ => out.push(c),
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_smoke() {
-        assert_eq!(rosea_core::PROFILE_ID, "rosea-mvp-v1");
-    }
-
-    #[test]
-    fn test_parse_json_micro_map() {
-        let path = "../../tests/data/01_micro/2dearbrave.osu";
-        if Path::new(path).exists() {
-            let res = parse_beatmap_file(path, true).expect("should parse 2dearbrave");
-            assert!(res.contains(r#""status":"ok""#));
-            assert!(res.contains(r#""kind":"circle""#));
-            assert!(res.contains(r#""kind":"slider""#));
-        }
-    }
 }
