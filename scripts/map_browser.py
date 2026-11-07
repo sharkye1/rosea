@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Rosea Map Browser - Non-blocking companion window for selecting beatmaps.
-Scans tests/data/ for all available .osu beatmaps, displays metadata,
-difficulty stats, Rust compatibility, and replay availability with real-time search.
+Scans tests/data/ and automatically detects osu! stable (osu!.db, Replays/, Data/r/)
+for all available beatmap + replay pairs. Displays metadata, difficulty stats,
+player info, high scores, Rust compatibility, and replay availability with real-time search.
 """
 
 import glob
@@ -13,7 +14,12 @@ import threading
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+try:
+    from osu_db import OsuStableDatabase, parse_replay_header_fast
+except ImportError:
+    from scripts.osu_db import OsuStableDatabase, parse_replay_header_fast
 
 
 @dataclass
@@ -32,6 +38,12 @@ class MapEntry:
     has_replay: bool
     rust_supported: bool
     display_title: str
+    replay_path: Optional[str] = None
+    player_name: str = ""
+    replay_score: int = 0
+    replay_combo: int = 0
+    replay_mods: int = 0
+    source_type: str = "tests"  # "tests" or "stable"
 
     def matches(self, query: str) -> bool:
         q = query.lower().strip()
@@ -44,6 +56,8 @@ class MapEntry:
             or q in self.filename.lower()
             or q in self.category.lower()
             or q in self.file_path.lower()
+            or q in self.player_name.lower()
+            or (self.replay_path and q in self.replay_path.lower())
         )
 
 
@@ -55,9 +69,32 @@ def fast_scan_beatmap(path: str) -> Optional[MapEntry]:
         category = parts[-2] if len(parts) >= 2 else "other"
         filename = os.path.basename(path)
 
-        # Check for adjacent .osr replay
+        # Check for adjacent or folder-local .osr replay
         candidate_osr = os.path.splitext(path)[0] + ".osr"
-        has_replay = os.path.isfile(candidate_osr)
+        has_replay = False
+        replay_path = None
+        player_name = ""
+        replay_score = 0
+        replay_combo = 0
+
+        folder = os.path.dirname(path)
+        if os.path.isfile(candidate_osr):
+            replay_path = candidate_osr
+        elif os.path.isdir(folder):
+            for f in os.listdir(folder):
+                if f.lower().endswith(".osr"):
+                    cand = os.path.join(folder, f)
+                    if os.path.isfile(cand):
+                        replay_path = cand
+                        break
+
+        if replay_path and os.path.isfile(replay_path):
+            has_replay = True
+            r_info = parse_replay_header_fast(replay_path)
+            if r_info:
+                player_name = r_info.player
+                replay_score = r_info.score
+                replay_combo = r_info.combo
 
         title = "Unknown"
         artist = "Unknown"
@@ -117,7 +154,6 @@ def fast_scan_beatmap(path: str) -> Optional[MapEntry]:
                             base_type = flags & (1 | 2 | 8 | 128)
                             if base_type == 2:
                                 has_sliders = True
-                                # Check curve type in tail
                                 if len(fields) >= 6:
                                     tail = fields[5].strip()
                                     if tail and not tail.startswith("L|") and not tail.startswith("L,"):
@@ -130,10 +166,9 @@ def fast_scan_beatmap(path: str) -> Optional[MapEntry]:
         if ar is None:
             ar = od
 
-        # Rust rosea-mvp-v1 supports circles and L-sliders
         rust_supported = not has_complex_objects and obj_count > 0
-
         display = f"{artist} - {title} [{version}]"
+
         return MapEntry(
             file_path=norm_path,
             category=category,
@@ -149,53 +184,112 @@ def fast_scan_beatmap(path: str) -> Optional[MapEntry]:
             has_replay=has_replay,
             rust_supported=rust_supported,
             display_title=display,
+            replay_path=replay_path,
+            player_name=player_name,
+            replay_score=replay_score,
+            replay_combo=replay_combo,
+            source_type="tests",
         )
     except Exception:
         return None
 
 
-def scan_all_maps(root_dir: str = "tests/data") -> List[MapEntry]:
-    """Scan root directory for all .osu beatmaps."""
-    pattern = os.path.join(root_dir, "**", "*.osu")
-    files = sorted(glob.glob(pattern, recursive=True))
-    entries = []
-    for f in files:
-        entry = fast_scan_beatmap(f)
-        if entry:
-            entries.append(entry)
+def scan_all_maps(
+    root_dir: str = "tests/data",
+    osu_dir: Optional[str] = None,
+) -> List[MapEntry]:
+    """
+    Safely and quickly scan available beatmaps:
+    1. Local tests/data directory.
+    2. osu! stable installation (osu!.db + Replays/ + Data/r/) matching pairs (<100ms).
+    """
+    entries: List[MapEntry] = []
+    seen_paths = set()
+
+    # 1. Scan tests/data directory
+    if os.path.isdir(root_dir):
+        pattern = os.path.join(root_dir, "**", "*.osu")
+        files = sorted(glob.glob(pattern, recursive=True))
+        for f in files:
+            e = fast_scan_beatmap(f)
+            if e and e.file_path not in seen_paths:
+                seen_paths.add(e.file_path)
+                entries.append(e)
+
+    # 2. Automatically scan osu! stable for matched map + replay pairs
+    db = OsuStableDatabase(osu_dir)
+    if db.is_available():
+        try:
+            stable_pairs = db.scan_replays_and_match()
+            for bm, rep in stable_pairs:
+                osu_path = bm["full_path"]
+                key = (osu_path, rep.file_path)
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+
+                category = f"osu! {rep.source_folder}"
+                display = f"{bm['artist']} - {bm['title']} [{bm['version']}]"
+                rust_ok = (bm["sliders"] == 0 and bm["spinners"] == 0)
+
+                entry = MapEntry(
+                    file_path=osu_path,
+                    category=category,
+                    filename=bm["osu_file"],
+                    title=bm["title"],
+                    artist=bm["artist"],
+                    version=bm["version"],
+                    cs=bm["cs"],
+                    ar=bm["ar"],
+                    od=bm["od"],
+                    hp=bm["hp"],
+                    objects_count=bm["objects"],
+                    has_replay=True,
+                    rust_supported=rust_ok,
+                    display_title=display,
+                    replay_path=rep.file_path,
+                    player_name=rep.player,
+                    replay_score=rep.score,
+                    replay_combo=rep.combo,
+                    source_type="stable",
+                )
+                entries.append(entry)
+        except Exception as e:
+            print(f"Warning: error scanning osu! stable pairs: {e}", file=sys.stderr)
+
     return entries
 
 
 class MapBrowserApp:
+    """Tkinter-based companion browser window running on a dedicated thread."""
+
     def __init__(
         self,
         map_queue: queue.Queue,
         root_dir: str = "tests/data",
-        on_close_callback: Optional[Callable[[], None]] = None,
+        osu_dir: Optional[str] = None,
     ):
         self.map_queue = map_queue
         self.root_dir = root_dir
-        self.on_close_callback = on_close_callback
-        self.all_entries: List[MapEntry] = []
-        self.filtered_entries: List[MapEntry] = []
-
+        self.osu_dir = osu_dir
         self.root: Optional[tk.Tk] = None
         self.tree: Optional[ttk.Treeview] = None
+        self.all_entries: List[MapEntry] = []
+        self.filtered_entries: List[MapEntry] = []
         self.search_var: Optional[tk.StringVar] = None
         self.category_var: Optional[tk.StringVar] = None
-        self.status_lbl: Optional[tk.Label] = None
+        self.only_replays_var: Optional[tk.BooleanVar] = None
         self.info_lbl: Optional[tk.Label] = None
         self.cat_combo: Optional[ttk.Combobox] = None
 
     def start(self):
-        """Build and launch the Tkinter window loop."""
         self.root = tk.Tk()
-        self.root.title("Rosea - Выбор карты (tests/data)")
-        self.root.geometry("860x540")
-        self.root.minsize(700, 400)
+        self.root.title("Rosea - Выбор карты & Реплеи")
+        self.root.geometry("1080x600")
+        self.root.minsize(800, 480)
         self.root.configure(bg="#12141c")
 
-        # Handle window X button: hide instead of destroy
+        # Hide on close instead of destroying to keep thread alive
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
 
         # Style configuration
@@ -277,7 +371,7 @@ class MapBrowserApp:
 
         title_lbl = tk.Label(
             hdr_frame,
-            text="🎵 Выбор карты для визуализатора Rosea",
+            text="🎵 Выбор карты & Реплеи osu! для визуализатора Rosea",
             font=("Segoe UI", 12, "bold"),
             bg="#12141c",
             fg="#f1f5f9",
@@ -286,7 +380,7 @@ class MapBrowserApp:
 
         sub_lbl = tk.Label(
             hdr_frame,
-            text="Мгновенное переключение на лету в реальном времени",
+            text="Автоматически загружает карту + повтор из osu! stable и tests/data",
             font=("Segoe UI", 9),
             bg="#12141c",
             fg="#94a3b8",
@@ -323,23 +417,40 @@ class MapBrowserApp:
         )
         search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=4)
 
+        # Only replays checkbox
+        self.only_replays_var = tk.BooleanVar(value=False)
+        chk = tk.Checkbutton(
+            filter_frame,
+            text="🟣 Только с реплеем",
+            variable=self.only_replays_var,
+            bg="#181b28",
+            fg="#f1f5f9",
+            selectcolor="#222738",
+            activebackground="#181b28",
+            activeforeground="#ec4899",
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+            command=self.apply_filter,
+        )
+        chk.pack(side=tk.LEFT, padx=(4, 10))
+
         # Category Filter
         cat_lbl = tk.Label(
             filter_frame,
-            text="Папка:",
+            text="Папка / Источник:",
             bg="#181b28",
             fg="#94a3b8",
             font=("Segoe UI", 9, "bold"),
         )
         cat_lbl.pack(side=tk.LEFT, padx=(5, 6))
 
-        self.category_var = tk.StringVar(value="Все папки")
+        self.category_var = tk.StringVar(value="Все карты")
         self.cat_combo = ttk.Combobox(
             filter_frame,
             textvariable=self.category_var,
             state="readonly",
             style="Dark.TCombobox",
-            width=20,
+            width=26,
         )
         self.cat_combo.pack(side=tk.LEFT, padx=(0, 10))
         self.cat_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_filter())
@@ -347,7 +458,7 @@ class MapBrowserApp:
         # Rescan Button
         rescan_btn = tk.Button(
             filter_frame,
-            text="🔄 Обновить список",
+            text="🔄 Обновить",
             bg="#272c40",
             fg="#cbd5e1",
             activebackground="#333a54",
@@ -365,7 +476,7 @@ class MapBrowserApp:
         tree_frame = tk.Frame(self.root, bg="#12141c")
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
 
-        cols = ("title", "category", "cs_ar", "objects", "engine", "replay")
+        cols = ("title", "replay", "category", "cs_ar", "objects", "engine")
         self.tree = ttk.Treeview(
             tree_frame,
             columns=cols,
@@ -375,18 +486,18 @@ class MapBrowserApp:
         )
 
         self.tree.heading("title", text="Название карты [Сложность]", anchor=tk.W)
-        self.tree.heading("category", text="Папка", anchor=tk.W)
+        self.tree.heading("replay", text="Повтор / Игрок (.osr)", anchor=tk.W)
+        self.tree.heading("category", text="Папка / Источник", anchor=tk.W)
         self.tree.heading("cs_ar", text="CS / AR", anchor=tk.CENTER)
-        self.tree.heading("objects", text="Объекты", anchor=tk.CENTER)
+        self.tree.heading("objects", text="Ноты", anchor=tk.CENTER)
         self.tree.heading("engine", text="Движок Rust", anchor=tk.CENTER)
-        self.tree.heading("replay", text="Реплей .osr", anchor=tk.CENTER)
 
-        self.tree.column("title", width=340, minwidth=220, anchor=tk.W)
-        self.tree.column("category", width=120, minwidth=80, anchor=tk.W)
-        self.tree.column("cs_ar", width=80, minwidth=60, anchor=tk.CENTER)
-        self.tree.column("objects", width=80, minwidth=60, anchor=tk.CENTER)
-        self.tree.column("engine", width=110, minwidth=90, anchor=tk.CENTER)
-        self.tree.column("replay", width=90, minwidth=70, anchor=tk.CENTER)
+        self.tree.column("title", width=360, minwidth=240, anchor=tk.W)
+        self.tree.column("replay", width=230, minwidth=140, anchor=tk.W)
+        self.tree.column("category", width=130, minwidth=90, anchor=tk.W)
+        self.tree.column("cs_ar", width=75, minwidth=60, anchor=tk.CENTER)
+        self.tree.column("objects", width=65, minwidth=50, anchor=tk.CENTER)
+        self.tree.column("engine", width=105, minwidth=85, anchor=tk.CENTER)
 
         scrollbar = ttk.Scrollbar(
             tree_frame,
@@ -412,7 +523,7 @@ class MapBrowserApp:
 
         self.info_lbl = tk.Label(
             bot_frame,
-            text="Выберите карту и дважды кликните для воспроизведения",
+            text="Выберите карту и дважды кликните для воспроизведения вместе с реплеем",
             font=("Segoe UI", 9),
             bg="#12141c",
             fg="#94a3b8",
@@ -437,29 +548,49 @@ class MapBrowserApp:
         load_btn.pack(side=tk.RIGHT)
 
     def refresh_maps(self):
-        """Rescan tests/data directory and populate table."""
-        self.all_entries = scan_all_maps(self.root_dir)
+        """Rescan tests/data and osu! stable pairs and populate table."""
+        self.all_entries = scan_all_maps(self.root_dir, osu_dir=self.osu_dir)
 
-        # Update categories combobox
-        cats = sorted(list(set(e.category for e in self.all_entries)))
-        self.cat_combo["values"] = ["Все папки"] + cats
+        # Group categories cleanly
+        stable_cats = []
+        test_cats = []
+        for e in self.all_entries:
+            if e.category.startswith("osu!"):
+                if e.category not in stable_cats:
+                    stable_cats.append(e.category)
+            else:
+                if e.category not in test_cats:
+                    test_cats.append(e.category)
+
+        special_cats = ["Все карты", "🎮 Пары с реплеями (.osr)"]
+        all_cats = special_cats + sorted(stable_cats) + sorted(test_cats)
+        if self.cat_combo:
+            self.cat_combo["values"] = all_cats
 
         self.apply_filter()
 
     def apply_filter(self):
-        """Filter table based on search input and selected category."""
+        """Filter table based on search input, selected category, and replay toggle."""
         if not self.tree:
             return
 
         query = self.search_var.get() if self.search_var else ""
-        selected_cat = self.category_var.get() if self.category_var else "Все папки"
+        selected_cat = self.category_var.get() if self.category_var else "Все карты"
+        only_replays = self.only_replays_var.get() if self.only_replays_var else False
 
         self.tree.delete(*self.tree.get_children())
         self.filtered_entries = []
 
         for entry in self.all_entries:
-            if selected_cat != "Все папки" and entry.category != selected_cat:
+            if only_replays and not entry.has_replay:
                 continue
+
+            if selected_cat == "🎮 Пары с реплеями (.osr)":
+                if not entry.has_replay:
+                    continue
+            elif selected_cat != "Все карты" and entry.category != selected_cat:
+                continue
+
             if not entry.matches(query):
                 continue
 
@@ -467,31 +598,46 @@ class MapBrowserApp:
 
             engine_text = "🟢 Rust MVP" if entry.rust_supported else "🔵 Python Full"
             engine_tag = "rust_ok" if entry.rust_supported else "py_only"
-            replay_text = "🟣 Есть .osr" if entry.has_replay else "—"
+
+            if entry.has_replay:
+                if entry.player_name:
+                    if entry.replay_score >= 1_000_000:
+                        score_str = f"{entry.replay_score/1_000_000:.2f}M"
+                    elif entry.replay_score >= 1_000:
+                        score_str = f"{entry.replay_score//1000}k"
+                    else:
+                        score_str = str(entry.replay_score)
+                    combo_str = f"{entry.replay_combo}x" if entry.replay_combo > 0 else ""
+                    combo_part = f", {combo_str}" if combo_str else ""
+                    replay_text = f"🟣 {entry.player_name} ({score_str}{combo_part})"
+                else:
+                    replay_text = "🟣 Есть .osr"
+            else:
+                replay_text = "—"
 
             cs_ar_text = f"{entry.cs:.1f} / {entry.ar:.1f}"
-            obj_text = f"{entry.objects_count} нот"
+            obj_text = f"{entry.objects_count}"
 
             item_id = self.tree.insert(
                 "",
                 tk.END,
                 values=(
                     entry.display_title,
+                    replay_text,
                     entry.category,
                     cs_ar_text,
                     obj_text,
                     engine_text,
-                    replay_text,
                 ),
                 tags=(engine_tag,),
             )
-            # Store file_path in a hidden mapping or selection tag
             self.tree.set(item_id, "title", entry.display_title)
 
         count = len(self.filtered_entries)
         if self.info_lbl:
+            replays_cnt = sum(1 for e in self.filtered_entries if e.has_replay)
             self.info_lbl.config(
-                text=f"Доступно карт: {count} из {len(self.all_entries)} | Двойной клик для мгновенного запуска"
+                text=f"Найдено: {count} карт ({replays_cnt} с реплеями) из {len(self.all_entries)} | Двойной клик для запуска"
             )
 
     def on_select_item(self, event=None):
@@ -501,8 +647,11 @@ class MapBrowserApp:
         idx = self.tree.index(selected[0])
         if 0 <= idx < len(self.filtered_entries):
             entry = self.filtered_entries[idx]
-            engine_str = "Поддерживается Rust-парсером" if entry.rust_supported else "Python Standalone (Безье/Спиннеры)"
-            replay_str = "Реплей подключён" if entry.has_replay else "Без реплея"
+            engine_str = "Поддерживается Rust" if entry.rust_supported else "Python Standalone"
+            if entry.has_replay:
+                replay_str = f"Реплей: {entry.player_name} (Счёт {entry.replay_score:,}, Комбо {entry.replay_combo})"
+            else:
+                replay_str = "Без реплея"
             if self.info_lbl:
                 self.info_lbl.config(
                     text=f"Выбрано: {entry.display_title} | {engine_str} | {replay_str}"
@@ -515,10 +664,12 @@ class MapBrowserApp:
         idx = self.tree.index(selected[0])
         if 0 <= idx < len(self.filtered_entries):
             entry = self.filtered_entries[idx]
-            self.map_queue.put(entry.file_path)
+            # Send tuple (file_path, replay_path) so visualizer loads both map & replay
+            self.map_queue.put((entry.file_path, entry.replay_path))
+            rep_text = f" + Реплей ({entry.player_name})" if entry.replay_path else ""
             if self.info_lbl:
                 self.info_lbl.config(
-                    text=f"✔ Отправлено в плеер: {entry.filename} ({entry.display_title})"
+                    text=f"✔ Отправлено в плеер: {entry.display_title}{rep_text}"
                 )
 
     def show(self):
@@ -541,9 +692,14 @@ class MapBrowserApp:
 class MapBrowserManager:
     """Thread-safe manager for the non-blocking map browser companion window."""
 
-    def __init__(self, root_dir: str = "tests/data"):
+    def __init__(
+        self,
+        root_dir: str = "tests/data",
+        osu_dir: Optional[str] = None,
+    ):
         self.map_queue: queue.Queue = queue.Queue()
         self.root_dir = root_dir
+        self.osu_dir = osu_dir
         self.app: Optional[MapBrowserApp] = None
         self.thread: Optional[threading.Thread] = None
 
@@ -552,7 +708,11 @@ class MapBrowserManager:
         self.thread.start()
 
     def _run_thread(self):
-        self.app = MapBrowserApp(self.map_queue, root_dir=self.root_dir)
+        self.app = MapBrowserApp(
+            self.map_queue,
+            root_dir=self.root_dir,
+            osu_dir=self.osu_dir,
+        )
         self.app.start()
 
     def show(self):
@@ -563,9 +723,21 @@ class MapBrowserManager:
         if self.app:
             self.app.hide()
 
-    def get_selected_map(self) -> Optional[str]:
-        """Poll for newly selected map path from queue without blocking."""
+    def get_selected_map(self) -> Optional[Tuple[str, Optional[str]]]:
+        """Poll for newly selected map and replay paths from queue without blocking."""
         try:
             return self.map_queue.get_nowait()
         except queue.Empty:
             return None
+
+
+if __name__ == "__main__":
+    import time
+    print("Testing MapBrowser standalone...")
+    entries = scan_all_maps()
+    print(f"Total maps scanned: {len(entries)}")
+    with_rep = sum(1 for e in entries if e.has_replay)
+    print(f"Maps with replay: {with_rep}")
+    for e in entries[:8]:
+        rep_p = f"Replay: {e.player_name}" if e.has_replay else "No replay"
+        print(f"  [{e.category}] {e.display_title} -> {rep_p}")

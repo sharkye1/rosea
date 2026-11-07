@@ -327,6 +327,37 @@ def test_audio_engine_and_synchronization():
     print("test_audio_engine_and_synchronization: OK")
 
 
+def test_osu_stable_pairs_and_browser():
+    from scripts.osu_db import OsuStableDatabase
+    from scripts.map_browser import scan_all_maps
+
+    # 1. Test database availability & scanning
+    db = OsuStableDatabase()
+    if db.is_available():
+        pairs = db.scan_replays_and_match()
+        assert len(pairs) > 0, "Expected at least 1 matched pair from stable"
+        for bm, rep in pairs[:10]:
+            assert os.path.isfile(bm["full_path"]), f"Beatmap file missing: {bm['full_path']}"
+            assert os.path.isfile(rep.file_path), f"Replay file missing: {rep.file_path}"
+            assert len(rep.bm_hash) == 32
+
+    # 2. Test scan_all_maps combining tests and stable
+    entries = scan_all_maps("tests/data")
+    assert len(entries) >= 32
+    # Verify entries have valid fields
+    for e in entries[:20]:
+        assert e.title and e.version
+        assert os.path.isfile(e.file_path)
+
+    # 3. Test Visualizer cycling through combined list with replay
+    vis = Visualizer("tests/data/01_micro/2dearbrave.osu", headless=True)
+    assert len(vis.all_map_entries) == len(entries)
+    vis.switch_relative_map(1)
+    assert vis.beatmap is not None
+
+    print("test_osu_stable_pairs_and_browser: OK")
+
+
 if __name__ == "__main__":
     test_linear_curve()
     test_bezier_multi_segment()
@@ -340,4 +371,5 @@ if __name__ == "__main__":
     test_visualizer_headless_playback_and_source_toggle()
     test_tech_hud_docking_and_no_overlap()
     test_audio_engine_and_synchronization()
+    test_osu_stable_pairs_and_browser()
     print("\nALL AUTOMATED TESTS PASSED!")

@@ -36,7 +36,7 @@ try:
         run_full_corpus_verification,
         beatmap_from_rust_json,
     )
-    from map_browser import MapBrowserManager, scan_all_maps
+    from map_browser import MapBrowserManager, scan_all_maps, MapEntry
 except ImportError:
     from scripts.osu_parser import (
         parse_osu_beatmap,
@@ -51,7 +51,7 @@ except ImportError:
         run_full_corpus_verification,
         beatmap_from_rust_json,
     )
-    from scripts.map_browser import MapBrowserManager, scan_all_maps
+    from scripts.map_browser import MapBrowserManager, scan_all_maps, MapEntry
 
 import pygame
 
@@ -69,6 +69,7 @@ class Visualizer:
         disable_audio: bool = False,
         disable_hitsounds: bool = False,
         audio_offset: float = 0.0,
+        osu_dir: Optional[str] = None,
     ):
         self.beatmap_path = beatmap_path
         self.replay_path = replay_path
@@ -76,6 +77,7 @@ class Visualizer:
         self.width = width
         self.height = height
         self.headless = headless
+        self.osu_dir = os.path.normpath(osu_dir) if osu_dir else os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!")
         self.toast_message = ""
         self.toast_until = 0.0
 
@@ -131,11 +133,15 @@ class Visualizer:
         self.init_audio()
 
         # Map list for keyboard cycling ([ / ] or PageUp / PageDown)
+        self.all_map_entries: List[MapEntry] = []
         self.all_map_files: List[str] = []
         self.current_map_idx: int = 0
         try:
-            entries = scan_all_maps(os.path.join(REPO_ROOT, "tests", "data"))
-            self.all_map_files = [e.file_path for e in entries]
+            self.all_map_entries = scan_all_maps(
+                os.path.join(REPO_ROOT, "tests", "data"),
+                osu_dir=self.osu_dir,
+            )
+            self.all_map_files = [e.file_path for e in self.all_map_entries]
         except Exception:
             pass
 
@@ -143,7 +149,10 @@ class Visualizer:
         self.map_browser: Optional[MapBrowserManager] = None
         if not self.headless:
             try:
-                self.map_browser = MapBrowserManager(root_dir=os.path.join(REPO_ROOT, "tests", "data"))
+                self.map_browser = MapBrowserManager(
+                    root_dir=os.path.join(REPO_ROOT, "tests", "data"),
+                    osu_dir=self.osu_dir,
+                )
                 self.map_browser.start()
             except Exception as e:
                 print(f"Warning: could not start MapBrowser: {e}", file=sys.stderr)
@@ -208,11 +217,17 @@ class Visualizer:
         if target_osr and os.path.isfile(target_osr):
             self.replay = parse_osr_replay(target_osr)
 
-        # Update index in all_map_files
-        for idx, p in enumerate(self.all_map_files):
-            if os.path.abspath(p) == os.path.abspath(norm_path):
-                self.current_map_idx = idx
-                break
+        # Update index in all_map_entries / all_map_files
+        if self.all_map_entries:
+            for idx, entry in enumerate(self.all_map_entries):
+                if os.path.abspath(entry.file_path) == os.path.abspath(norm_path):
+                    self.current_map_idx = idx
+                    break
+        elif self.all_map_files:
+            for idx, p in enumerate(self.all_map_files):
+                if os.path.abspath(p) == os.path.abspath(norm_path):
+                    self.current_map_idx = idx
+                    break
 
         # Playfield metrics & timing
         self.update_playfield_layout()
@@ -250,7 +265,13 @@ class Visualizer:
             self.set_toast("Map Browser недоступен в headless режиме", 2.0)
 
     def switch_relative_map(self, delta: int):
-        """Quickly switch to previous/next map in the tests/data directory."""
+        """Quickly switch to previous/next map in the list (with paired replay)."""
+        if self.all_map_entries:
+            self.current_map_idx = (self.current_map_idx + delta) % len(self.all_map_entries)
+            target_entry = self.all_map_entries[self.current_map_idx]
+            self.load_beatmap(target_entry.file_path, replay_path=target_entry.replay_path)
+            return
+
         if not self.all_map_files:
             return
         self.current_map_idx = (self.current_map_idx + delta) % len(self.all_map_files)
@@ -1606,7 +1627,11 @@ class Visualizer:
             if self.map_browser:
                 new_map = self.map_browser.get_selected_map()
                 if new_map:
-                    self.load_beatmap(new_map)
+                    if isinstance(new_map, tuple):
+                        m_path, r_path = new_map
+                        self.load_beatmap(m_path, replay_path=r_path)
+                    else:
+                        self.load_beatmap(new_map)
 
             current_ticks = pygame.time.get_ticks()
             dt = current_ticks - last_ticks
@@ -1736,6 +1761,7 @@ def main():
     parser.add_argument("--no-audio", action="store_true", help="Disable music audio playback")
     parser.add_argument("--no-hitsounds", action="store_true", help="Disable hitsounds (note click sounds)")
     parser.add_argument("--offset", type=float, default=0.0, help="Universal audio offset in milliseconds (default: 0.0)")
+    parser.add_argument("--osu-dir", type=str, default=None, help="Path to osu! stable installation folder (default: autodetect %LOCALAPPDATA%/osu!)")
     parser.add_argument("--test", action="store_true", help="Run automated test suite verifying Rust parser across corpus")
     parser.add_argument("--verify", action="store_true", help="Verify single map against Rust parser and exit")
     parser.add_argument("--headless", action="store_true", help="Run visualizer in headless dummy mode for testing")
@@ -1812,6 +1838,7 @@ def main():
         disable_audio=args.no_audio,
         disable_hitsounds=args.no_hitsounds,
         audio_offset=args.offset,
+        osu_dir=args.osu_dir,
     )
     vis.run(max_frames=args.frames)
 
