@@ -12,6 +12,9 @@ pub enum RoseaError {
     UnsupportedVersion(u32),
     InvalidMode,
     UnsupportedMode(u32),
+    InvalidStackLeniency {
+        line: usize,
+    },
     DuplicateField,
     MissingDifficultyField(&'static str),
     InvalidDifficultyField {
@@ -68,6 +71,12 @@ impl fmt::Display for RoseaError {
             Self::InvalidMode => write!(f, "В поле Mode должно быть целое неотрицательное число"),
             Self::UnsupportedMode(mode) => {
                 write!(f, "Режим {mode} не поддерживается, нужен Mode: 0")
+            }
+            Self::InvalidStackLeniency { line } => {
+                write!(
+                    f,
+                    "Строка {line}: StackLeniency должен быть конечным числом от 0 до 1"
+                )
             }
             Self::DuplicateField => write!(f, "Поддерживаемое поле указано повторно"),
             Self::MissingDifficultyField(field) => {

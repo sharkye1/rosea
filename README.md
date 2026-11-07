@@ -6,6 +6,11 @@
 Поддерживается v14, UTF-8 с BOM, LF/CRLF и пустые строки перед заголовком.
 `parse::osu_mode` читает поле Mode из `[General]`: допускается только 0,
 при отсутствии поля используется 0. Неверное значение и повтор поля — ошибки.
+`parse::osu_stack_leniency` читает StackLeniency из `[General]` в `f32`:
+по умолчанию `0.7`, допустимы конечные значения от 0 до 1 включительно.
+Повтор поля запрещён, в том числе в повторной секции `[General]`.
+Неверное значение возвращает `InvalidStackLeniency` с номером строки.
+Расчёт смещений stacking пока не реализован.
 `parse::osu_difficulty` читает CircleSize, OverallDifficulty, HPDrainRate, ApproachRate,
 SliderMultiplier и SliderTickRate из `[Difficulty]` в `Difficulty`.
 CS, OD и HP обязательны; при отсутствии AR используется OD. Значения должны быть
