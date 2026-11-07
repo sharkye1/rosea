@@ -56,6 +56,10 @@ pub struct PreparedSlider {
 }
 
 impl PreparedSlider {
+    pub(super) fn set_origin(&mut self, position: Point) {
+        self.path.origin = position;
+    }
+
     pub fn path(&self) -> &PreparedPath {
         &self.path
     }

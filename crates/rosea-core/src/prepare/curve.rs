@@ -45,7 +45,7 @@ impl PathBudget {
 /// Один и тот же путь предназначен для игровой логики и растеризатора.
 #[derive(Debug)]
 pub struct PreparedPath {
-    origin: Point,
+    pub(super) origin: Point,
     vertices: Vec<Point>,
     cumulative_lengths: Vec<f64>,
     length: f64,
