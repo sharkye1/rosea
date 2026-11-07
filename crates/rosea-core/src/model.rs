@@ -55,7 +55,7 @@ pub struct HitObject {
 
 /// Исходная timing point. Смысл beat_length зависит от флага uninherited:
 /// true — положительная длительность бита в мс;
-/// false — отрицательный обратный множитель скорости в процентах.
+/// false — обратный множитель скорости в процентах; неотрицательное значение сбрасывает скорость.
 #[derive(Debug, PartialEq)]
 pub struct TimingPoint {
     pub line: usize,

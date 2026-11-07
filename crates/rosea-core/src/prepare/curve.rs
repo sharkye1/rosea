@@ -82,7 +82,7 @@ impl PreparedPath {
         Ok(point)
     }
 
-    fn numerical_error(&self) -> RoseaError {
+    pub(super) fn numerical_error(&self) -> RoseaError {
         RoseaError::NumericalError {
             line: self.line,
             object_id: self.object_id,

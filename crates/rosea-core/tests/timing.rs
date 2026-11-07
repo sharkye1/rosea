@@ -207,7 +207,7 @@ fn rejects_invalid_inherited_fields() {
         (
             1,
             "beatLength",
-            vec!["", "abc", "NaN", "inf", "-inf", "-1e999", "0", "-0", "500"],
+            vec!["", "abc", "NaN", "inf", "-inf", "-1e999"],
         ),
         (2, "meter", vec!["", "abc", "-1", "1.5", "4294967296"]),
         (3, "sampleSet", vec!["", "abc", "-1", "1.5", "4", "256"]),
@@ -244,6 +244,16 @@ fn checks_header_and_standard_mode() {
         osu_timing_points(text.as_bytes()),
         Err(RoseaError::UnsupportedMode(1))
     );
+}
+
+#[test]
+fn accepts_finite_nonnegative_inherited_values_for_speed_reset() {
+    for value in ["0", "-0", "50", "500"] {
+        let text = map(&format!("0,{value},0,0,0,100,0,0"));
+        let points = osu_timing_points(text.as_bytes()).unwrap();
+        assert!(!points[0].uninherited);
+        assert!(points[0].beat_length >= 0.0);
+    }
 }
 
 #[test]

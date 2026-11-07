@@ -41,6 +41,11 @@ pub enum RoseaError {
         line: usize,
         object_id: ObjectId,
     },
+    PreprocessError {
+        line: usize,
+        object_id: ObjectId,
+        message: &'static str,
+    },
     ResourceLimit {
         resource: &'static str,
         limit: u64,
@@ -111,9 +116,16 @@ impl fmt::Display for RoseaError {
             Self::NumericalError { line, object_id } => {
                 write!(
                     f,
-                    "Строка {line}, объект {}: некорректный численный результат при подготовке или выборке пути",
+                    "Строка {line}, объект {}: некорректный численный результат при подготовке или выборке слайдера",
                     object_id.0
                 )
+            }
+            Self::PreprocessError {
+                line,
+                object_id,
+                message,
+            } => {
+                write!(f, "Строка {line}, объект {}: {message}", object_id.0)
             }
             Self::ResourceLimit {
                 resource,
