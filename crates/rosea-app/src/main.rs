@@ -9,10 +9,15 @@ use std::process::ExitCode;
 use rosea_core::model::{CurveKind, HitObjectKind};
 use rosea_core::parse::{osu_difficulty, osu_header, osu_hit_objects, osu_mode, osu_timing_points};
 
+pub const ROSEA_COMMIT: &str = match option_env!("ROSEA_COMMIT") {
+    Some(val) => val,
+    None => "dev",
+};
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() <= 1 {
-        println!("Rosea ({})", rosea_core::PROFILE_ID);
+        println!("Rosea ({}) @ {}", rosea_core::PROFILE_ID, ROSEA_COMMIT);
         return ExitCode::SUCCESS;
     }
 
@@ -23,6 +28,10 @@ fn main() -> ExitCode {
     while i < args.len() {
         let arg = &args[i];
         match arg.as_str() {
+            "-v" | "--version" | "version" => {
+                println!("Rosea ({}) @ {}", rosea_core::PROFILE_ID, ROSEA_COMMIT);
+                return ExitCode::SUCCESS;
+            }
             "-h" | "--help" | "help" => {
                 print_help();
                 return ExitCode::SUCCESS;
@@ -60,8 +69,9 @@ fn main() -> ExitCode {
         Err(err_msg) => {
             if json_output {
                 println!(
-                    r#"{{"status":"error","profile":"{}","error":"{}"}}"#,
+                    r#"{{"status":"error","profile":"{}","commit":"{}","error":"{}"}}"#,
                     rosea_core::PROFILE_ID,
+                    ROSEA_COMMIT,
                     escape_json(&err_msg)
                 );
             } else {
@@ -75,15 +85,17 @@ fn main() -> ExitCode {
 fn print_help() {
     println!(
         "\
-Rosea - osu! parser & simulator ({profile})
+Rosea - osu! parser & simulator ({profile} @ {commit})
 
 USAGE:
-  rosea                     Print version/profile
+  rosea                     Print version/profile and commit hash
   rosea <file.osu> [--json] Parse and output beatmap structure
   rosea parse <file.osu> [--json]
+  rosea --version           Show version and commit
   rosea --help              Show this help
 ",
-        profile = rosea_core::PROFILE_ID
+        profile = rosea_core::PROFILE_ID,
+        commit = ROSEA_COMMIT,
     );
 }
 
@@ -204,8 +216,9 @@ fn parse_beatmap_file(path_str: &str, json: bool) -> Result<String, String> {
         ho_json.push(']');
 
         Ok(format!(
-            r#"{{"status":"ok","profile":"{}","version":{},"mode":{},"difficulty":{},"timing_points":{},"hit_objects":{}}}"#,
+            r#"{{"status":"ok","profile":"{}","commit":"{}","version":{},"mode":{},"difficulty":{},"timing_points":{},"hit_objects":{}}}"#,
             rosea_core::PROFILE_ID,
+            ROSEA_COMMIT,
             version,
             mode,
             diff_json,

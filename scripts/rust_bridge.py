@@ -52,6 +52,34 @@ def get_rosea_executable() -> str:
     return target_exe
 
 
+def get_rust_commit_hash() -> str:
+    """Retrieve the Git commit hash of the compiled rosea Rust parser."""
+    try:
+        exe = get_rosea_executable()
+        out = subprocess.check_output([exe, "--version"], text=True, stderr=subprocess.DEVNULL).strip()
+        if "@" in out:
+            c = out.split("@")[-1].strip()
+            if c:
+                return c
+    except Exception:
+        pass
+
+    try:
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root_dir,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        if out:
+            return out
+    except Exception:
+        pass
+
+    return "unknown"
+
+
 def run_rust_parser(file_path: str) -> Dict[str, Any]:
     """
     Run rosea on file_path with --json and return parsed JSON result.
@@ -90,6 +118,7 @@ class VerificationResult:
         self.py_beatmap: Optional[Beatmap] = None
         self.rust_data: Optional[Dict[str, Any]] = None
         self.rust_beatmap: Optional[Beatmap] = None
+        self.rust_commit: str = ""
 
     def __repr__(self):
         return f"<VerificationResult {os.path.basename(self.file_path)}: {self.status} ({self.reason})>"
@@ -288,6 +317,7 @@ def verify_beatmap(file_path: str) -> VerificationResult:
 
     rust_out = run_rust_parser(file_path)
     res.rust_data = rust_out
+    res.rust_commit = rust_out.get("commit", get_rust_commit_hash())
 
     if not rust_supported:
         # Rust should return an error (UnsupportedHitObject)

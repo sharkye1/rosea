@@ -39,6 +39,7 @@ try:
         VerificationResult,
         run_full_corpus_verification,
         beatmap_from_rust_json,
+        get_rust_commit_hash,
     )
     from map_browser import MapBrowserManager, scan_all_maps, MapEntry
 except ImportError:
@@ -54,6 +55,7 @@ except ImportError:
         VerificationResult,
         run_full_corpus_verification,
         beatmap_from_rust_json,
+        get_rust_commit_hash,
     )
     from scripts.map_browser import MapBrowserManager, scan_all_maps, MapEntry
 
@@ -84,6 +86,7 @@ class Visualizer:
         self.osu_dir = os.path.normpath(osu_dir) if osu_dir else os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!")
         self.toast_message = ""
         self.toast_until = 0.0
+        self.rust_commit_hash: str = get_rust_commit_hash()
 
         if self.headless:
             os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -251,7 +254,8 @@ class Visualizer:
         self.slider_caches.clear()
         self.build_slider_caches()
 
-        engine_name = "Rust rosea-core" if self.active_source == "rust" else "Python Standalone"
+        commit_tag = f" [{self.rust_commit_hash}]" if self.rust_commit_hash and self.rust_commit_hash != "unknown" else ""
+        engine_name = f"Rust rosea-core{commit_tag}" if self.active_source == "rust" else "Python Standalone"
         replay_name = f" + Replay ({self.replay.player})" if self.replay else ""
         self.set_toast(
             f">> {self.beatmap.title} [{self.beatmap.version_name}] ({engine_name}{replay_name})",
@@ -298,7 +302,8 @@ class Visualizer:
             if self.rust_beatmap:
                 self.beatmap = self.rust_beatmap
                 self.active_source = "rust"
-                self.set_toast("Data source switched to: Rust rosea-core Parser", 2.5)
+                commit_tag = f" [{self.rust_commit_hash}]" if self.rust_commit_hash and self.rust_commit_hash != "unknown" else ""
+                self.set_toast(f"Data source switched to: Rust rosea-core{commit_tag}", 2.5)
                 self.update_playfield_layout()
                 self.build_slider_caches()
             else:
@@ -1327,11 +1332,12 @@ class Visualizer:
         self.screen.blit(aud_surf, (st_x - aud_surf.get_width() - 14, 13))
 
         # Engine source badge
+        commit_tag = f" [{self.rust_commit_hash}]" if self.rust_commit_hash and self.rust_commit_hash != "unknown" else ""
         if self.active_source == "rust":
-            badge_text = "Source: Rust rosea-mvp-v1 [S: Switch to Python]"
+            badge_text = f"Source: Rust{commit_tag} [S: Switch to Python]"
             badge_col = (30, 130, 60)
         else:
-            badge_text = "Source: Python Standalone [S: Switch to Rust]"
+            badge_text = f"Source: Python Standalone [S: Switch to Rust{commit_tag}]"
             badge_col = (25, 95, 160)
 
         b_surf = self.font_small.render(badge_text, True, (255, 255, 255))
@@ -1486,7 +1492,8 @@ class Visualizer:
 
         # 1. Engine & File info
         t = self.current_time_ms
-        engine_str = "Rust (rosea-core v14)" if self.active_source == "rust" else "Python Standalone"
+        commit_tag = f" [{self.rust_commit_hash}]" if self.rust_commit_hash and self.rust_commit_hash != "unknown" else ""
+        engine_str = f"Rust rosea-core{commit_tag}" if self.active_source == "rust" else "Python Standalone"
         eng_col = (74, 222, 128) if self.active_source == "rust" else (56, 189, 248)
 
         # 2. Timing calculations
