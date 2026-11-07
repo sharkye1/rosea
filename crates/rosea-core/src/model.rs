@@ -81,3 +81,36 @@ pub struct BreakPeriod {
     pub start_time: f64,
     pub end_time: f64,
 }
+
+/// Метаданные карты из секции `[Metadata]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Metadata {
+    pub title: String,
+    pub title_unicode: Option<String>,
+    pub artist: String,
+    pub artist_unicode: Option<String>,
+    pub creator: String,
+    pub version: String,
+    pub source: String,
+    pub tags: String,
+    pub beatmap_id: Option<i32>,
+    pub beatmap_set_id: Option<i32>,
+}
+
+impl Metadata {
+    /// Возвращает Юникод-вариант названия песни, если он задан и не пуст, иначе романизированное `title`.
+    pub fn title_unicode_or_title(&self) -> &str {
+        match &self.title_unicode {
+            Some(u) if !u.is_empty() => u,
+            _ => &self.title,
+        }
+    }
+
+    /// Возвращает Юникод-вариант имени исполнителя, если он задан и не пуст, иначе романизированное `artist`.
+    pub fn artist_unicode_or_artist(&self) -> &str {
+        match &self.artist_unicode {
+            Some(u) if !u.is_empty() => u,
+            _ => &self.artist,
+        }
+    }
+}

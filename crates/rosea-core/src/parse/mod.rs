@@ -3,11 +3,14 @@
 mod circles;
 mod events;
 mod hit_objects;
+mod metadata;
 mod osu;
 mod timing;
 
+pub use crate::model::Metadata;
 pub use circles::osu_circles;
 pub use events::osu_breaks;
 pub use hit_objects::osu_hit_objects;
+pub use metadata::osu_metadata;
 pub use osu::{Difficulty, osu_difficulty, osu_header, osu_mode, osu_stack_leniency};
 pub use timing::osu_timing_points;

@@ -21,6 +21,10 @@ pub enum RoseaError {
         field: &'static str,
         line: usize,
     },
+    InvalidMetadataField {
+        field: &'static str,
+        line: usize,
+    },
     EmptyBeatmap,
     InvalidHitObjectField {
         field: &'static str,
@@ -96,6 +100,9 @@ impl fmt::Display for RoseaError {
                     "конечным числом от 0 до 10"
                 };
                 write!(f, "Строка {line}: поле {field} должно быть {range}")
+            }
+            Self::InvalidMetadataField { field, line } => {
+                write!(f, "Строка {line}: некорректное поле metadata {field}")
             }
             Self::EmptyBeatmap => write!(f, "В карте нет объектов HitObjects"),
             Self::InvalidHitObjectField {
