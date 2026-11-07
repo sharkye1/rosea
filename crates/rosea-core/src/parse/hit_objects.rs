@@ -1,4 +1,4 @@
-//! Чтение кругов и L/B-слайдеров. Построение пути и времён относится к prepare.
+//! Чтение кругов и L/B/P-слайдеров. Построение пути и времён относится к prepare.
 
 use crate::error::RoseaError;
 use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point};
@@ -10,7 +10,7 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_CONTROLS: usize = 4096;
 const MAX_SPANS: u32 = 10_000;
 
-/// Читает смешанный список кругов и L/B-слайдеров по (start_time, исходный ID).
+/// Читает смешанный список кругов и L/B/P-слайдеров по (start_time, исходный ID).
 pub fn osu_hit_objects(bytes: &[u8]) -> Result<Vec<HitObject>, RoseaError> {
     parse_objects(bytes, true)
 }
@@ -160,6 +160,7 @@ fn parse_slider(
         "" => return Err(invalid("curveType")),
         "L" => CurveKind::Linear,
         "B" => CurveKind::Bezier,
+        "P" => CurveKind::PerfectCurve,
         value if value.starts_with(['L', 'B', 'P', 'C']) && value.len() > 1 => {
             return Err(RoseaError::UnsupportedSliderSyntax {
                 line,

@@ -1,4 +1,4 @@
-//! Геометрия L/B: нормализация, аппроксимация Безье и выборка по длине пути.
+//! Геометрия L/B/P: нормализация, аппроксимация кривых и выборка по длине пути.
 
 use crate::error::RoseaError;
 use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point};
@@ -125,7 +125,7 @@ impl PreparedPath {
     }
 }
 
-/// Готовит только L-путь; для L/B используется slider_path.
+/// Готовит только L-путь; для L/B/P используется slider_path.
 pub fn linear_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
     if !matches!(
         object.kind,
@@ -143,7 +143,7 @@ pub fn linear_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
     slider_path(object)
 }
 
-/// Готовит один L/B-путь. Времена и число проходов здесь не применяются.
+/// Готовит один L/B/P-путь. Времена и число проходов здесь не применяются.
 pub fn slider_path(object: &HitObject) -> Result<PreparedPath, RoseaError> {
     path_with_budget(object, &mut PathBudget::default())
 }
@@ -214,9 +214,11 @@ pub(super) fn path_with_budget(
             y: (point.y.trunc() as i32 as f32) - origin.y,
         });
     }
-    if *kind == CurveKind::Bezier {
-        vertices = bezier_path(&vertices, budget)?;
-    }
+    vertices = match kind {
+        CurveKind::Linear => vertices,
+        CurveKind::Bezier => bezier_path(&vertices, budget)?,
+        CurveKind::PerfectCurve => perfect_path(vertices, object, budget)?,
+    };
     // Флаг сохраняется до удаления дублей: одинаковый конец запрещает удлинение.
     let duplicate_end =
         vertices.len() >= 2 && vertices[vertices.len() - 1] == vertices[vertices.len() - 2];
@@ -281,6 +283,98 @@ pub(super) fn path_with_budget(
         object_id: object.id,
         line: object.line,
     })
+}
+
+fn perfect_path(
+    controls: Vec<Point>,
+    object: &HitObject,
+    budget: &mut PathBudget,
+) -> Result<Vec<Point>, RoseaError> {
+    if controls.len() != 3 {
+        return bezier_path(&controls, budget);
+    }
+    let [a, b, c] = [controls[0], controls[1], controls[2]]
+        .map(|point| [f64::from(point.x), f64::from(point.y)]);
+    let determinant = 2.0 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+    // При точной коллинеарности оставляем ломаную через B, включая обратное движение.
+    if determinant == 0.0 {
+        budget.check_vertices(controls.len())?;
+        return Ok(controls);
+    }
+    let za = a[0] * a[0] + a[1] * a[1];
+    let zb = b[0] * b[0] + b[1] * b[1];
+    let zc = c[0] * c[0] + c[1] * c[1];
+    let ox = (za * (b[1] - c[1]) + zb * (c[1] - a[1]) + zc * (a[1] - b[1])) / determinant;
+    let oy = (za * (c[0] - b[0]) + zb * (a[0] - c[0]) + zc * (b[0] - a[0])) / determinant;
+    let dx = a[0] - ox;
+    let dy = a[1] - oy;
+    let radius = (dx * dx + dy * dy).sqrt();
+    let numerical = || RoseaError::NumericalError {
+        line: object.line,
+        object_id: object.id,
+    };
+    if !ox.is_finite() || !oy.is_finite() || !radius.is_finite() || radius <= 0.0 {
+        return Err(numerical());
+    }
+    let start_angle = (a[1] - oy).atan2(a[0] - ox);
+    let middle_angle = (b[1] - oy).atan2(b[0] - ox);
+    let end_angle = (c[1] - oy).atan2(c[0] - ox);
+    let mod2pi = |angle: f64| {
+        let value = angle.rem_euclid(std::f64::consts::TAU);
+        // Для очень малого отрицательного угла rem_euclid может округлиться к самому TAU.
+        if value == std::f64::consts::TAU {
+            0.0
+        } else {
+            value
+        }
+    };
+    let ac = mod2pi(end_angle - start_angle);
+    let ab = mod2pi(middle_angle - start_angle);
+    // Выбираем направление через среднюю точку, даже когда это большая дуга.
+    let sweep = if ab <= ac {
+        ac
+    } else {
+        ac - std::f64::consts::TAU
+    };
+    let max_angle = 2.0 * (1.0 - 0.1 / radius).clamp(-1.0, 1.0).acos();
+    if max_angle == 0.0 {
+        // Угловой шаг не представим: конечного числа вершин для допуска уже недостаточно.
+        return Err(RoseaError::ResourceLimit {
+            resource: "prepared_vertices",
+            limit: MAX_VERTICES as u64,
+            observed: u64::MAX,
+        });
+    }
+    let segments = (sweep.abs() / max_angle).ceil().max(1.0);
+    if !segments.is_finite() {
+        return Err(numerical());
+    }
+    let count = segments + 1.0;
+    if count > (MAX_VERTICES - budget.vertices) as f64 {
+        return Err(RoseaError::ResourceLimit {
+            resource: "prepared_vertices",
+            limit: MAX_VERTICES as u64,
+            observed: (budget.vertices as f64 + count) as u64,
+        });
+    }
+    // Число сегментов проверено до преобразования и выделения всей ломаной.
+    let segments = segments as usize;
+    let mut vertices = Vec::with_capacity(segments + 1);
+    for index in 0..=segments {
+        let angle = start_angle + sweep * (index as f64 / segments as f64);
+        let point = Point {
+            x: (ox + radius * angle.cos()) as f32,
+            y: (oy + radius * angle.sin()) as f32,
+        };
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return Err(numerical());
+        }
+        vertices.push(point);
+    }
+    // Концы берём из исходных точек, чтобы тригонометрия не сместила их округлением.
+    vertices[0] = controls[0];
+    vertices[segments] = controls[2];
+    Ok(vertices)
 }
 
 fn bezier_path(controls: &[Point], budget: &mut PathBudget) -> Result<Vec<Point>, RoseaError> {
@@ -375,6 +469,58 @@ fn interpolate(start: Point, end: Point, fraction: f64) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perfect_curve_checks_remaining_vertices_and_shares_bezier_work_budget() {
+        let mut object = HitObject {
+            id: ObjectId(0),
+            line: 1,
+            position: Point { x: 0.0, y: 0.0 },
+            start_time: 0.0,
+            flags: 2,
+            hit_sound: 0,
+            kind: HitObjectKind::Slider {
+                kind: CurveKind::PerfectCurve,
+                controls: vec![
+                    Point { x: 0.0, y: 0.0 },
+                    Point { x: 100.0, y: 100.0 },
+                    Point { x: 200.0, y: 0.0 },
+                ],
+                spans: 1,
+                declared_length: 0.0,
+            },
+        };
+        let mut budget = PathBudget {
+            vertices: MAX_VERTICES - 36,
+            interpolations: 0,
+        };
+        assert_eq!(
+            path_with_budget(&object, &mut budget).unwrap_err(),
+            RoseaError::ResourceLimit {
+                resource: "prepared_vertices",
+                limit: 2_000_000,
+                observed: 2_000_001,
+            }
+        );
+        assert_eq!(budget.vertices, MAX_VERTICES - 36);
+        if let HitObjectKind::Slider { controls, .. } = &mut object.kind {
+            controls.push(Point { x: 200.0, y: 0.0 });
+        }
+        budget = PathBudget {
+            vertices: 0,
+            interpolations: MAX_INTERPOLATIONS,
+        };
+        assert_eq!(
+            path_with_budget(&object, &mut budget).unwrap_err(),
+            RoseaError::ResourceLimit {
+                resource: "bezier_interpolations",
+                limit: 20_000_000,
+                observed: 20_000_003,
+            }
+        );
+        assert_eq!(budget.interpolations, MAX_INTERPOLATIONS);
+        assert_eq!(budget.vertices, 0);
+    }
 
     #[test]
     fn flatness_includes_the_boundary_and_subdivides_above_it() {

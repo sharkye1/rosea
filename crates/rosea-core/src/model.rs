@@ -22,11 +22,12 @@ pub struct Circle {
     pub hit_sound: u8,
 }
 
-/// Поддерживаемые типы пути: ломаная L и кривая Безье B.
+/// Поддерживаемые типы пути: ломаная L, кривая Безье B и дуга окружности P.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CurveKind {
     Linear,
     Bezier,
+    PerfectCurve,
 }
 
 #[derive(Debug, PartialEq)]

@@ -85,7 +85,7 @@ impl PreparedSlider {
     }
 }
 
-/// Прежний вход только для L-слайдеров; смешанные L/B-карты готовятся через sliders.
+/// Готовит только L-слайдеры; смешанные L/B/P-карты готовятся через sliders.
 pub fn linear_sliders(
     objects: &[HitObject],
     difficulty: &Difficulty,
@@ -95,7 +95,7 @@ pub fn linear_sliders(
         if matches!(
             object.kind,
             HitObjectKind::Slider {
-                kind: CurveKind::Bezier,
+                kind: CurveKind::Bezier | CurveKind::PerfectCurve,
                 ..
             }
         ) {
@@ -109,7 +109,7 @@ pub fn linear_sliders(
     sliders(objects, difficulty, timing_points)
 }
 
-/// Готовит L/B-слайдеры карты, пропуская круги. Бюджеты геометрии и частей общие для вызова.
+/// Готовит L/B/P-слайдеры карты, пропуская круги. Бюджеты геометрии и частей общие для вызова.
 pub fn sliders(
     objects: &[HitObject],
     difficulty: &Difficulty,
