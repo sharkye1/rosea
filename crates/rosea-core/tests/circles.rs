@@ -150,7 +150,7 @@ fn checks_header_and_standard_mode() {
     assert_eq!(osu_circles(b"[HitObjects]"), Err(RoseaError::InvalidHeader));
     assert_eq!(
         osu_circles(b"osu file format v13"),
-        Err(RoseaError::UnsupportedVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion(13))
     );
     let text = "osu file format v14\n[General]\nMode: 1\n[HitObjects]\n256,192,1000,1,0";
     assert_eq!(

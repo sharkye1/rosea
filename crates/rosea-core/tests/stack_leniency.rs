@@ -87,7 +87,7 @@ fn checks_the_header_and_standard_mode() {
     );
     assert_eq!(
         osu_stack_leniency(b"osu file format v13"),
-        Err(RoseaError::UnsupportedVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion(13))
     );
     assert_eq!(
         osu_stack_leniency(map("[General]\nMode: 1\nStackLeniency: 0.7").as_bytes()),

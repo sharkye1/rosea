@@ -32,7 +32,7 @@ fn rejects_other_versions() {
         let text = format!("osu file format v{version}\n");
         assert_eq!(
             osu_header(text.as_bytes()),
-            Err(RoseaError::UnsupportedVersion(version))
+            Err(RoseaError::UnsupportedBeatmapVersion(version))
         );
     }
 }
@@ -84,7 +84,7 @@ fn mode_parser_checks_header() {
     );
     assert_eq!(
         osu_mode(b"osu file format v13"),
-        Err(RoseaError::UnsupportedVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion(13))
     );
     assert_eq!(osu_mode(b"\xff"), Err(RoseaError::InvalidEncoding));
 }
@@ -222,7 +222,7 @@ fn difficulty_parser_checks_header() {
     );
     assert_eq!(
         osu_difficulty(b"osu file format v13"),
-        Err(RoseaError::UnsupportedVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion(13))
     );
     assert_eq!(osu_difficulty(b"\xff"), Err(RoseaError::InvalidEncoding));
 }

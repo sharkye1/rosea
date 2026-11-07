@@ -41,9 +41,13 @@ pub enum HitObjectKind {
         spans: u32,
         declared_length: f64,
     },
+    Spinner {
+        // Время окончания спиннера в мс.
+        end: f64,
+    },
 }
 
-/// Общие поля круга и слайдера до подготовки геометрии и времён.
+/// Общие поля круга, слайдера и спиннера до подготовки геометрии и времён.
 #[derive(Debug, PartialEq)]
 pub struct HitObject {
     pub id: ObjectId,

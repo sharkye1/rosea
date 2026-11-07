@@ -9,7 +9,7 @@ use crate::model::ObjectId;
 pub enum RoseaError {
     InvalidEncoding,
     InvalidHeader,
-    UnsupportedVersion(u32),
+    UnsupportedBeatmapVersion(u32),
     InvalidMode,
     UnsupportedMode(u32),
     InvalidStackLeniency {
@@ -65,7 +65,7 @@ impl fmt::Display for RoseaError {
         match self {
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),
-            Self::UnsupportedVersion(version) => {
+            Self::UnsupportedBeatmapVersion(version) => {
                 write!(f, "Версия v{version} не поддерживается, нужна v14")
             }
             Self::InvalidMode => write!(f, "В поле Mode должно быть целое неотрицательное число"),

@@ -203,7 +203,7 @@ fn rejects_other_curves_and_ambiguous_base_types() {
             })
         );
     }
-    for flags in [0, 4, 8, 128, 3, 9, 10, 130, 255] {
+    for flags in [0, 4, 128, 3, 9, 10, 11, 130, 255] {
         let text = map(&format!("256,192,1000,{flags},0,L|300:200,1,100"));
         assert_eq!(
             osu_hit_objects(text.as_bytes()),
@@ -214,6 +214,15 @@ fn rejects_other_curves_and_ambiguous_base_types() {
             })
         );
     }
+    let text = map("256,192,1000,8,0,L|300:200,1,100");
+    assert_eq!(
+        osu_hit_objects(text.as_bytes()),
+        Err(RoseaError::InvalidHitObjectField {
+            field: "endTime",
+            line: 3,
+            object_id: ObjectId(0),
+        })
+    );
 }
 
 #[test]
@@ -344,7 +353,7 @@ fn keeps_the_circle_only_entry_strict_and_checks_input_profile() {
     assert_eq!(osu_hit_objects(b"\xff"), Err(RoseaError::InvalidEncoding));
     assert_eq!(
         osu_hit_objects(b"osu file format v13"),
-        Err(RoseaError::UnsupportedVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion(13))
     );
     assert_eq!(
         osu_hit_objects(map("").as_bytes()),

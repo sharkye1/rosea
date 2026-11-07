@@ -31,7 +31,7 @@ pub fn osu_header(bytes: &[u8]) -> Result<u32, RoseaError> {
             .ok_or(RoseaError::InvalidHeader)?;
         let version: u32 = version.parse().map_err(|_| RoseaError::InvalidHeader)?;
         if version != 14 {
-            return Err(RoseaError::UnsupportedVersion(version));
+            return Err(RoseaError::UnsupportedBeatmapVersion(version));
         }
         return Ok(version);
     }

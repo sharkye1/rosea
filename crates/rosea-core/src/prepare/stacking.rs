@@ -181,12 +181,15 @@ pub fn stack_objects(
     }
     let mut checks = 0;
     for i in (1..result.len()).rev() {
-        if result[i].height != 0 {
+        if result[i].height != 0 || matches!(order[i].kind, HitObjectKind::Spinner { .. }) {
             continue;
         }
         let circle = result[i].slider.is_none();
         let mut current = i;
         for n in (0..i).rev() {
+            if matches!(order[n].kind, HitObjectKind::Spinner { .. }) {
+                continue;
+            }
             let gap = if circle {
                 let end_time = result[n]
                     .slider
