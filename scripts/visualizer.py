@@ -92,6 +92,10 @@ class Visualizer:
             os.environ["SDL_VIDEODRIVER"] = "dummy"
 
         pygame.init()
+        try:
+            pygame.key.set_repeat(250, 30)
+        except Exception:
+            pass
         pygame.display.set_caption(f"Rosea Visualizer - {os.path.basename(beatmap_path)}")
 
         if self.headless:
@@ -104,8 +108,6 @@ class Visualizer:
 
         # Playback & UI state
         self.playback_speed: float = 1.0
-        self.speed_options: List[float] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
-        self.speed_idx: int = 3  # 1.0x
         self.show_hud: bool = True
         self.show_tech_hud: bool = False
         self.show_verification_detail: bool = False
@@ -694,13 +696,18 @@ class Visualizer:
                     except Exception:
                         pass
 
-    def change_speed(self, delta_idx: int):
-        """Change playback speed with audio muting at non-1.0x speeds."""
-        new_idx = max(0, min(len(self.speed_options) - 1, self.speed_idx + delta_idx))
-        if new_idx == self.speed_idx:
+    def change_speed(self, delta: float):
+        """
+        Smoothly adjust playback speed in range [0.01, 2.00] with minimum step 0.01.
+        At non-1.00x speeds, background music track is paused to avoid audio distortion,
+        while hitsounds continue clicking in perfect sync at the new speed.
+        """
+        old_speed = self.playback_speed
+        new_speed = round(max(0.01, min(2.00, self.playback_speed + delta)), 2)
+        if new_speed == old_speed:
             return
-        self.speed_idx = new_idx
-        self.playback_speed = self.speed_options[self.speed_idx]
+
+        self.playback_speed = new_speed
         self.audio_anchor_track_ms = self.current_time_ms
         self.audio_anchor_perf_time = time.perf_counter()
 
@@ -710,7 +717,7 @@ class Visualizer:
                     pygame.mixer.music.pause()
                 except Exception:
                     pass
-            self.set_toast(f"Скорость {self.playback_speed:.2f}x (музыка заглушена)", 1.5)
+            self.set_toast(f"Скорость {self.playback_speed:.2f}x (музыка заглушена)", 1.0)
         else:
             lead_in = getattr(self.beatmap, "audio_lead_in", 0)
             if self.music_loaded and self.current_time_ms >= lead_in and self.is_playing:
@@ -724,7 +731,12 @@ class Visualizer:
                     self.music_playing = True
                 except Exception:
                     pass
-            self.set_toast("Скорость 1.00x (музыка в синхроне)", 1.5)
+            self.set_toast("Скорость 1.00x (музыка в синхроне)", 1.2)
+
+    def set_speed(self, speed: float):
+        """Directly set playback speed (e.g. reset to 1.00x)."""
+        delta = speed - self.playback_speed
+        self.change_speed(delta)
 
     def skip_intro(self):
         """Skip beatmap intro to just before the first note appears."""
@@ -1727,9 +1739,13 @@ class Visualizer:
                             step = 5000.0 if is_shift else 2000.0
                             self.seek_to(self.current_time_ms + step)
                     elif event.key == pygame.K_UP:
-                        self.change_speed(1)
+                        delta = 0.25 if is_ctrl else (0.05 if is_shift else 0.01)
+                        self.change_speed(delta)
                     elif event.key == pygame.K_DOWN:
-                        self.change_speed(-1)
+                        delta = 0.25 if is_ctrl else (0.05 if is_shift else 0.01)
+                        self.change_speed(-delta)
+                    elif event.key in (pygame.K_0, pygame.K_KP0):
+                        self.set_speed(1.0)
                     elif event.key in (pygame.K_r, pygame.K_HOME):
                         self.seek_to(self.start_time)
                     elif event.key == pygame.K_x:

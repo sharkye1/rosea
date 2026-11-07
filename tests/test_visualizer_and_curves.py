@@ -299,11 +299,20 @@ def test_audio_engine_and_synchronization():
     vis.adjust_audio_offset(-15.0)
     assert vis.audio_offset_ms == 0.0
 
-    # 6. Playback speed change
-    vis.change_speed(1)
-    assert vis.playback_speed == 1.25
-    vis.change_speed(-1)
-    assert vis.playback_speed == 1.0
+    # 6. Playback speed change (smooth 0.01 step, range [0.01, 2.00])
+    vis.change_speed(0.01)
+    assert abs(vis.playback_speed - 1.01) < 1e-4
+    vis.change_speed(-0.01)
+    assert abs(vis.playback_speed - 1.0) < 1e-4
+    vis.change_speed(0.25)
+    assert abs(vis.playback_speed - 1.25) < 1e-4
+    vis.set_speed(1.0)
+    assert abs(vis.playback_speed - 1.0) < 1e-4
+    vis.change_speed(-5.0)
+    assert abs(vis.playback_speed - 0.01) < 1e-4  # lower bound clamped to 0.01
+    vis.change_speed(5.0)
+    assert abs(vis.playback_speed - 2.00) < 1e-4  # upper bound clamped to 2.00
+    vis.set_speed(1.0)
 
     # 7. Render frame with HUD and audio info
     vis.show_tech_hud = True
