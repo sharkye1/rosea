@@ -114,3 +114,51 @@ impl Metadata {
         }
     }
 }
+
+/// Цвет в формате RGB (0..=255 на канал).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Rgb {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    /// Упаковывает цвет в формат `0x00RRGGBB` для кадрового буфера.
+    pub const fn to_u32(self) -> u32 {
+        ((self.r as u32) << 16) | ((self.g as u32) << 8) | (self.b as u32)
+    }
+}
+
+/// Четыре стандартных цвета комбо, используемых по умолчанию при отсутствии секции `[Colours]`.
+pub const DEFAULT_COMBO_COLOURS: [Rgb; 4] = [
+    Rgb::new(255, 192, 0),
+    Rgb::new(0, 202, 0),
+    Rgb::new(18, 124, 255),
+    Rgb::new(242, 24, 57),
+];
+
+/// Цветовая информация карты из секции `[Colours]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Colours {
+    /// Цвета комбо (Combo1..Combo8 по порядку номеров; при отсутствии используются 4 стандартных цвета).
+    pub combo: Vec<Rgb>,
+    /// Переопределение цвета дорожки слайдера.
+    pub slider_track_override: Option<Rgb>,
+    /// Переопределение цвета границы слайдера.
+    pub slider_border: Option<Rgb>,
+}
+
+impl Default for Colours {
+    fn default() -> Self {
+        Self {
+            combo: DEFAULT_COMBO_COLOURS.to_vec(),
+            slider_track_override: None,
+            slider_border: None,
+        }
+    }
+}

@@ -1,14 +1,16 @@
 //! Публичные входы парсеров; разбор каждой части карты находится в своём модуле.
 
 mod circles;
+mod colours;
 mod events;
 mod hit_objects;
 mod metadata;
 mod osu;
 mod timing;
 
-pub use crate::model::Metadata;
+pub use crate::model::{Colours, Metadata, Rgb};
 pub use circles::osu_circles;
+pub use colours::osu_colours;
 pub use events::osu_breaks;
 pub use hit_objects::osu_hit_objects;
 pub use metadata::osu_metadata;

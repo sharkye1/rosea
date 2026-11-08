@@ -25,6 +25,10 @@ pub enum RoseaError {
         field: &'static str,
         line: usize,
     },
+    InvalidColourField {
+        field: &'static str,
+        line: usize,
+    },
     EmptyBeatmap,
     InvalidHitObjectField {
         field: &'static str,
@@ -103,6 +107,9 @@ impl fmt::Display for RoseaError {
             }
             Self::InvalidMetadataField { field, line } => {
                 write!(f, "Строка {line}: некорректное поле metadata {field}")
+            }
+            Self::InvalidColourField { field, line } => {
+                write!(f, "Строка {line}: некорректное поле colours {field}")
             }
             Self::EmptyBeatmap => write!(f, "В карте нет объектов HitObjects"),
             Self::InvalidHitObjectField {
