@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.gitignore'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.gitignore'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux-fast:
+    name: Linux Fast Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.94.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting (cargo fmt)
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (rosea-core)
+        run: cargo clippy --locked -p rosea-core --all-targets --all-features -- -D warnings
+
+      - name: Test (rosea-core)
+        run: cargo test --locked -p rosea-core --all-features
+
+      - name: Build headless (rosea-app)
+        run: cargo build --locked -p rosea-app --no-default-features
+
+      - name: Clippy headless (rosea-app)
+        run: cargo clippy --locked -p rosea-app --no-default-features --all-targets -- -D warnings
+
+      - name: Test headless (rosea-app)
+        run: cargo test --locked -p rosea-app --no-default-features
+
+      - name: Check benches compilation
+        run: cargo check --benches --locked -p rosea-core
+
+  windows:
+    name: Windows
+    needs: [linux-fast]
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.94.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test (rosea-core)
+        run: cargo test --locked -p rosea-core --all-features
+
+      - name: Build headless (rosea-app)
+        run: cargo build --locked -p rosea-app --no-default-features
+
+      - name: Test headless (rosea-app)
+        run: cargo test --locked -p rosea-app --no-default-features
+
+      - name: Clippy (workspace all features)
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test (workspace all features)
+        run: cargo test --locked --workspace --all-features
+
+  macos:
+    name: macOS (arm64)
+    needs: [windows]
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.94.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.0"
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (rosea-core)
+        run: cargo clippy --locked -p rosea-core --all-targets --all-features -- -D warnings
+
+      - name: Test (rosea-core)
+        run: cargo test --locked -p rosea-core --all-features
+
+      - name: Build headless (rosea-app)
+        run: cargo build --locked -p rosea-app --no-default-features
+
+      - name: Clippy headless (rosea-app)
+        run: cargo clippy --locked -p rosea-app --no-default-features --all-targets -- -D warnings
+
+      - name: Test headless (rosea-app)
+        run: cargo test --locked -p rosea-app --no-default-features
