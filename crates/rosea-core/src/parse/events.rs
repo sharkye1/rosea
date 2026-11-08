@@ -1,4 +1,4 @@
-//! Чтение секции [Events] и интервалов перерывов.
+//! Чтение секции `[Events]` и интервалов перерывов.
 
 use crate::error::RoseaError;
 use crate::model::BreakPeriod;

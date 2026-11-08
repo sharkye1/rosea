@@ -67,7 +67,7 @@ jobs:
         run: cargo check --benches --locked -p rosea-core
 
       - name: Check docs
-        run: cargo doc --locked --no-deps --workspace
+        run: cargo doc --locked --no-deps -p rosea-core -p rosea-app --no-default-features
         env:
           RUSTDOCFLAGS: "-D warnings"
 

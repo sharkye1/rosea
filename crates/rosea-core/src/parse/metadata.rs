@@ -1,4 +1,4 @@
-//! Чтение секции [Metadata] и поддерживаемых семантических полей карты.
+//! Чтение секции `[Metadata]` и поддерживаемых семантических полей карты.
 
 use crate::error::RoseaError;
 use crate::model::Metadata;

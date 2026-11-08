@@ -1,4 +1,4 @@
-//! Чтение секции [Colours], цветов комбо и переопределений слайдера.
+//! Чтение секции `[Colours]`, цветов комбо и переопределений слайдера.
 
 use crate::error::RoseaError;
 use crate::model::{Colours, DEFAULT_COMBO_COLOURS, Rgb};

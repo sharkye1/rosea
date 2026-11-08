@@ -70,7 +70,7 @@ impl PreparedPath {
         self.length
     }
 
-    /// Возвращает относительную позицию по доле пройденной длины; доля зажимается в [0,1].
+    /// Возвращает относительную позицию по доле пройденной длины; доля зажимается в `[0, 1]`.
     pub fn position_at(&self, progress: f64) -> Result<Point, RoseaError> {
         if !progress.is_finite() {
             return Err(self.numerical_error());
