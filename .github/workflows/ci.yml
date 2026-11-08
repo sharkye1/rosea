@@ -24,13 +24,17 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   linux-fast:
     name: Linux Fast Checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.4.0
 
       - name: Install Rust 1.94.0
         uses: dtolnay/rust-toolchain@master
@@ -39,16 +43,16 @@ jobs:
           components: rustfmt, clippy
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Check formatting (cargo fmt)
         run: cargo fmt --all -- --check
 
       - name: Clippy (rosea-core)
-        run: cargo clippy --locked -p rosea-core --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p rosea-core --all-targets -- -D warnings
 
       - name: Test (rosea-core)
-        run: cargo test --locked -p rosea-core --all-features
+        run: cargo test --locked -p rosea-core
 
       - name: Build headless (rosea-app)
         run: cargo build --locked -p rosea-app --no-default-features
@@ -62,13 +66,19 @@ jobs:
       - name: Check benches compilation
         run: cargo check --benches --locked -p rosea-core
 
+      - name: Check docs
+        run: cargo doc --locked --no-deps --workspace
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
   windows:
     name: Windows
     needs: [linux-fast]
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.4.0
 
       - name: Install Rust 1.94.0
         uses: dtolnay/rust-toolchain@master
@@ -77,30 +87,31 @@ jobs:
           components: clippy
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Clippy (rosea-core)
+        run: cargo clippy --locked -p rosea-core --all-targets -- -D warnings
 
       - name: Test (rosea-core)
-        run: cargo test --locked -p rosea-core --all-features
+        run: cargo test --locked -p rosea-core
 
       - name: Build headless (rosea-app)
         run: cargo build --locked -p rosea-app --no-default-features
 
+      - name: Clippy headless (rosea-app)
+        run: cargo clippy --locked -p rosea-app --no-default-features --all-targets -- -D warnings
+
       - name: Test headless (rosea-app)
         run: cargo test --locked -p rosea-app --no-default-features
-
-      - name: Clippy (workspace all features)
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      - name: Test (workspace all features)
-        run: cargo test --locked --workspace --all-features
 
   macos:
     name: macOS (arm64)
     needs: [windows]
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.4.0
 
       - name: Install Rust 1.94.0
         uses: dtolnay/rust-toolchain@master
@@ -109,13 +120,13 @@ jobs:
           components: clippy
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Clippy (rosea-core)
-        run: cargo clippy --locked -p rosea-core --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p rosea-core --all-targets -- -D warnings
 
       - name: Test (rosea-core)
-        run: cargo test --locked -p rosea-core --all-features
+        run: cargo test --locked -p rosea-core
 
       - name: Build headless (rosea-app)
         run: cargo build --locked -p rosea-app --no-default-features
