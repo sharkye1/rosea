@@ -69,7 +69,7 @@ pub struct TimingPoint {
     pub beat_length: f64,
     pub meter: u32,
     pub sample_set: u8,
-    pub sample_index: u32,
+    pub sample_index: i32,
     pub volume: u8,
     pub uninherited: bool,
     pub effects: u32,
