@@ -14,6 +14,7 @@ import math
 import os
 import sys
 import tempfile
+import pygame
 
 # Setup paths
 SCRIPT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
@@ -226,6 +227,13 @@ def test_visualizer_headless_playback_and_source_toggle():
     pos, keys = vis.replay.cursor_at(vis.current_time_ms)
     assert pos is not None
     assert len(pos) == 2
+
+    # Test keyboard speed events (Up/Down with no mod, shift, ctrl)
+    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_UP, mod=0))
+    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_DOWN, mod=pygame.KMOD_SHIFT))
+    pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_UP, mod=pygame.KMOD_CTRL))
+    vis.run(max_frames=3)
+    assert vis.playback_speed > 0.0
 
     print("test_visualizer_headless_playback_and_source_toggle: OK")
 

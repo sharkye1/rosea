@@ -2116,6 +2116,7 @@ class Visualizer:
                     mods = pygame.key.get_mods()
                     is_alt = bool(mods & pygame.KMOD_ALT)
                     is_shift = bool(mods & pygame.KMOD_SHIFT)
+                    is_ctrl = bool(mods & pygame.KMOD_CTRL)
 
                     if event.key == pygame.K_ESCAPE:
                         running = False
