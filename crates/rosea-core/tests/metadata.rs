@@ -341,9 +341,15 @@ fn enforces_line_length_limits() {
 
 #[test]
 fn reads_real_fixtures_when_available() {
-    let dearbrave = Path::new("tests/data/01_micro/dearbrave.osu");
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir.join("../../tests/data");
+    if !root.exists() {
+        return;
+    }
+
+    let dearbrave = root.join("01_micro/dearbrave.osu");
     if dearbrave.exists() {
-        let bytes = std::fs::read(dearbrave).unwrap();
+        let bytes = std::fs::read(&dearbrave).unwrap();
         let meta = osu_metadata(&bytes).unwrap();
         assert_eq!(meta.title, "Dear Brave");
         assert_eq!(meta.title_unicode.as_deref(), Some("ディアブレイブ"));
@@ -357,9 +363,9 @@ fn reads_real_fixtures_when_available() {
         assert_eq!(meta.beatmap_set_id, Some(-1));
     }
 
-    let yomi = Path::new("tests/data/01_micro/yomi.osu");
+    let yomi = root.join("01_micro/yomi.osu");
     if yomi.exists() {
-        let bytes = std::fs::read(yomi).unwrap();
+        let bytes = std::fs::read(&yomi).unwrap();
         let meta = osu_metadata(&bytes).unwrap();
         assert_eq!(
             meta.title,

@@ -1,0 +1,5 @@
+disallowed-types = [
+    # в аппе юзать instant и systemtime можно в отличие от core потому что нужны будут замеры cli ну и fps контролировать элементарно
+    { path = "std::collections::HashMap", reason = "использовать BTreeMap или Vec с явной сортировкой вместо него (детерминированный порядок итерации)" },
+    { path = "std::collections::HashSet", reason = "использовать BTreeSet или Vec с явной сортировкой вместо него (детерминированный порядок итерации)" },
+]

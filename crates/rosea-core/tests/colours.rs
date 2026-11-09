@@ -226,9 +226,15 @@ fn enforces_line_length_limits() {
 
 #[test]
 fn reads_real_fixtures_when_available() {
-    let dearbrave = Path::new("tests/data/01_micro/dearbrave.osu");
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir.join("../../tests/data");
+    if !root.exists() {
+        return;
+    }
+
+    let dearbrave = root.join("01_micro/dearbrave.osu");
     if dearbrave.exists() {
-        let bytes = std::fs::read(dearbrave).unwrap();
+        let bytes = std::fs::read(&dearbrave).unwrap();
         let colours = osu_colours(&bytes).unwrap();
         assert_eq!(
             colours.combo,
@@ -242,9 +248,9 @@ fn reads_real_fixtures_when_available() {
         assert_eq!(colours.slider_border, None);
     }
 
-    let pchir = Path::new("tests/data/02_sliders_geometry/1936782_pchir.osu");
+    let pchir = root.join("02_sliders_geometry/1936782_pchir.osu");
     if pchir.exists() {
-        let bytes = std::fs::read(pchir).unwrap();
+        let bytes = std::fs::read(&pchir).unwrap();
         let colours = osu_colours(&bytes).unwrap();
         assert_eq!(colours.combo.len(), 4);
         assert_eq!(colours.slider_border, Some(Rgb::new(254, 255, 198)));
