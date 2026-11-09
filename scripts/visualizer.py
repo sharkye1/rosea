@@ -116,10 +116,6 @@ class Visualizer:
             os.environ["SDL_VIDEODRIVER"] = "dummy"
 
         pygame.init()
-        try:
-            pygame.key.set_repeat(250, 30)
-        except Exception:
-            pass
         pygame.display.set_caption(f"Rosea Visualizer - {os.path.basename(beatmap_path)}")
 
         if self.headless:
@@ -144,6 +140,11 @@ class Visualizer:
         self.tech_panel_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_dock_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_close_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+
+        # Smooth keyboard repeat state for speed control
+        self.speed_key_held: Optional[int] = None
+        self.speed_key_press_time: float = 0.0
+        self.speed_key_last_repeat: float = 0.0
 
         # Click Badges & Real-time Judgements (Last 5 Clicks on Playfield in Tech HUD)
         self.replay_clicks: List[ClickEvent] = []
@@ -753,6 +754,7 @@ class Visualizer:
                     pygame.mixer.music.pause()
                 except Exception:
                     pass
+                self.music_playing = False
             self.set_toast(f"Скорость {self.playback_speed:.2f}x (музыка заглушена)", 1.0)
         else:
             lead_in = getattr(self.beatmap, "audio_lead_in", 0)
@@ -2145,9 +2147,17 @@ class Visualizer:
                     elif event.key == pygame.K_UP:
                         delta = 0.25 if is_ctrl else (0.05 if is_shift else 0.01)
                         self.change_speed(delta)
+                        self.speed_key_held = pygame.K_UP
+                        now = time.time()
+                        self.speed_key_press_time = now
+                        self.speed_key_last_repeat = now
                     elif event.key == pygame.K_DOWN:
                         delta = 0.25 if is_ctrl else (0.05 if is_shift else 0.01)
                         self.change_speed(-delta)
+                        self.speed_key_held = pygame.K_DOWN
+                        now = time.time()
+                        self.speed_key_press_time = now
+                        self.speed_key_last_repeat = now
                     elif event.key in (pygame.K_0, pygame.K_KP0):
                         self.set_speed(1.0)
                     elif event.key in (pygame.K_r, pygame.K_HOME):
@@ -2203,6 +2213,10 @@ class Visualizer:
                         if self.pf_rect.collidepoint(mx, my):
                             self.record_live_click("M2")
 
+                elif event.type == pygame.KEYUP:
+                    if event.key in (pygame.K_UP, pygame.K_DOWN) and self.speed_key_held == event.key:
+                        self.speed_key_held = None
+
                 elif event.type == pygame.MOUSEBUTTONUP:
                     if event.button == 1:
                         self.is_scrubbing = False
@@ -2210,6 +2224,24 @@ class Visualizer:
                 elif event.type == pygame.MOUSEMOTION:
                     if self.is_scrubbing:
                         self.handle_mouse_seek(event.pos[0])
+
+            # Smooth speed adjustment while holding UP or DOWN arrow key
+            if self.speed_key_held in (pygame.K_UP, pygame.K_DOWN):
+                pressed = pygame.key.get_pressed()
+                if not pressed[self.speed_key_held]:
+                    self.speed_key_held = None
+                else:
+                    now = time.time()
+                    if now - self.speed_key_press_time >= 0.22 and now - self.speed_key_last_repeat >= 0.035:
+                        mods = pygame.key.get_mods()
+                        is_shift = bool(mods & pygame.KMOD_SHIFT)
+                        is_ctrl = bool(mods & pygame.KMOD_CTRL)
+                        delta = 0.25 if is_ctrl else (0.05 if is_shift else 0.01)
+                        if self.speed_key_held == pygame.K_UP:
+                            self.change_speed(delta)
+                        else:
+                            self.change_speed(-delta)
+                        self.speed_key_last_repeat = now
 
             self.step(dt)
             self.render()
