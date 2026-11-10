@@ -33,6 +33,12 @@ pub enum RoseaError {
     InvalidLzma {
         offset: usize,
     },
+    InvalidReplayRecord {
+        index: u32,
+    },
+    UnsupportedReplayFeature {
+        index: u32,
+    },
     InvalidEncoding,
     InvalidHeader,
     UnsupportedBeatmapVersion(u32),
@@ -127,6 +133,10 @@ impl fmt::Display for RoseaError {
             }
             Self::InvalidLzma { offset } => {
                 write!(f, "Некорректные данные LZMA по смещению {offset}")
+            }
+            Self::InvalidReplayRecord { index } => write!(f, "Некорректная запись реплея {index}"),
+            Self::UnsupportedReplayFeature { index } => {
+                write!(f, "Неподдерживаемая дельта в записи реплея {index}")
             }
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),

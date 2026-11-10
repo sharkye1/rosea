@@ -1,8 +1,111 @@
 use crate::error::RoseaError;
+use crate::model::Point;
 use std::io::{self, Write};
 
 const LZMA_DICTIONARY_LIMIT: usize = 64 * 1024 * 1024;
 const REPLAY_OUTPUT_LIMIT: usize = 256 * 1024 * 1024;
+
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+struct ReplayRecord {
+    index: u32,
+    delta_ms: i64,
+    cursor: Point,
+    keys: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+struct ReplayInput {
+    records: Vec<ReplayRecord>,
+    seed: Option<i32>,
+}
+
+#[allow(dead_code)]
+fn read_records(bytes: &[u8]) -> Result<ReplayInput, RoseaError> {
+    let text = std::str::from_utf8(bytes).map_err(|error| {
+        let index = bytes[..error.valid_up_to()]
+            .iter()
+            .filter(|&&b| b == b',')
+            .count();
+        RoseaError::InvalidReplayRecord {
+            index: index as u32,
+        }
+    })?;
+    if text.is_empty() {
+        return Err(RoseaError::NoReplayData { offset: 0 });
+    }
+    let text = text.strip_suffix(',').unwrap_or(text);
+    let mut records = Vec::new();
+    let mut seed = None;
+    for (index, record) in text.split(',').enumerate() {
+        let index = u32::try_from(index).map_err(|_| RoseaError::ResourceLimit {
+            resource: "replay records",
+            limit: 1_000_000,
+            observed: index as u64,
+        })?;
+        let invalid = || RoseaError::InvalidReplayRecord { index };
+        if seed.is_some() {
+            return Err(invalid());
+        }
+        let mut fields = record.split('|');
+        let delta = fields.next().ok_or_else(invalid)?;
+        let x = fields.next().ok_or_else(invalid)?;
+        let y = fields.next().ok_or_else(invalid)?;
+        let keys = fields.next().ok_or_else(invalid)?;
+        if fields.next().is_some() {
+            return Err(invalid());
+        }
+        let delta_ms = match delta.parse::<i64>() {
+            Ok(value) => value,
+            Err(_) => {
+                if delta
+                    .parse::<f64>()
+                    .is_ok_and(|value| value.is_finite() && value.fract() != 0.0)
+                {
+                    return Err(RoseaError::UnsupportedReplayFeature { index });
+                }
+                return Err(invalid());
+            }
+        };
+        let x = x.parse::<f32>().map_err(|_| invalid())?;
+        let y = y.parse::<f32>().map_err(|_| invalid())?;
+        if !x.is_finite() || !y.is_finite() {
+            return Err(invalid());
+        }
+        if delta_ms == -12345 && x == 0.0 && y == 0.0 {
+            seed = Some(keys.parse::<i32>().map_err(|_| invalid())?);
+        } else {
+            let keys = keys.parse::<u32>().map_err(|_| invalid())?;
+            if records.len() == 1_000_000 {
+                return Err(RoseaError::ResourceLimit {
+                    resource: "replay records",
+                    limit: 1_000_000,
+                    observed: 1_000_001,
+                });
+            }
+            records.push(ReplayRecord {
+                index,
+                delta_ms,
+                cursor: Point { x, y },
+                keys,
+            });
+        }
+    }
+    if records.is_empty() {
+        return Err(RoseaError::NoReplayData { offset: 0 });
+    }
+    Ok(ReplayInput { records, seed })
+}
+
+#[allow(dead_code)]
+fn read_replay(bytes: &[u8]) -> Result<(ReplayHeader<'_>, ReplayInput), RoseaError> {
+    let header = read_header(bytes)?;
+    let offset = bytes.len() - header.trailer.len() - header.compressed_data.len();
+    let data = decompress_replay(header.compressed_data, offset)?;
+    let input = read_records(&data)?;
+    Ok((header, input))
+}
 
 #[allow(dead_code)]
 struct LimitedOutput {
@@ -270,12 +373,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reads_replay_records_and_seed() {
+        let input = read_records(b"10|256|192|5,5|257|192|0,-12345|0|0|-42,").unwrap();
+        assert_eq!(input.seed, Some(-42));
+        assert_eq!(
+            input.records,
+            vec![
+                ReplayRecord {
+                    index: 0,
+                    delta_ms: 10,
+                    cursor: Point { x: 256.0, y: 192.0 },
+                    keys: 5
+                },
+                ReplayRecord {
+                    index: 1,
+                    delta_ms: 5,
+                    cursor: Point { x: 257.0, y: 192.0 },
+                    keys: 0
+                },
+            ]
+        );
+        let input = read_records(b"-10|-5|500|4294967295").unwrap();
+        assert_eq!(input.records[0].delta_ms, -10);
+        assert_eq!(input.records[0].cursor, Point { x: -5.0, y: 500.0 });
+        assert_eq!(input.seed, None);
+    }
+
+    #[test]
+    fn rejects_bad_records_and_seed_positions() {
+        for text in [
+            "1|0|0|0,,2|0|0|0",
+            "1|0|0|0,,",
+            "1|0|0",
+            "1|NaN|0|0",
+            "1|0|inf|0",
+            "1|0|0|-1",
+            "1|0|0|0|1",
+            "-12345|0|0|1,1|0|0|0",
+            "1|0|0|0,-12345|0|0|1,-12345|0|0|2",
+        ] {
+            assert!(
+                matches!(
+                    read_records(text.as_bytes()),
+                    Err(RoseaError::InvalidReplayRecord { .. })
+                ),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            read_records(b"1.5|0|0|0"),
+            Err(RoseaError::UnsupportedReplayFeature { index: 0 })
+        );
+        assert_eq!(
+            read_records(b"1|0|0|0,\xff"),
+            Err(RoseaError::InvalidReplayRecord { index: 1 })
+        );
+        assert!(matches!(
+            read_records(b""),
+            Err(RoseaError::NoReplayData { .. })
+        ));
+        assert!(matches!(
+            read_records(b"-12345|0|0|1"),
+            Err(RoseaError::NoReplayData { .. })
+        ));
+    }
+
+    #[test]
+    fn enforces_record_count_limit() {
+        let mut data = "0|0|0|0,".repeat(1_000_000);
+        assert_eq!(
+            read_records(data.as_bytes()).unwrap().records.len(),
+            1_000_000
+        );
+        data.push_str("0|0|0|0");
+        assert!(matches!(
+            read_records(data.as_bytes()),
+            Err(RoseaError::ResourceLimit {
+                resource: "replay records",
+                observed: 1_000_001,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn decompresses_and_checks_lzma_limits() {
         let data = [
             93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 12, 3, 65, 4,
             153, 91, 83, 160, 122, 219, 176, 37, 27, 45, 1, 127, 255, 225, 190, 128, 0,
         ];
         assert_eq!(decompress_replay(&data, 50).unwrap(), b"10|256|192|5,");
+        let mut replay = example_replay();
+        let length_offset = replay.len() - 7;
+        replay.truncate(length_offset);
+        replay.extend_from_slice(&(data.len() as i32).to_le_bytes());
+        replay.extend_from_slice(&data);
+        replay.extend_from_slice(&[7, 8]);
+        let (header, input) = read_replay(&replay).unwrap();
+        assert_eq!(header.trailer, &[7, 8]);
+        assert_eq!(input.records[0].delta_ms, 10);
+        assert_eq!(input.records[0].cursor, Point { x: 256.0, y: 192.0 });
+        assert_eq!(input.records[0].keys, 5);
         assert_eq!(
             decompress_replay(&data[..12], 50),
             Err(RoseaError::InvalidLzma { offset: 50 })
