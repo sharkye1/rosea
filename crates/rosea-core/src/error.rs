@@ -10,6 +10,15 @@ pub enum RoseaError {
     UnexpectedEof {
         offset: usize,
     },
+    InvalidLength {
+        offset: usize,
+    },
+    InvalidStringMarker {
+        offset: usize,
+    },
+    InvalidReplayString {
+        offset: usize,
+    },
     InvalidEncoding,
     InvalidHeader,
     UnsupportedBeatmapVersion(u32),
@@ -83,6 +92,13 @@ impl fmt::Display for RoseaError {
                     f,
                     "Недостаточно байтов реплея для чтения поля с позиции {offset}"
                 )
+            }
+            Self::InvalidLength { offset } => write!(f, "Некорректная длина по смещению {offset}"),
+            Self::InvalidStringMarker { offset } => {
+                write!(f, "Некорректный маркер строки по смещению {offset}")
+            }
+            Self::InvalidReplayString { offset } => {
+                write!(f, "Некорректный UTF-8 строки реплея по смещению {offset}")
             }
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),
