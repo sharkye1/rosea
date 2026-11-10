@@ -11,6 +11,82 @@ pub struct Point {
     pub y: f32,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct ReplayRecord {
+    pub index: u32,
+    pub delta_ms: i64,
+    pub cursor: Point,
+    pub keys: u32,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ReplayInput {
+    pub(crate) records: Vec<ReplayRecord>,
+    pub(crate) seed: Option<i32>,
+}
+
+impl ReplayInput {
+    pub fn records(&self) -> &[ReplayRecord] {
+        &self.records
+    }
+    pub fn seed(&self) -> Option<i32> {
+        self.seed
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReplayMeta {
+    pub mode: u8,
+    pub(crate) game_version: i32,
+    pub(crate) beatmap_hash: String,
+    pub player: String,
+    pub replay_hash: String,
+    pub count_geki: u16,
+    pub count_katu: u16,
+    pub perfect: u8,
+    pub mods: u32,
+    pub life_graph: String,
+    pub timestamp: [u8; 8],
+    pub trailer: Vec<u8>,
+}
+
+impl ReplayMeta {
+    pub fn game_version(&self) -> i32 {
+        self.game_version
+    }
+    pub fn beatmap_hash(&self) -> &str {
+        &self.beatmap_hash
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ExpectedStats {
+    pub score: i32,
+    pub max_combo: u16,
+    pub count_300: u16,
+    pub count_100: u16,
+    pub count_50: u16,
+    pub count_miss: u16,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ParsedReplay {
+    pub meta: ReplayMeta,
+    pub expected: ExpectedStats,
+    pub input: ReplayInput,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Parsed<T> {
+    pub value: T,
+    pub warnings: Vec<Warning>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Warning {
+    ReplayTrailerNotInterpreted,
+}
+
 /// Круг до подготовки геометрии: время в мс, line — строка исходника с единицы.
 #[derive(Debug, PartialEq)]
 pub struct Circle {

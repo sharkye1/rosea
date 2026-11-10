@@ -15,5 +15,6 @@ pub use colours::osu_colours;
 pub use events::osu_breaks;
 pub use hit_objects::osu_hit_objects;
 pub use metadata::osu_metadata;
+pub use osr::osr;
 pub use osu::{Difficulty, osu_difficulty, osu_header, osu_mode, osu_stack_leniency};
 pub use timing::osu_timing_points;

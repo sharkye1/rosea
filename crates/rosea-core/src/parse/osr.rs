@@ -1,27 +1,12 @@
 use crate::error::RoseaError;
-use crate::model::Point;
+use crate::model::{
+    ExpectedStats, Parsed, ParsedReplay, Point, ReplayInput, ReplayMeta, ReplayRecord, Warning,
+};
 use std::io::{self, Write};
 
 const LZMA_DICTIONARY_LIMIT: usize = 64 * 1024 * 1024;
 const REPLAY_OUTPUT_LIMIT: usize = 256 * 1024 * 1024;
 
-#[allow(dead_code)]
-#[derive(Debug, PartialEq)]
-struct ReplayRecord {
-    index: u32,
-    delta_ms: i64,
-    cursor: Point,
-    keys: u32,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, PartialEq)]
-struct ReplayInput {
-    records: Vec<ReplayRecord>,
-    seed: Option<i32>,
-}
-
-#[allow(dead_code)]
 fn read_records(bytes: &[u8]) -> Result<ReplayInput, RoseaError> {
     let text = std::str::from_utf8(bytes).map_err(|error| {
         let index = bytes[..error.valid_up_to()]
@@ -98,16 +83,48 @@ fn read_records(bytes: &[u8]) -> Result<ReplayInput, RoseaError> {
     Ok(ReplayInput { records, seed })
 }
 
-#[allow(dead_code)]
-fn read_replay(bytes: &[u8]) -> Result<(ReplayHeader<'_>, ReplayInput), RoseaError> {
+pub fn osr(bytes: &[u8]) -> Result<Parsed<ParsedReplay>, RoseaError> {
     let header = read_header(bytes)?;
     let offset = bytes.len() - header.trailer.len() - header.compressed_data.len();
     let data = decompress_replay(header.compressed_data, offset)?;
     let input = read_records(&data)?;
-    Ok((header, input))
+    let expected = ExpectedStats {
+        score: header.score,
+        max_combo: header.max_combo,
+        count_300: header.counts[0],
+        count_100: header.counts[1],
+        count_50: header.counts[2],
+        count_miss: header.counts[5],
+    };
+    let meta = ReplayMeta {
+        mode: header.mode,
+        game_version: header.game_version,
+        beatmap_hash: header.beatmap_hash.to_owned(),
+        player: header.player.to_owned(),
+        replay_hash: header.replay_hash.to_owned(),
+        count_geki: header.counts[3],
+        count_katu: header.counts[4],
+        perfect: header.perfect,
+        mods: header.mods,
+        life_graph: header.life_graph.to_owned(),
+        timestamp: header.timestamp,
+        trailer: header.trailer.to_vec(),
+    };
+    let warnings = if header.trailer.is_empty() {
+        Vec::new()
+    } else {
+        vec![Warning::ReplayTrailerNotInterpreted]
+    };
+    Ok(Parsed {
+        value: ParsedReplay {
+            meta,
+            expected,
+            input,
+        },
+        warnings,
+    })
 }
 
-#[allow(dead_code)]
 struct LimitedOutput {
     bytes: Vec<u8>,
     limit: usize,
@@ -130,7 +147,6 @@ impl Write for LimitedOutput {
     }
 }
 
-#[allow(dead_code)]
 fn decompress_replay(data: &[u8], offset: usize) -> Result<Vec<u8>, RoseaError> {
     let header = data.get(..13).ok_or(RoseaError::InvalidLzma { offset })?;
     let dictionary = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as u64;
@@ -176,8 +192,6 @@ fn decompress_replay(data: &[u8], offset: usize) -> Result<Vec<u8>, RoseaError> 
     Ok(output.bytes)
 }
 
-// Разобранные данные пока используются только внутренними тестами.
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 struct ReplayHeader<'a> {
     mode: u8,
@@ -195,16 +209,8 @@ struct ReplayHeader<'a> {
     timestamp: [u8; 8],
     compressed_data: &'a [u8],
     trailer: &'a [u8],
-    warnings: Vec<ReplayWarning>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
-enum ReplayWarning {
-    ReplayTrailerNotInterpreted,
-}
-
-#[allow(dead_code)]
 fn read_header(bytes: &[u8]) -> Result<ReplayHeader<'_>, RoseaError> {
     let mut cursor = Cursor::new(bytes);
     let mode = cursor.read_u8()?;
@@ -254,11 +260,6 @@ fn read_header(bytes: &[u8]) -> Result<ReplayHeader<'_>, RoseaError> {
             offset: mods_offset,
         });
     }
-    let warnings = if trailer.is_empty() {
-        Vec::new()
-    } else {
-        vec![ReplayWarning::ReplayTrailerNotInterpreted]
-    };
     Ok(ReplayHeader {
         mode,
         game_version,
@@ -274,17 +275,14 @@ fn read_header(bytes: &[u8]) -> Result<ReplayHeader<'_>, RoseaError> {
         timestamp,
         compressed_data,
         trailer,
-        warnings,
     })
 }
 
-#[allow(dead_code)]
 struct Cursor<'a> {
     bytes: &'a [u8],
     offset: usize,
 }
 
-#[allow(dead_code)]
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, offset: 0 }
@@ -469,11 +467,15 @@ mod tests {
         replay.extend_from_slice(&(data.len() as i32).to_le_bytes());
         replay.extend_from_slice(&data);
         replay.extend_from_slice(&[7, 8]);
-        let (header, input) = read_replay(&replay).unwrap();
-        assert_eq!(header.trailer, &[7, 8]);
-        assert_eq!(input.records[0].delta_ms, 10);
-        assert_eq!(input.records[0].cursor, Point { x: 256.0, y: 192.0 });
-        assert_eq!(input.records[0].keys, 5);
+        let parsed = osr(&replay).unwrap();
+        assert_eq!(parsed.value.meta.trailer, &[7, 8]);
+        assert_eq!(parsed.warnings, vec![Warning::ReplayTrailerNotInterpreted]);
+        assert_eq!(parsed.value.input.records[0].delta_ms, 10);
+        assert_eq!(
+            parsed.value.input.records[0].cursor,
+            Point { x: 256.0, y: 192.0 }
+        );
+        assert_eq!(parsed.value.input.records[0].keys, 5);
         assert_eq!(
             decompress_replay(&data[..12], 50),
             Err(RoseaError::InvalidLzma { offset: 50 })
@@ -551,12 +553,6 @@ mod tests {
                 assert_eq!(header.timestamp, [1, 2, 3, 4, 5, 6, 7, 8]);
                 assert_eq!(header.compressed_data, &[10, 11, 12]);
                 assert_eq!(header.trailer, trailer);
-                let expected_warnings = if trailer.is_empty() {
-                    vec![]
-                } else {
-                    vec![ReplayWarning::ReplayTrailerNotInterpreted]
-                };
-                assert_eq!(header.warnings, expected_warnings);
             }
         }
     }
