@@ -1,4 +1,4 @@
-use rosea_core::{model::Warning, parse::osr};
+use rosea_core::{model::Warning, parse::osr, replay::normalize};
 
 #[test]
 fn parses_replay_through_public_api() {
@@ -30,5 +30,9 @@ fn parses_replay_through_public_api() {
     assert_eq!(parsed.value.input.records()[0].delta_ms, 10);
     assert_eq!(parsed.value.meta.trailer, [9, 10]);
     assert_eq!(parsed.warnings, vec![Warning::ReplayTrailerNotInterpreted]);
+    let timeline = normalize(parsed.value.input).unwrap();
+    assert_eq!(timeline.value.record_count(), 1);
+    assert_eq!(timeline.value.records()[0].time_ms, 10);
+    assert!(timeline.warnings.is_empty());
     assert!(osr(&bytes[..bytes.len() - 3]).is_err());
 }

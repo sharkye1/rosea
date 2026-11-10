@@ -39,6 +39,9 @@ pub enum RoseaError {
     UnsupportedReplayFeature {
         index: u32,
     },
+    ReplayTimeOverflow {
+        index: u32,
+    },
     InvalidEncoding,
     InvalidHeader,
     UnsupportedBeatmapVersion(u32),
@@ -137,6 +140,9 @@ impl fmt::Display for RoseaError {
             Self::InvalidReplayRecord { index } => write!(f, "Некорректная запись реплея {index}"),
             Self::UnsupportedReplayFeature { index } => {
                 write!(f, "Неподдерживаемая дельта в записи реплея {index}")
+            }
+            Self::ReplayTimeOverflow { index } => {
+                write!(f, "Переполнение времени в записи реплея {index}")
             }
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),

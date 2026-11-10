@@ -85,6 +85,27 @@ pub struct Parsed<T> {
 #[derive(Debug, PartialEq)]
 pub enum Warning {
     ReplayTrailerNotInterpreted,
+    ReplayInputNormalized {
+        changed_times: u32,
+        initial_dummy_removed: u32,
+        backward_removed: u32,
+        changes: Vec<ReplayChange>,
+    },
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ReplayChange {
+    Time {
+        index: u32,
+        old_ms: i64,
+        new_ms: i64,
+    },
+    InitialDummy {
+        index: u32,
+    },
+    BackwardFrame {
+        index: u32,
+    },
 }
 
 /// Круг до подготовки геометрии: время в мс, line — строка исходника с единицы.
