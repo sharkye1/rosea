@@ -1,11 +1,13 @@
 """
-Bridge to invoke and verify the rosea Rust parser against osu! beatmaps.
+Bridge to invoke and verify the rosea Rust parser against osu! beatmaps and replays.
 """
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
+from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure repository root and scripts directory are in sys.path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,40 +16,62 @@ for p in (REPO_ROOT, SCRIPT_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from typing import Dict, Any, List, Optional
-
 try:
     from osu_parser import (
-        parse_osu_beatmap,
         Beatmap,
         HitObject,
+        Replay,
+        ReplayFrame,
         TimingPoint,
-        generate_slider_path,
         apply_stacking,
+        generate_slider_path,
+        parse_osr_replay,
+        parse_osu_beatmap,
     )
 except ImportError:
     from scripts.osu_parser import (
-        parse_osu_beatmap,
         Beatmap,
         HitObject,
+        Replay,
+        ReplayFrame,
         TimingPoint,
-        generate_slider_path,
         apply_stacking,
+        generate_slider_path,
+        parse_osr_replay,
+        parse_osu_beatmap,
     )
+
+_ROSEA_EXE_CHECKED = False
 
 
 def get_rosea_executable() -> str:
-    """Find or build the rosea binary."""
-    # Look for target/debug/rosea.exe
+    """Find or build the rosea binary, ensuring it matches current Rust sources."""
+    global _ROSEA_EXE_CHECKED
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     target_exe = os.path.join(root_dir, "target", "debug", "rosea.exe")
-    if not os.path.isfile(target_exe):
+    if not os.path.isfile(target_exe) and os.name != "nt":
         target_exe = os.path.join(root_dir, "target", "debug", "rosea")
 
-    if not os.path.isfile(target_exe):
-        # Build it
-        print("Building rosea-app...", file=sys.stderr)
-        subprocess.run(["cargo", "build", "-p", "rosea-app"], cwd=root_dir, check=True)
+    if not _ROSEA_EXE_CHECKED:
+        if not os.path.isfile(target_exe):
+            print("Building rosea-app...", file=sys.stderr)
+            subprocess.run(["cargo", "build", "-p", "rosea-app"], cwd=root_dir, check=True)
+        else:
+            # Rebuild once per process so branch switches/edits never reuse a stale binary.
+            try:
+                subprocess.run(
+                    ["cargo", "build", "-p", "rosea-app", "--quiet"],
+                    cwd=root_dir,
+                    check=True,
+                )
+            except OSError:
+                pass
+            except subprocess.CalledProcessError as e:
+                print(
+                    f"Warning: failed to rebuild rosea-app ({e}); using existing binary",
+                    file=sys.stderr,
+                )
+        _ROSEA_EXE_CHECKED = True
 
     return target_exe
 
@@ -56,7 +80,9 @@ def get_rust_commit_hash() -> str:
     """Retrieve the Git commit hash of the compiled rosea Rust parser."""
     try:
         exe = get_rosea_executable()
-        out = subprocess.check_output([exe, "--version"], text=True, stderr=subprocess.DEVNULL).strip()
+        out = subprocess.check_output(
+            [exe, "--version"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
         if "@" in out:
             c = out.split("@")[-1].strip()
             if c:
@@ -80,13 +106,16 @@ def get_rust_commit_hash() -> str:
     return "unknown"
 
 
-def run_rust_parser(file_path: str) -> Dict[str, Any]:
-    """
-    Run rosea on file_path with --json and return parsed JSON result.
-    """
+def run_rust_parser(
+    file_path: str, replay_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """Run rosea on file_path (and optional replay_path) with --json."""
     exe = get_rosea_executable()
+    cmd = [exe, "--map", file_path, "--json"]
+    if replay_path:
+        cmd.extend(["--replay", replay_path])
     proc = subprocess.run(
-        [exe, file_path, "--json"],
+        cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -107,6 +136,70 @@ def run_rust_parser(file_path: str) -> Dict[str, Any]:
         }
 
 
+def read_osu_audio_fields(file_path: str) -> Dict[str, Any]:
+    """Read only audio-related [General] keys omitted by rosea-core spec."""
+    audio_info: Dict[str, Any] = {
+        "audio_filename": "",
+        "audio_lead_in": 0,
+        "preview_time": 0,
+    }
+    if not file_path or not os.path.isfile(file_path):
+        return audio_info
+
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            in_general = False
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("//"):
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    in_general = line == "[General]"
+                    continue
+                if not in_general or ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                k, v = k.strip(), v.strip()
+                if k == "AudioFilename":
+                    audio_info["audio_filename"] = v
+                elif k == "AudioLeadIn":
+                    try:
+                        audio_info["audio_lead_in"] = int(float(v))
+                    except ValueError:
+                        pass
+                elif k == "PreviewTime":
+                    try:
+                        audio_info["preview_time"] = int(float(v))
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+    return audio_info
+
+
+def _rgb_tuple(obj: Optional[Dict[str, Any]]) -> Optional[Tuple[int, int, int]]:
+    if obj is None:
+        return None
+    return (int(obj["r"]), int(obj["g"]), int(obj["b"]))
+
+
+class ReplayVerificationResult:
+    def __init__(self, beatmap_path: str, replay_path: Optional[str]):
+        self.beatmap_path = beatmap_path
+        self.replay_path = replay_path
+        self.status = "NONE"  # "NONE", "PASS", "SKIPPED_UNSUPPORTED", "HASH_MISMATCH", "FAIL"
+        self.reason = "No replay"
+        self.error_code: Optional[str] = None
+        self.hash_status = "none"
+        self.hash_match: Optional[bool] = None
+        self.mismatches: List[str] = []
+        self.warnings: List[Dict[str, Any]] = []
+        self.normalization: Optional[Dict[str, Any]] = None
+        self.rust_replay_data: Optional[Dict[str, Any]] = None
+        self.py_replay: Optional[Replay] = None
+        self.rust_replay: Optional[Replay] = None
+
+
 class VerificationResult:
     def __init__(self, file_path: str):
         self.file_path = file_path
@@ -119,6 +212,9 @@ class VerificationResult:
         self.rust_data: Optional[Dict[str, Any]] = None
         self.rust_beatmap: Optional[Beatmap] = None
         self.rust_commit: str = ""
+        self.beatmap_md5: str = ""
+        self.warnings: List[Dict[str, Any]] = []
+        self.replay_verification: Optional[ReplayVerificationResult] = None
 
     def __repr__(self):
         return f"<VerificationResult {os.path.basename(self.file_path)}: {self.status} ({self.reason})>"
@@ -129,7 +225,7 @@ def beatmap_from_rust_json(
 ) -> Beatmap:
     """
     Construct a full Beatmap object from rosea-app --json output.
-    This enables reproducing the exact data parsed by the Rust parser.
+    Audio fields are read from the .osu file because rosea-core omits audio by spec.
     """
     if rust_data.get("status") != "ok":
         raise ValueError(
@@ -139,24 +235,44 @@ def beatmap_from_rust_json(
     bm = Beatmap()
     bm.version = int(rust_data.get("version", 14))
     bm.mode = int(rust_data.get("mode", 0))
+    bm.stack_leniency = float(rust_data.get("stack_leniency", 0.7))
+    bm.beatmap_md5 = str(rust_data.get("beatmap_md5", ""))
+    bm.rust_warnings = list(rust_data.get("warnings", []))
 
-    # Retain metadata / colours / audio from .osu file if accessible
-    if file_path and os.path.isfile(file_path):
-        try:
-            raw_bm = parse_osu_beatmap(file_path)
-            bm.title = raw_bm.title
-            bm.artist = raw_bm.artist
-            bm.creator = raw_bm.creator
-            bm.version_name = raw_bm.version_name
-            bm.audio_filename = raw_bm.audio_filename
-            bm.audio_lead_in = raw_bm.audio_lead_in
-            bm.preview_time = raw_bm.preview_time
-            bm.stack_leniency = raw_bm.stack_leniency
-            bm.combo_colours = list(raw_bm.combo_colours)
-            bm.beatmapset_id = raw_bm.beatmapset_id
-            bm.beatmap_id = raw_bm.beatmap_id
-        except Exception:
-            pass
+    # Audio fields only from .osu
+    audio = read_osu_audio_fields(file_path or "")
+    bm.audio_filename = audio["audio_filename"]
+    bm.audio_lead_in = audio["audio_lead_in"]
+    bm.preview_time = audio["preview_time"]
+
+    # Metadata from Rust JSON
+    r_meta = rust_data.get("metadata", {})
+    bm.title = str(r_meta.get("title", ""))
+    bm.title_unicode = r_meta.get("title_unicode")
+    bm.artist = str(r_meta.get("artist", ""))
+    bm.artist_unicode = r_meta.get("artist_unicode")
+    bm.creator = str(r_meta.get("creator", ""))
+    bm.version_name = str(r_meta.get("version", ""))
+    bm.source = str(r_meta.get("source", ""))
+    bm.tags = str(r_meta.get("tags", ""))
+    bm.beatmap_id = r_meta.get("beatmap_id")
+    bm.beatmapset_id = r_meta.get("beatmap_set_id")
+
+    # Colours from Rust JSON
+    r_col = rust_data.get("colours", {})
+    combo_list = r_col.get("combo", [])
+    if combo_list:
+        bm.combo_colours = [
+            (int(c["r"]), int(c["g"]), int(c["b"])) for c in combo_list
+        ]
+    bm.slider_track_override = _rgb_tuple(r_col.get("slider_track_override"))
+    bm.slider_border = _rgb_tuple(r_col.get("slider_border"))
+
+    # Break periods from Rust JSON
+    bm.breaks = [
+        (float(br["start_time"]), float(br["end_time"]))
+        for br in rust_data.get("breaks", [])
+    ]
 
     # Difficulty
     r_diff = rust_data.get("difficulty", {})
@@ -282,9 +398,236 @@ def beatmap_from_rust_json(
     return bm
 
 
-def verify_beatmap(file_path: str) -> VerificationResult:
+def replay_from_rust_json(replay_data: Dict[str, Any]) -> Replay:
+    """Construct a Replay object from Rust replay JSON (with normalized timeline frames)."""
+    if replay_data.get("status") != "ok":
+        raise ValueError(
+            f"Cannot build Replay from Rust JSON: {replay_data.get('error_code')} ({replay_data.get('error')})"
+        )
+
+    hdr = replay_data.get("header", {})
+    exp = replay_data.get("expected", {})
+    frames = [
+        ReplayFrame(
+            time_ms=float(fr["time_ms"]),
+            x=float(fr["x"]),
+            y=float(fr["y"]),
+            keys=int(fr["keys"]),
+            index=int(fr["index"]),
+        )
+        for fr in replay_data.get("frames", [])
+    ]
+
+    return Replay(
+        player=str(hdr.get("player", "")),
+        frames=frames,
+        score=int(exp.get("score", 0)),
+        max_combo=int(exp.get("max_combo", 0)),
+        count_300=int(exp.get("count_300", 0)),
+        count_100=int(exp.get("count_100", 0)),
+        count_50=int(exp.get("count_50", 0)),
+        count_miss=int(exp.get("count_miss", 0)),
+        mode=int(hdr.get("mode", 0)),
+        game_version=int(hdr.get("game_version", 0)),
+        beatmap_hash=str(hdr.get("beatmap_hash", "")),
+        replay_hash=str(hdr.get("replay_hash", "")),
+        mods=int(hdr.get("mods", 0)),
+        perfect=int(hdr.get("perfect", 0)),
+        count_geki=int(hdr.get("count_geki", 0)),
+        count_katu=int(hdr.get("count_katu", 0)),
+        seed=hdr.get("seed"),
+        trailer_size=int(hdr.get("trailer_size", 0)),
+        raw_record_count=int(hdr.get("raw_record_count", len(frames))),
+        source_engine="rust",
+        normalization=replay_data.get("normalization"),
+        warnings=list(replay_data.get("warnings", [])),
+    )
+
+
+def verify_replay_from_json(
+    beatmap_path: str,
+    replay_path: str,
+    py_bm: Optional[Beatmap],
+    rust_out: Dict[str, Any],
+) -> ReplayVerificationResult:
+    """Verify Rust replay parsing, beatmap MD5 match, and normalization against Python."""
+    res = ReplayVerificationResult(beatmap_path, replay_path)
+    py_rep = parse_osr_replay(replay_path)
+    res.py_replay = py_rep
+
+    r_rep = rust_out.get("replay")
+    res.rust_replay_data = r_rep
+    if not r_rep:
+        res.status = "FAIL"
+        res.reason = "Rust output did not include replay object"
+        return res
+
+    res.error_code = r_rep.get("error_code")
+    res.hash_status = str(r_rep.get("hash_status", "unchecked"))
+    res.hash_match = r_rep.get("hash_match")
+    res.warnings = list(r_rep.get("warnings", []))
+    res.normalization = r_rep.get("normalization")
+
+    # Compute raw map MD5 independently in Python if py_bm doesn't have it
+    py_md5 = py_bm.beatmap_md5 if (py_bm and py_bm.beatmap_md5) else ""
+    if not py_md5 and os.path.isfile(beatmap_path):
+        with open(beatmap_path, "rb") as f:
+            py_md5 = hashlib.md5(f.read()).hexdigest()
+
+    if r_rep.get("status") != "ok":
+        err_code = res.error_code or "UnknownError"
+        err_msg = r_rep.get("error", "")
+
+        if err_code == "BeatmapHashMismatch":
+            if py_rep and py_md5 and py_rep.beatmap_hash.lower() == py_md5.lower():
+                res.status = "FAIL"
+                res.reason = f"Rust reported BeatmapHashMismatch, but Python MD5 matches ({py_md5})"
+            else:
+                res.status = "HASH_MISMATCH"
+                rep_h = py_rep.beatmap_hash if py_rep else r_rep.get("header", {}).get("beatmap_hash", "?")
+                res.reason = f"BeatmapHashMismatch (map={py_md5[:8]}..., replay={str(rep_h)[:8]}...)"
+            return res
+
+        if err_code in (
+            "UnsupportedMods",
+            "UnsupportedReplayMode",
+            "NoReplayData",
+            "UnsupportedReplayFeature",
+        ):
+            if err_code == "UnsupportedMods" and py_rep and py_rep.mods == 0:
+                res.status = "FAIL"
+                res.reason = "Rust reported UnsupportedMods for mods=0"
+                return res
+            if err_code == "UnsupportedReplayMode" and py_rep and py_rep.mode == 0:
+                res.status = "FAIL"
+                res.reason = "Rust reported UnsupportedReplayMode for mode=0"
+                return res
+            res.status = "SKIPPED_UNSUPPORTED"
+            res.reason = f"Rust rejected replay ({err_code}): {err_msg}"
+            return res
+
+        res.status = "FAIL"
+        res.reason = f"Rust replay failed ({err_code}): {err_msg}"
+        return res
+
+    # Status == "ok": compare Rust replay header, expected stats, MD5, and normalized count
+    if py_rep is None:
+        res.status = "FAIL"
+        res.reason = "Python parse_osr_replay failed on replay that Rust accepted"
+        return res
+
+    if res.hash_match is not True or res.hash_status != "ok":
+        res.mismatches.append(f"Expected hash_match=True/ok, got {res.hash_match}/{res.hash_status}")
+
+    if py_md5 and py_rep.beatmap_hash.lower() != py_md5.lower():
+        res.mismatches.append(
+            f"MD5 mismatch bypassed Rust check: map={py_md5}, replay={py_rep.beatmap_hash}"
+        )
+
+    hdr = r_rep.get("header", {})
+    exp = r_rep.get("expected", {})
+
+    if hdr.get("mode") != py_rep.mode:
+        res.mismatches.append(f"mode mismatch: Rust={hdr.get('mode')}, Py={py_rep.mode}")
+    if hdr.get("player") != py_rep.player:
+        res.mismatches.append(f"Player mismatch: Rust={hdr.get('player')!r}, Py={py_rep.player!r}")
+    if hdr.get("game_version") != py_rep.game_version:
+        res.mismatches.append(
+            f"game_version mismatch: Rust={hdr.get('game_version')}, Py={py_rep.game_version}"
+        )
+    if hdr.get("replay_hash") != py_rep.replay_hash:
+        res.mismatches.append(
+            f"replay_hash mismatch: Rust={hdr.get('replay_hash')!r}, Py={py_rep.replay_hash!r}"
+        )
+    if hdr.get("mods") != py_rep.mods:
+        res.mismatches.append(f"mods mismatch: Rust={hdr.get('mods')}, Py={py_rep.mods}")
+    if hdr.get("perfect") != py_rep.perfect:
+        res.mismatches.append(f"perfect mismatch: Rust={hdr.get('perfect')}, Py={py_rep.perfect}")
+    if hdr.get("count_geki") != py_rep.count_geki:
+        res.mismatches.append(
+            f"count_geki mismatch: Rust={hdr.get('count_geki')}, Py={py_rep.count_geki}"
+        )
+    if hdr.get("count_katu") != py_rep.count_katu:
+        res.mismatches.append(
+            f"count_katu mismatch: Rust={hdr.get('count_katu')}, Py={py_rep.count_katu}"
+        )
+    if hdr.get("seed") != py_rep.seed:
+        res.mismatches.append(f"seed mismatch: Rust={hdr.get('seed')}, Py={py_rep.seed}")
+    if hdr.get("trailer_size") != py_rep.trailer_size:
+        res.mismatches.append(
+            f"trailer_size mismatch: Rust={hdr.get('trailer_size')}, Py={py_rep.trailer_size}"
+        )
+    if hdr.get("raw_record_count") != py_rep.raw_record_count:
+        res.mismatches.append(
+            f"raw_record_count mismatch: Rust={hdr.get('raw_record_count')}, Py={py_rep.raw_record_count}"
+        )
+
+    for r_key, py_attr in [
+        ("score", "score"),
+        ("max_combo", "max_combo"),
+        ("count_300", "count_300"),
+        ("count_100", "count_100"),
+        ("count_50", "count_50"),
+        ("count_miss", "count_miss"),
+    ]:
+        py_val = getattr(py_rep, py_attr)
+        if exp.get(r_key) != py_val:
+            res.mismatches.append(f"Replay {r_key} mismatch: Rust={exp.get(r_key)}, Py={py_val}")
+
+    norm = res.normalization or {}
+    removed = int(norm.get("initial_dummy_removed", 0)) + int(norm.get("backward_removed", 0))
+    expected_norm_count = len(py_rep.frames) - removed
+    r_frames = r_rep.get("frames", [])
+    actual_norm_count = int(r_rep.get("record_count", len(r_frames)))
+    if len(r_frames) != actual_norm_count:
+        res.mismatches.append(
+            f"Replay frames length mismatch: record_count={actual_norm_count}, len(frames)={len(r_frames)}"
+        )
+    if actual_norm_count != expected_norm_count:
+        res.mismatches.append(
+            f"Normalized frame count mismatch: Rust={actual_norm_count}, Py={len(py_rep.frames)} - {removed}"
+        )
+    for fi in range(1, len(r_frames)):
+        if r_frames[fi]["time_ms"] < r_frames[fi - 1]["time_ms"]:
+            res.mismatches.append(
+                f"Normalized frame time went backwards at [{fi}]: {r_frames[fi]['time_ms']} < {r_frames[fi - 1]['time_ms']}"
+            )
+            break
+
+    if res.mismatches:
+        res.status = "FAIL"
+        res.reason = "; ".join(res.mismatches[:3])
+        return res
+
+    try:
+        res.rust_replay = replay_from_rust_json(r_rep)
+    except Exception as e:
+        res.status = "FAIL"
+        res.mismatches.append(str(e))
+        res.reason = f"Failed to build Replay from Rust JSON: {e}"
+        return res
+
+    res.status = "PASS"
+    res.reason = (
+        f"Verified {actual_norm_count} frames, MD5 ok, "
+        f"norm(t={norm.get('changed_times', 0)}, dummy={norm.get('initial_dummy_removed', 0)}, "
+        f"back={norm.get('backward_removed', 0)})"
+    )
+    return res
+
+
+def verify_replay(beatmap_path: str, replay_path: str) -> ReplayVerificationResult:
+    """Verify a beatmap + replay pair directly through Rust CLI and Python parser."""
+    py_bm = parse_osu_beatmap(beatmap_path)
+    rust_out = run_rust_parser(beatmap_path, replay_path=replay_path)
+    return verify_replay_from_json(beatmap_path, replay_path, py_bm, rust_out)
+
+
+def verify_beatmap(
+    file_path: str, replay_path: Optional[str] = None
+) -> VerificationResult:
     """
-    Compare Python parser and Rust parser on the given beatmap file.
+    Compare Python parser and Rust parser on the given beatmap (and optional replay) file.
     """
     res = VerificationResult(file_path)
 
@@ -304,25 +647,38 @@ def verify_beatmap(file_path: str) -> VerificationResult:
         else:
             kinds.add(obj.kind)
 
-    # Check for unsupported raw objects
     has_unsupported_raw = bool(getattr(py_bm, "unsupported_objects", []))
 
-    # Rust supports Circle, Linear (L), Bezier (B), Perfect Curve (P), and Spinner
+    # Rust supports v14 osu!standard with Circle, Linear (L), Bezier (B), Perfect Curve (P), and Spinner
     rust_supported = (
-        not has_unsupported_raw
+        py_bm.version == 14
+        and py_bm.mode == 0
+        and not has_unsupported_raw
         and all(k in ("circle", "slider_L", "slider_B", "slider_P", "spinner") for k in kinds)
         and len(py_bm.hit_objects) > 0
     )
     res.rust_supported = rust_supported
 
-    rust_out = run_rust_parser(file_path)
+    rust_out = run_rust_parser(file_path, replay_path=replay_path)
     res.rust_data = rust_out
     res.rust_commit = rust_out.get("commit", get_rust_commit_hash())
+    res.beatmap_md5 = str(rust_out.get("beatmap_md5", py_bm.beatmap_md5))
+    res.warnings = list(rust_out.get("warnings", []))
+
+    if replay_path and rust_out.get("replay") is not None:
+        res.replay_verification = verify_replay_from_json(
+            file_path, replay_path, py_bm, rust_out
+        )
 
     if not rust_supported:
-        # Rust should return an error (UnsupportedHitObject)
         if rust_out.get("status") == "error":
-            unsupported_kinds = [k for k in kinds if k not in ("circle", "slider_L", "slider_B", "slider_P", "spinner")]
+            unsupported_kinds = [
+                k for k in kinds if k not in ("circle", "slider_L", "slider_B", "slider_P", "spinner")
+            ]
+            if py_bm.version != 14:
+                unsupported_kinds.append(f"v{py_bm.version}")
+            if py_bm.mode != 0:
+                unsupported_kinds.append(f"mode_{py_bm.mode}")
             if has_unsupported_raw and not unsupported_kinds:
                 unsupported_kinds.append("unsupported_flags_or_malformed")
             res.status = "SKIPPED_UNSUPPORTED"
@@ -339,13 +695,12 @@ def verify_beatmap(file_path: str) -> VerificationResult:
             )
             return res
 
-    # If it is supported by Rust, verify all fields
     if rust_out.get("status") != "ok":
         res.status = "FAIL"
         res.reason = f"Rust parser failed unexpectedly: {rust_out.get('error')}"
         return res
 
-    # Verify header & mode
+    # Verify header, mode, MD5, stack_leniency
     if rust_out.get("version") != py_bm.version:
         res.mismatches.append(
             f"Version mismatch: Rust={rust_out.get('version')}, Python={py_bm.version}"
@@ -354,6 +709,70 @@ def verify_beatmap(file_path: str) -> VerificationResult:
         res.mismatches.append(
             f"Mode mismatch: Rust={rust_out.get('mode')}, Python={py_bm.mode}"
         )
+    if rust_out.get("beatmap_md5") != py_bm.beatmap_md5:
+        res.mismatches.append(
+            f"MD5 mismatch: Rust={rust_out.get('beatmap_md5')}, Python={py_bm.beatmap_md5}"
+        )
+    r_sl = rust_out.get("stack_leniency")
+    if r_sl is None or abs(float(r_sl) - float(py_bm.stack_leniency)) > 1e-4:
+        res.mismatches.append(
+            f"StackLeniency mismatch: Rust={r_sl}, Python={py_bm.stack_leniency}"
+        )
+
+    # Verify Metadata
+    r_meta = rust_out.get("metadata", {})
+    for r_key, py_attr in [
+        ("title", "title"),
+        ("title_unicode", "title_unicode"),
+        ("artist", "artist"),
+        ("artist_unicode", "artist_unicode"),
+        ("creator", "creator"),
+        ("version", "version_name"),
+        ("source", "source"),
+        ("tags", "tags"),
+        ("beatmap_id", "beatmap_id"),
+        ("beatmap_set_id", "beatmapset_id"),
+    ]:
+        r_val = r_meta.get(r_key)
+        py_val = getattr(py_bm, py_attr)
+        if r_val != py_val:
+            res.mismatches.append(
+                f"Metadata '{r_key}' mismatch: Rust={r_val!r}, Python={py_val!r}"
+            )
+
+    # Verify Colours
+    r_col = rust_out.get("colours", {})
+    r_combo = [
+        (int(c["r"]), int(c["g"]), int(c["b"])) for c in r_col.get("combo", [])
+    ]
+    if r_combo != py_bm.combo_colours:
+        res.mismatches.append(
+            f"Colours combo mismatch: Rust={r_combo}, Python={py_bm.combo_colours}"
+        )
+    r_sto = _rgb_tuple(r_col.get("slider_track_override"))
+    if r_sto != py_bm.slider_track_override:
+        res.mismatches.append(
+            f"SliderTrackOverride mismatch: Rust={r_sto}, Python={py_bm.slider_track_override}"
+        )
+    r_sb = _rgb_tuple(r_col.get("slider_border"))
+    if r_sb != py_bm.slider_border:
+        res.mismatches.append(
+            f"SliderBorder mismatch: Rust={r_sb}, Python={py_bm.slider_border}"
+        )
+
+    # Verify Breaks
+    r_breaks = rust_out.get("breaks", [])
+    if len(r_breaks) != len(py_bm.breaks):
+        res.mismatches.append(
+            f"Breaks count mismatch: Rust={len(r_breaks)}, Python={len(py_bm.breaks)}"
+        )
+    else:
+        for i, (rb, (ps, pe)) in enumerate(zip(r_breaks, py_bm.breaks)):
+            if abs(float(rb["start_time"]) - ps) > 1e-4 or abs(float(rb["end_time"]) - pe) > 1e-4:
+                res.mismatches.append(
+                    f"Break[{i}] mismatch: Rust=({rb['start_time']},{rb['end_time']}), Py=({ps},{pe})"
+                )
+                break
 
     # Verify difficulty
     r_diff = rust_out.get("difficulty", {})
@@ -387,7 +806,6 @@ def verify_beatmap(file_path: str) -> VerificationResult:
                     f"Difficulty '{field}' mismatch: Rust={r_val}, Python={py_val}"
                 )
     else:
-        # If no sliders, Rust may output null for slider settings
         for field in ("slider_multiplier", "slider_tick_rate"):
             r_val = r_diff.get(field)
             if r_val is not None:
@@ -499,7 +917,10 @@ def verify_beatmap(file_path: str) -> VerificationResult:
         )
     else:
         res.status = "PASS"
-        res.reason = f"100% match across {res.objects_checked} objects and {len(py_bm.timing_points)} timing points!"
+        res.reason = (
+            f"100% match across {res.objects_checked} objects, "
+            f"{len(py_bm.timing_points)} timing points, {len(py_bm.breaks)} breaks!"
+        )
         try:
             res.rust_beatmap = beatmap_from_rust_json(rust_out, file_path)
         except Exception as e:
@@ -509,9 +930,12 @@ def verify_beatmap(file_path: str) -> VerificationResult:
     return res
 
 
-def run_full_corpus_verification(corpus_dir: str = "tests/data") -> Dict[str, Any]:
-    """Run verification across all .osu files in corpus."""
+def run_full_corpus_verification(
+    corpus_dir: str = "tests/data", verify_replays: bool = True
+) -> Dict[str, Any]:
+    """Run verification across all .osu (and paired .osr) files in corpus."""
     import glob
+
     pattern = os.path.join(corpus_dir, "**", "*.osu")
     files = sorted(glob.glob(pattern, recursive=True))
 
@@ -520,9 +944,16 @@ def run_full_corpus_verification(corpus_dir: str = "tests/data") -> Dict[str, An
     failed = []
 
     for f in files:
-        res = verify_beatmap(f)
+        candidate_osr = os.path.splitext(f)[0] + ".osr"
+        rep = candidate_osr if (verify_replays and os.path.isfile(candidate_osr)) else None
+        res = verify_beatmap(f, replay_path=rep)
         if res.status == "PASS":
-            passed.append(res)
+            if res.replay_verification and res.replay_verification.status == "FAIL":
+                res.status = "FAIL"
+                res.reason = f"Replay verification failed: {res.replay_verification.reason}"
+                failed.append(res)
+            else:
+                passed.append(res)
         elif res.status == "SKIPPED_UNSUPPORTED":
             skipped.append(res)
         else:
@@ -538,8 +969,15 @@ def run_full_corpus_verification(corpus_dir: str = "tests/data") -> Dict[str, An
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Verify rosea Rust parser against beatmaps")
-    parser.add_argument("path", nargs="?", default="tests/data/01_micro/2dearbrave.osu", help="Beatmap file to verify")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="tests/data/01_micro/2dearbrave.osu",
+        help="Beatmap file to verify",
+    )
+    parser.add_argument("--replay", type=str, default=None, help="Optional .osr replay file")
     parser.add_argument("--all", action="store_true", help="Verify all beatmaps in tests/data")
     args = parser.parse_args()
 
@@ -547,21 +985,36 @@ if __name__ == "__main__":
         report = run_full_corpus_verification()
         print(f"=== Verification Report: {report['total']} maps ===")
         print(f"Passed (fully verified with Rust): {len(report['passed'])}")
-        for r in report['passed']:
-            print(f"  [PASS] {os.path.basename(r.file_path)}: {r.reason}")
-        print(f"\nSkipped (correctly rejected by Rust due to unsupported curves/spinners): {len(report['skipped'])}")
-        for r in report['skipped']:
+        for r in report["passed"]:
+            rep_note = (
+                f" | Replay: {r.replay_verification.status}"
+                if r.replay_verification
+                else ""
+            )
+            print(f"  [PASS] {os.path.basename(r.file_path)}: {r.reason}{rep_note}")
+        print(
+            f"\nSkipped (correctly rejected by Rust due to unsupported curves/objects): {len(report['skipped'])}"
+        )
+        for r in report["skipped"]:
             print(f"  [SKIP] {os.path.basename(r.file_path)}: {r.reason}")
         print(f"\nFailed: {len(report['failed'])}")
-        for r in report['failed']:
+        for r in report["failed"]:
             print(f"  [FAIL] {os.path.basename(r.file_path)}: {r.reason}")
-        if report['failed']:
+        if report["failed"]:
             sys.exit(1)
     else:
-        res = verify_beatmap(args.path)
+        res = verify_beatmap(args.path, replay_path=args.replay)
         print(f"Verification of {args.path}:")
         print(f"  Status: {res.status}")
+        print(f"  MD5:    {res.beatmap_md5}")
         print(f"  Reason: {res.reason}")
+        if res.warnings:
+            print(f"  Warnings: {res.warnings}")
+        if res.replay_verification:
+            rv = res.replay_verification
+            print(f"  Replay Status: {rv.status} ({rv.reason})")
+            if rv.warnings:
+                print(f"  Replay Warnings: {rv.warnings}")
         if res.mismatches:
             print("  Mismatches:")
             for m in res.mismatches:

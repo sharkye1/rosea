@@ -8,6 +8,7 @@ osu! beatmap parser supporting full beatmap specifications:
 - Difficulty, Metadata, Colours
 """
 
+import hashlib
 import math
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -420,12 +421,16 @@ class Beatmap:
         self.stack_leniency = 0.7
 
         # Metadata
-        self.title = "Untitled"
-        self.artist = "Unknown"
-        self.creator = "Unknown"
-        self.version_name = "Normal"
-        self.beatmap_id = 0
-        self.beatmapset_id = 0
+        self.title = ""
+        self.title_unicode: Optional[str] = None
+        self.artist = ""
+        self.artist_unicode: Optional[str] = None
+        self.creator = ""
+        self.version_name = ""
+        self.source = ""
+        self.tags = ""
+        self.beatmap_id: Optional[int] = None
+        self.beatmapset_id: Optional[int] = None
 
         # Difficulty
         self.cs = 4.0
@@ -435,15 +440,20 @@ class Beatmap:
         self.slider_multiplier = 1.4
         self.slider_tick_rate = 1.0
 
-        # Timing & Objects
+        # Timing, Events & Objects
         self.timing_points: List[TimingPoint] = []
         self.hit_objects: List[HitObject] = []
+        self.breaks: List[Tuple[float, float]] = []
         self.combo_colours: List[Tuple[int, int, int]] = [
-            (0, 202, 255),  # Cyan
-            (18, 224, 73),  # Green
-            (255, 160, 18), # Orange
-            (242, 68, 149), # Pink
+            (255, 192, 0),
+            (0, 202, 0),
+            (18, 124, 255),
+            (242, 24, 57),
         ]
+        self.slider_track_override: Optional[Tuple[int, int, int]] = None
+        self.slider_border: Optional[Tuple[int, int, int]] = None
+        self.beatmap_md5: str = ""
+        self.rust_warnings: List[Dict[str, Any]] = []
 
     @property
     def circle_radius(self) -> float:
@@ -489,10 +499,12 @@ class Beatmap:
 
 def parse_osu_beatmap(file_path: str) -> Beatmap:
     """Parse complete .osu beatmap file."""
-    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
+    with open(file_path, "rb") as f:
+        raw_bytes = f.read()
 
     bm = Beatmap()
+    bm.beatmap_md5 = hashlib.md5(raw_bytes).hexdigest()
+    lines = raw_bytes.decode("utf-8", errors="replace").splitlines()
 
     # Parse header
     for line in lines:
@@ -508,11 +520,23 @@ def parse_osu_beatmap(file_path: str) -> Beatmap:
 
     current_section = ""
     raw_objects: List[Tuple[int, str]] = []
-    custom_colours: List[Tuple[int, int, int]] = []
+    combo_slots: Dict[int, Tuple[int, int, int]] = {}
 
     ar_specified = False
     sm_specified = False
     str_specified = False
+
+    def _parse_rgb_triplet(v: str) -> Optional[Tuple[int, int, int]]:
+        parts = [c.strip() for c in v.split(",")]
+        if len(parts) != 3:
+            return None
+        try:
+            r, g, b = (int(parts[0]), int(parts[1]), int(parts[2]))
+            if 0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255:
+                return (r, g, b)
+        except ValueError:
+            pass
+        return None
 
     for line_num, raw_line in enumerate(lines, 1):
         line = raw_line.strip()
@@ -531,11 +555,20 @@ def parse_osu_beatmap(file_path: str) -> Beatmap:
                 elif k == "AudioFilename":
                     bm.audio_filename = v
                 elif k == "AudioLeadIn":
-                    bm.audio_lead_in = int(float(v))
+                    try:
+                        bm.audio_lead_in = int(float(v))
+                    except ValueError:
+                        pass
                 elif k == "PreviewTime":
-                    bm.preview_time = int(float(v))
+                    try:
+                        bm.preview_time = int(float(v))
+                    except ValueError:
+                        pass
                 elif k == "StackLeniency":
-                    bm.stack_leniency = float(v)
+                    try:
+                        bm.stack_leniency = float(v)
+                    except ValueError:
+                        pass
 
         elif current_section == "Metadata":
             if ":" in line:
@@ -543,12 +576,20 @@ def parse_osu_beatmap(file_path: str) -> Beatmap:
                 k, v = k.strip(), v.strip()
                 if k == "Title":
                     bm.title = v
+                elif k == "TitleUnicode":
+                    bm.title_unicode = v
                 elif k == "Artist":
                     bm.artist = v
+                elif k == "ArtistUnicode":
+                    bm.artist_unicode = v
                 elif k == "Creator":
                     bm.creator = v
                 elif k == "Version":
                     bm.version_name = v
+                elif k == "Source":
+                    bm.source = v
+                elif k == "Tags":
+                    bm.tags = v
                 elif k == "BeatmapID":
                     try:
                         bm.beatmap_id = int(v)
@@ -584,16 +625,49 @@ def parse_osu_beatmap(file_path: str) -> Beatmap:
                 except ValueError:
                     pass
 
+        elif current_section == "Events":
+            if line.startswith("_"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if not parts:
+                continue
+            ev_type = parts[0].strip('"').strip()
+            if ev_type == "2" or ev_type.lower() == "break":
+                if len(parts) == 3:
+                    try:
+                        st = float(parts[1].strip('"').strip())
+                        et = float(parts[2].strip('"').strip())
+                        if math.isfinite(st) and math.isfinite(et):
+                            if st == 0.0:
+                                st = 0.0
+                            if et == 0.0:
+                                et = 0.0
+                            if et < st:
+                                et = st
+                            bm.breaks.append((st, et))
+                    except ValueError:
+                        pass
+
         elif current_section == "Colours":
             if ":" in line:
                 k, v = line.split(":", 1)
                 k, v = k.strip(), v.strip()
                 if k.startswith("Combo"):
-                    try:
-                        r, g, b = [int(c.strip()) for c in v.split(",")]
-                        custom_colours.append((r, g, b))
-                    except Exception:
-                        pass
+                    suffix = k[5:]
+                    if suffix.isdigit():
+                        idx = int(suffix)
+                        if 1 <= idx <= 8:
+                            rgb = _parse_rgb_triplet(v)
+                            if rgb is not None:
+                                combo_slots[idx] = rgb
+                elif k == "SliderTrackOverride":
+                    rgb = _parse_rgb_triplet(v)
+                    if rgb is not None:
+                        bm.slider_track_override = rgb
+                elif k == "SliderBorder":
+                    rgb = _parse_rgb_triplet(v)
+                    if rgb is not None:
+                        bm.slider_border = rgb
 
         elif current_section == "TimingPoints":
             parts = [p.strip() for p in line.split(",")]
@@ -616,11 +690,12 @@ def parse_osu_beatmap(file_path: str) -> Beatmap:
         elif current_section == "HitObjects":
             raw_objects.append((line_num, line))
 
-    # Sort timing points
+    # Sort timing points and breaks
     bm.timing_points.sort(key=lambda tp: (tp.time, tp.line))
+    bm.breaks.sort(key=lambda br: br[0])
 
-    if custom_colours:
-        bm.combo_colours = custom_colours
+    if combo_slots:
+        bm.combo_colours = [combo_slots[idx] for idx in sorted(combo_slots)]
 
     # Default AR to OD if not explicitly specified (osu! specification)
     if not ar_specified:
@@ -772,11 +847,12 @@ def apply_stacking(objects: List[HitObject], stack_threshold: float, radius: flo
 
 
 class ReplayFrame:
-    def __init__(self, time_ms: float, x: float, y: float, keys: int):
+    def __init__(self, time_ms: float, x: float, y: float, keys: int, index: Optional[int] = None):
         self.time_ms = time_ms
         self.x = x
         self.y = y
         self.keys = keys
+        self.index = index
         # Standard osu! replay key bits
         self.m1 = bool(keys & 1)
         self.m2 = bool(keys & 2)
@@ -795,6 +871,20 @@ class Replay:
         count_100: int = 0,
         count_50: int = 0,
         count_miss: int = 0,
+        mode: int = 0,
+        game_version: int = 0,
+        beatmap_hash: str = "",
+        replay_hash: str = "",
+        mods: int = 0,
+        perfect: int = 0,
+        count_geki: int = 0,
+        count_katu: int = 0,
+        seed: Optional[int] = None,
+        trailer_size: int = 0,
+        raw_record_count: Optional[int] = None,
+        source_engine: str = "python",
+        normalization: Optional[Dict[str, Any]] = None,
+        warnings: Optional[List[Dict[str, Any]]] = None,
     ):
         self.player = player
         self.frames = frames
@@ -804,6 +894,25 @@ class Replay:
         self.count_100 = count_100
         self.count_50 = count_50
         self.count_miss = count_miss
+        self.mode = mode
+        self.game_version = game_version
+        self.beatmap_hash = beatmap_hash
+        self.replay_hash = replay_hash
+        self.mods = mods
+        self.perfect = perfect
+        self.count_geki = count_geki
+        self.count_katu = count_katu
+        self.seed = seed
+        self.trailer_size = trailer_size
+        self.raw_record_count = raw_record_count if raw_record_count is not None else len(frames)
+        self.source_engine = source_engine
+        self.normalization = normalization or {
+            "changed_times": 0,
+            "initial_dummy_removed": 0,
+            "backward_removed": 0,
+            "changes": [],
+        }
+        self.warnings = warnings or []
 
     def cursor_at(self, time_ms: float) -> Tuple[Optional[Tuple[float, float]], int]:
         """Interpolate replay cursor (x, y) and active keys at time_ms."""
@@ -848,6 +957,8 @@ def parse_osr_replay(replay_path: str) -> Optional[Replay]:
             data = f.read()
         if len(data) < 40:
             return None
+        mode = data[0]
+        game_version = struct.unpack("<i", data[1:5])[0]
         offset = 5
 
         def read_str():
@@ -877,7 +988,7 @@ def parse_osr_replay(replay_path: str) -> Optional[Replay]:
             "<HHHHHH", data[offset : offset + 12]
         )
         offset += 12
-        score, max_combo = struct.unpack("<IH", data[offset : offset + 6])
+        score, max_combo = struct.unpack("<iH", data[offset : offset + 6])
         offset += 6
         perfect = data[offset]
         offset += 1
@@ -888,26 +999,37 @@ def parse_osr_replay(replay_path: str) -> Optional[Replay]:
         offset += 8
         lzma_len = struct.unpack("<i", data[offset : offset + 4])[0]
         offset += 4
-        raw = lzma.decompress(data[offset : offset + lzma_len]).decode(
-            "ascii", errors="ignore"
-        )
 
         frames: List[ReplayFrame] = []
-        cur_t = 0.0
-        for p in raw.split(","):
-            p = p.strip()
-            if not p:
-                continue
-            parts = p.split("|")
-            if len(parts) != 4:
-                continue
-            w = float(parts[0])
-            if w == -12345.0:
-                continue
-            cur_t += w
-            frames.append(
-                ReplayFrame(cur_t, float(parts[1]), float(parts[2]), int(parts[3]))
-            )
+        seed: Optional[int] = None
+        if lzma_len > 0:
+            compressed = data[offset : offset + lzma_len]
+            trailer_size = max(0, len(data) - (offset + lzma_len))
+            raw = lzma.decompress(compressed).decode("ascii", errors="ignore")
+            cur_t = 0.0
+            raw_idx = 0
+            trimmed = raw[:-1] if raw.endswith(",") else raw
+            for p in trimmed.split(","):
+                p = p.strip()
+                if not p:
+                    continue
+                parts = p.split("|")
+                if len(parts) != 4:
+                    continue
+                w = float(parts[0])
+                px = float(parts[1])
+                py = float(parts[2])
+                if w == -12345.0 and px == 0.0 and py == 0.0:
+                    seed = int(parts[3])
+                    raw_idx += 1
+                    continue
+                cur_t += w
+                frames.append(
+                    ReplayFrame(cur_t, px, py, int(parts[3]), index=raw_idx)
+                )
+                raw_idx += 1
+        else:
+            trailer_size = max(0, len(data) - offset)
 
         return Replay(
             player=player,
@@ -918,6 +1040,18 @@ def parse_osr_replay(replay_path: str) -> Optional[Replay]:
             count_100=c100,
             count_50=c50,
             count_miss=cmiss,
+            mode=mode,
+            game_version=game_version,
+            beatmap_hash=bm_hash,
+            replay_hash=rp_hash,
+            mods=mods,
+            perfect=perfect,
+            count_geki=cgeki,
+            count_katu=ckatu,
+            seed=seed,
+            trailer_size=trailer_size,
+            raw_record_count=len(frames),
+            source_engine="python",
         )
     except Exception:
         return None

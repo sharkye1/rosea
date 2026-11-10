@@ -37,6 +37,7 @@ try:
     from rust_bridge import (
         verify_beatmap,
         VerificationResult,
+        ReplayVerificationResult,
         run_full_corpus_verification,
         beatmap_from_rust_json,
         get_rust_commit_hash,
@@ -53,6 +54,7 @@ except ImportError:
     from scripts.rust_bridge import (
         verify_beatmap,
         VerificationResult,
+        ReplayVerificationResult,
         run_full_corpus_verification,
         beatmap_from_rust_json,
         get_rust_commit_hash,
@@ -199,6 +201,35 @@ class Visualizer:
         # Initial beatmap load
         self.load_beatmap(beatmap_path, replay_path)
 
+    def _apply_active_source(self):
+        """Synchronize active beatmap and replay objects with self.active_source."""
+        if self.active_source == "rust" and self.rust_beatmap is not None:
+            self.beatmap = self.rust_beatmap
+            if self.rust_replay is not None:
+                self.replay = self.rust_replay
+                self.active_replay_source = "rust"
+            elif self.py_replay is not None:
+                self.replay = self.py_replay
+                self.active_replay_source = "python_fallback"
+            else:
+                self.replay = None
+                self.active_replay_source = "none"
+        else:
+            self.active_source = "python"
+            self.beatmap = self.py_beatmap
+            if self.py_replay is not None:
+                self.replay = self.py_replay
+                self.active_replay_source = "python"
+            else:
+                self.replay = None
+                self.active_replay_source = "none"
+
+        self.live_clicks = []
+        self.replay_clicks = []
+        self.replay_click_times = []
+        if self.replay:
+            self.precompute_replay_clicks()
+
     def load_beatmap(self, beatmap_path: str, replay_path: Optional[str] = None):
         """Dynamically load or switch beatmap on the fly without restarting window."""
         norm_path = os.path.normpath(beatmap_path)
@@ -207,7 +238,6 @@ class Visualizer:
             return
 
         self.beatmap_path = norm_path
-        self.replay_path = replay_path
         pygame.display.set_caption(f"Rosea Visualizer - {os.path.basename(norm_path)}")
 
         # Parse with Python parser
@@ -217,51 +247,64 @@ class Visualizer:
             self.set_toast(f"Failed to parse map: {e}", 3.0)
             return
 
-        # Verification with Rust parser
-        self.verification: VerificationResult = verify_beatmap(norm_path)
+        # Resolve replay path before Rust verification so both are checked together
+        target_osr = replay_path
+        explicit_replay_missing = bool(replay_path and not os.path.isfile(replay_path))
+        if explicit_replay_missing:
+            print(
+                f"Warning: replay file not found: {replay_path}",
+                file=sys.stderr,
+            )
+            target_osr = None
+        if not target_osr:
+            candidate = os.path.splitext(norm_path)[0] + ".osr"
+            if os.path.isfile(candidate):
+                target_osr = candidate
+        target_osr_valid = target_osr if (target_osr and os.path.isfile(target_osr)) else None
+        self.replay_path = target_osr_valid
+
+        # Verification with Rust parser (beatmap + optional replay)
+        self.verification: VerificationResult = verify_beatmap(
+            norm_path, replay_path=target_osr_valid
+        )
         self.rust_beatmap: Optional[Beatmap] = self.verification.rust_beatmap
+        self.replay_verification: Optional[ReplayVerificationResult] = (
+            self.verification.replay_verification
+        )
+
+        # Load Python & Rust Replay objects
+        self.py_replay: Optional[Replay] = (
+            parse_osr_replay(target_osr_valid) if target_osr_valid else None
+        )
+        self.rust_replay: Optional[Replay] = (
+            self.replay_verification.rust_replay
+            if self.replay_verification is not None
+            else None
+        )
+        self.replay: Optional[Replay] = None
+        self.active_replay_source: str = "none"
+        self.show_replay = True
+        self.replay_trail = []
 
         # Choose active data source
         if self.requested_source == "rust":
             if self.rust_beatmap:
-                self.beatmap = self.rust_beatmap
                 self.active_source = "rust"
             else:
-                self.beatmap = self.py_beatmap
                 self.active_source = "python"
                 self.set_toast(
                     f"Rust unavailable ({self.verification.reason[:40]}); using Python",
                     3.5,
                 )
         elif self.requested_source == "python":
-            self.beatmap = self.py_beatmap
             self.active_source = "python"
         else:  # "auto"
             if self.rust_beatmap and self.verification.status == "PASS":
-                self.beatmap = self.rust_beatmap
                 self.active_source = "rust"
             else:
-                self.beatmap = self.py_beatmap
                 self.active_source = "python"
 
-        # Load Replay (.osr)
-        self.replay: Optional[Replay] = None
-        self.show_replay = True
-        self.replay_trail = []
-        target_osr = replay_path
-        if not target_osr:
-            candidate = os.path.splitext(norm_path)[0] + ".osr"
-            if os.path.isfile(candidate):
-                target_osr = candidate
-        if target_osr and os.path.isfile(target_osr):
-            self.replay = parse_osr_replay(target_osr)
-
-        # Precompute replay clicks and reset live click buffer
-        self.live_clicks = []
-        self.replay_clicks = []
-        self.replay_click_times = []
-        if self.replay:
-            self.precompute_replay_clicks()
+        self._apply_active_source()
 
         # Update index in all_map_entries / all_map_files
         if self.all_map_entries:
@@ -284,7 +327,11 @@ class Visualizer:
         # or earlier if early hit objects require approach circle lead-in before 0.0 ms.
         self.start_time = min(0.0, first_time - preempt - 500.0)
         self.last_time = (
-            max([o.end_time for o in self.beatmap.hit_objects] + [first_time + 1000.0])
+            max(
+                [o.end_time for o in self.beatmap.hit_objects]
+                + [b[1] for b in getattr(self.beatmap, "breaks", [])]
+                + [first_time + 1000.0]
+            )
             + 1500.0
         )
         self.current_time_ms = self.start_time
@@ -295,9 +342,22 @@ class Visualizer:
 
         commit_tag = f" [{self.rust_commit_hash}]" if self.rust_commit_hash and self.rust_commit_hash != "unknown" else ""
         engine_name = f"Rust rosea-core{commit_tag}" if self.active_source == "rust" else "Python Standalone"
-        replay_name = f" + Replay ({self.replay.player})" if self.replay else ""
+        replay_name = ""
+        if self.replay:
+            if self.active_replay_source == "python_fallback" and self.replay_verification:
+                err_tag = self.replay_verification.error_code or self.replay_verification.status
+                replay_name = f" + Replay ({self.replay.player}, Py fallback: {err_tag})"
+            else:
+                replay_name = f" + Replay ({self.replay.player})"
+        title_disp = self.beatmap.title or "Untitled"
+        ver_disp = self.beatmap.version_name or "Normal"
+        missing_note = (
+            f" | Replay missing: {os.path.basename(replay_path)}"
+            if explicit_replay_missing and replay_path
+            else ""
+        )
         self.set_toast(
-            f">> {self.beatmap.title} [{self.beatmap.version_name}] ({engine_name}{replay_name})",
+            f">> {title_disp} [{ver_disp}] ({engine_name}{replay_name}{missing_note})",
             3.0,
         )
 
@@ -330,19 +390,27 @@ class Visualizer:
         self.toast_until = time.time() + duration_sec
 
     def toggle_engine_source(self):
-        """Toggle between Rust parser data and Python parser data in real time."""
+        """Toggle between Rust and Python beatmap + replay data sources in real time."""
         if self.active_source == "rust":
-            self.beatmap = self.py_beatmap
             self.active_source = "python"
-            self.set_toast("Data source switched to: Python Parser (Standalone)", 2.5)
+            self._apply_active_source()
+            rep_note = " + Replay" if self.replay else ""
+            self.set_toast(f"Data source switched to: Python Standalone (Map{rep_note})", 2.5)
             self.update_playfield_layout()
             self.build_slider_caches()
         else:
             if self.rust_beatmap:
-                self.beatmap = self.rust_beatmap
                 self.active_source = "rust"
+                self._apply_active_source()
                 commit_tag = f" [{self.rust_commit_hash}]" if self.rust_commit_hash and self.rust_commit_hash != "unknown" else ""
-                self.set_toast(f"Data source switched to: Rust rosea-core{commit_tag}", 2.5)
+                if self.active_replay_source == "rust":
+                    msg = f"Data source switched to: Rust rosea-core{commit_tag} (Map + Replay)"
+                elif self.active_replay_source == "python_fallback" and self.replay_verification:
+                    err_tag = self.replay_verification.error_code or self.replay_verification.status
+                    msg = f"Rust map{commit_tag} + Python replay fallback ({err_tag})"
+                else:
+                    msg = f"Data source switched to: Rust rosea-core{commit_tag}"
+                self.set_toast(msg, 2.5)
                 self.update_playfield_layout()
                 self.build_slider_caches()
             else:
@@ -870,11 +938,21 @@ class Visualizer:
     def osu_to_screen(self, x: float, y: float) -> Tuple[int, int]:
         return int(self.offset_x + x * self.scale), int(self.offset_y + y * self.scale)
 
+    def active_break_at(self, time_ms: float) -> Optional[Tuple[float, float]]:
+        """Return break period (start_time, end_time) containing time_ms, if any."""
+        for b_start, b_end in getattr(self.beatmap, "breaks", []):
+            if b_start <= time_ms <= b_end:
+                return (b_start, b_end)
+        return None
+
     def build_slider_caches(self):
         """Pre-render slider paths to surfaces for high performance."""
         self.slider_caches.clear()
         r = self.screen_radius
         pad = int(r + 6)
+        combo_colours = self.beatmap.combo_colours or [(255, 192, 0)]
+        border_rgb = getattr(self.beatmap, "slider_border", None) or (220, 220, 220)
+        track_override = getattr(self.beatmap, "slider_track_override", None)
 
         for obj in self.beatmap.hit_objects:
             if obj.kind != "slider" or not obj.path_points:
@@ -890,36 +968,42 @@ class Visualizer:
             surf_h = max(10, max_y - min_y)
 
             surf = pygame.Surface((surf_w, surf_h), pygame.SRCALPHA)
-            combo_col = self.beatmap.combo_colours[obj.combo_index]
+            combo_col = combo_colours[obj.combo_index % len(combo_colours)]
 
             # Relative points
             rel_pts = [(p[0] - min_x, p[1] - min_y) for p in pts]
 
             # Step along path to stamp circles
             step = max(1, int(r * 0.2))
+            border_rgba = (border_rgb[0], border_rgb[1], border_rgb[2], 225)
             for i in range(0, len(rel_pts), step):
                 pt = rel_pts[i]
-                # Outer border
-                pygame.draw.circle(surf, (220, 220, 220, 220), pt, int(r))
+                pygame.draw.circle(surf, border_rgba, pt, int(r))
             if rel_pts:
-                pygame.draw.circle(surf, (220, 220, 220, 220), rel_pts[-1], int(r))
+                pygame.draw.circle(surf, border_rgba, rel_pts[-1], int(r))
 
-            # Inner track
+            # Inner track (uses [Colours] SliderTrackOverride when present)
+            track_rgba = (
+                (track_override[0], track_override[1], track_override[2], 230)
+                if track_override is not None
+                else (40, 40, 48, 230)
+            )
             for i in range(0, len(rel_pts), step):
                 pt = rel_pts[i]
-                pygame.draw.circle(surf, (40, 40, 48, 230), pt, int(r - 3.5))
+                pygame.draw.circle(surf, track_rgba, pt, int(r - 3.5))
             if rel_pts:
-                pygame.draw.circle(surf, (40, 40, 48, 230), rel_pts[-1], int(r - 3.5))
+                pygame.draw.circle(surf, track_rgba, rel_pts[-1], int(r - 3.5))
 
-            # Inner colored tint
-            for i in range(0, len(rel_pts), step * 2):
-                pt = rel_pts[i]
-                pygame.draw.circle(
-                    surf,
-                    (combo_col[0], combo_col[1], combo_col[2], 90),
-                    pt,
-                    int(r * 0.55),
-                )
+            # Inner colored tint from combo colour unless SliderTrackOverride is active
+            if track_override is None:
+                for i in range(0, len(rel_pts), step * 2):
+                    pt = rel_pts[i]
+                    pygame.draw.circle(
+                        surf,
+                        (combo_col[0], combo_col[1], combo_col[2], 90),
+                        pt,
+                        int(r * 0.55),
+                    )
 
             self.slider_caches[obj.id] = (surf, min_x, min_y)
 
@@ -1026,6 +1110,21 @@ class Visualizer:
         cx, cy = self.osu_to_screen(256, 192)
         pygame.draw.line(self.screen, (40, 43, 56), (cx - 20, cy), (cx + 20, cy), 1)
         pygame.draw.line(self.screen, (40, 43, 56), (cx, cy - 20), (cx, cy + 20), 1)
+
+        # Active Break Period indicator on playfield
+        active_br = self.active_break_at(self.current_time_ms)
+        if active_br is not None and active_br[1] > active_br[0]:
+            rem_sec = max(0.0, (active_br[1] - self.current_time_ms) / 1000.0)
+            br_surf = self.font_bold.render(f"BREAK  {rem_sec:.1f}s", True, (94, 234, 212))
+            bw = br_surf.get_width() + 20
+            bh = 24
+            bx = self.pf_rect.x + (self.pf_rect.width - bw) // 2
+            by = self.pf_rect.y + 10
+            pill = pygame.Surface((bw, bh), pygame.SRCALPHA)
+            pygame.draw.rect(pill, (20, 48, 58, 210), (0, 0, bw, bh), border_radius=5)
+            pygame.draw.rect(pill, (94, 212, 224, 190), (0, 0, bw, bh), 1, border_radius=5)
+            pill.blit(br_surf, (10, (bh - br_surf.get_height()) // 2))
+            self.screen.blit(pill, (bx, by))
 
         # Render Hit Objects
         self.render_hit_objects()
@@ -1504,7 +1603,8 @@ class Visualizer:
         self, obj: HitObject, t: float, preempt: float, fade_in: float, r: float
     ):
         sx, sy = self.osu_to_screen(obj.stacked_x, obj.stacked_y)
-        combo_col = self.beatmap.combo_colours[obj.combo_index]
+        combo_colours = self.beatmap.combo_colours or [(255, 192, 0)]
+        combo_col = combo_colours[obj.combo_index % len(combo_colours)]
 
         elapsed = t - (obj.time - preempt)
         alpha = min(1.0, max(0.0, elapsed / fade_in))
@@ -1582,7 +1682,9 @@ class Visualizer:
         if int_alpha <= 0:
             return
 
-        combo_col = self.beatmap.combo_colours[obj.combo_index]
+        combo_colours = self.beatmap.combo_colours or [(255, 192, 0)]
+        combo_col = combo_colours[obj.combo_index % len(combo_colours)]
+        border_rgb = getattr(self.beatmap, "slider_border", None) or (220, 220, 220)
 
         # Blit cached slider track
         cached = self.slider_caches.get(obj.id)
@@ -1605,7 +1707,7 @@ class Visualizer:
         tail_x, tail_y = self.osu_to_screen(tail_pos[0], tail_pos[1])
 
         # Tail circle
-        pygame.draw.circle(self.screen, (220, 220, 220), (tail_x, tail_y), int(r), 2)
+        pygame.draw.circle(self.screen, border_rgb, (tail_x, tail_y), int(r), 2)
 
         # Repeat arrows if spans > 1
         if obj.spans > 1:
@@ -1697,30 +1799,7 @@ class Visualizer:
         pygame.draw.rect(self.screen, (20, 22, 30), hud_rect)
         pygame.draw.line(self.screen, (50, 55, 75), (0, hud_h), (self.width, hud_h), 1)
 
-        # Title & Artist
-        title_str = f"{self.beatmap.artist} - {self.beatmap.title} [{self.beatmap.version_name}]"
-        t_surf = self.font_title.render(title_str, True, (240, 240, 245))
-        self.screen.blit(t_surf, (16, 8))
-
-        # Difficulty & Stats
-        un_tp, act_tp = self.beatmap.get_timing_at(self.current_time_ms)
-        bpm_str = f"{un_tp.bpm:.1f}" if un_tp else "120.0"
-        sv_str = f"{act_tp.sv_multiplier:.2f}x" if act_tp else "1.00x"
-
-        replay_info = ""
-        if self.replay:
-            replay_info = f"  |  Replay: {self.replay.player} ({self.replay.score:,}) [C: Cursor]"
-
-        stats_str = (
-            f"CS: {self.beatmap.cs:.1f}  AR: {self.beatmap.ar:.1f}  "
-            f"OD: {self.beatmap.od:.1f}  HP: {self.beatmap.hp:.1f}  |  "
-            f"BPM: {bpm_str}  SV: {sv_str}  |  Objects: {len(self.beatmap.hit_objects)}"
-            f"{replay_info}"
-        )
-        s_surf = self.font_small.render(stats_str, True, (160, 165, 185))
-        self.screen.blit(s_surf, (16, 38))
-
-        # Right side: Speed and Play/Pause status
+        # Right side row 1: Speed, Play/Pause status, and Audio indicator
         state_str = "PLAYING" if self.is_playing else "PAUSED"
         state_col = (70, 220, 120) if self.is_playing else (255, 180, 50)
         speed_str = f"Speed: {self.playback_speed:.2f}x  [{state_str}]"
@@ -1738,9 +1817,10 @@ class Visualizer:
             aud_text = "♫ Clicks"
             aud_col = (148, 163, 184)
         aud_surf = self.font_small.render(aud_text, True, aud_col)
-        self.screen.blit(aud_surf, (st_x - aud_surf.get_width() - 14, 13))
+        aud_x = st_x - aud_surf.get_width() - 14
+        self.screen.blit(aud_surf, (aud_x, 13))
 
-        # Engine source badge
+        # Right side row 2: Engine source badge & action buttons
         commit_tag = f" [{self.rust_commit_hash}]" if self.rust_commit_hash and self.rust_commit_hash != "unknown" else ""
         if self.active_source == "rust":
             badge_text = f"Source: Rust{commit_tag} [S: Switch to Python]"
@@ -1792,6 +1872,7 @@ class Visualizer:
 
         # Skip Intro Button (shown during intro before first note)
         self.btn_skip_rect = None
+        row2_left_x = t_x
         if self.beatmap and self.beatmap.hit_objects:
             first_time = self.beatmap.hit_objects[0].time
             preempt, _ = self.beatmap.ar_preempt_fadein
@@ -1803,11 +1884,50 @@ class Visualizer:
                 sk_x = t_x - sk_w - 10
                 sk_y = 36
                 self.btn_skip_rect = pygame.Rect(sk_x, sk_y, sk_w, sk_h)
+                row2_left_x = sk_x
                 is_sk_hover = self.btn_skip_rect.collidepoint(mx, my)
                 sk_col = (234, 88, 12) if is_sk_hover else (180, 60, 10)
                 pygame.draw.rect(self.screen, sk_col, self.btn_skip_rect, border_radius=4)
                 pygame.draw.rect(self.screen, (251, 146, 60), self.btn_skip_rect, 1, border_radius=4)
                 self.screen.blit(sk_surf, (sk_x + 8, sk_y + 4))
+
+        # Left side: Title & Artist (clipped before audio/speed labels)
+        artist_disp = self.beatmap.artist or "Unknown"
+        title_disp = self.beatmap.title or "Untitled"
+        ver_disp = self.beatmap.version_name or "Normal"
+        title_str = f"{artist_disp} - {title_disp} [{ver_disp}]"
+        title_surf = self.font_title.render(title_str, True, (240, 240, 245))
+        prev_clip = self.screen.get_clip()
+        self.screen.set_clip(pygame.Rect(16, 4, max(40, aud_x - 28), 32))
+        self.screen.blit(title_surf, (16, 8))
+
+        # Left side row 2: Difficulty & Stats (clipped before action buttons)
+        un_tp, act_tp = self.beatmap.get_timing_at(self.current_time_ms)
+        bpm_str = f"{un_tp.bpm:.1f}" if un_tp else "120.0"
+        sv_str = f"{act_tp.sv_multiplier:.2f}x" if act_tp else "1.00x"
+
+        replay_info = ""
+        if self.replay:
+            rep_src_tag = (
+                "Py fallback"
+                if self.active_replay_source == "python_fallback"
+                else ("Rust" if self.active_replay_source == "rust" else "Py")
+            )
+            replay_info = f"  |  Replay ({rep_src_tag}): {self.replay.player} ({self.replay.score:,}) [C]"
+
+        break_cnt = len(getattr(self.beatmap, "breaks", []))
+        break_tag = f"  |  Breaks: {break_cnt}" if break_cnt > 0 else ""
+
+        stats_str = (
+            f"CS: {self.beatmap.cs:.1f}  AR: {self.beatmap.ar:.1f}  "
+            f"OD: {self.beatmap.od:.1f}  HP: {self.beatmap.hp:.1f}  |  "
+            f"BPM: {bpm_str}  SV: {sv_str}  |  Objects: {len(self.beatmap.hit_objects)}"
+            f"{break_tag}{replay_info}"
+        )
+        s_surf = self.font_small.render(stats_str, True, (160, 165, 185))
+        self.screen.set_clip(pygame.Rect(16, 36, max(40, row2_left_x - 28), 28))
+        self.screen.blit(s_surf, (16, 38))
+        self.screen.set_clip(prev_clip)
 
         # Replay Key Overlay if replay is active
         if self.replay and self.show_replay:
@@ -1824,20 +1944,35 @@ class Visualizer:
         pygame.draw.rect(self.screen, (28, 30, 42), bar_rect, border_radius=4)
         pygame.draw.rect(self.screen, (60, 65, 85), bar_rect, 1, border_radius=4)
 
-        # Object tick markers on timeline
         dur = max(1.0, self.last_time)
-        for obj in self.beatmap.hit_objects:
-            tx = pad_x + int((obj.time / dur) * bar_w)
-            if pad_x <= tx <= pad_x + bar_w:
-                col = (80, 160, 255) if obj.kind == "circle" else (255, 200, 50)
-                pygame.draw.line(self.screen, col, (tx, timeline_y + 2), (tx, timeline_y + timeline_h - 3), 1)
 
-        # Progress fill
+        # Progress fill (drawn before break highlights so breaks stay visible across the whole bar)
         prog = max(0.0, min(1.0, self.current_time_ms / dur))
         fill_w = int(bar_w * prog)
         if fill_w > 0:
             fill_rect = pygame.Rect(pad_x, timeline_y, fill_w, timeline_h)
             pygame.draw.rect(self.screen, (50, 120, 220), fill_rect, border_radius=4)
+
+        # Break periods on timeline
+        for b_start, b_end in getattr(self.beatmap, "breaks", []):
+            if b_end <= 0.0 or b_start >= dur or b_end <= b_start:
+                continue
+            bx0 = pad_x + int(max(0.0, min(1.0, b_start / dur)) * bar_w)
+            bx1 = pad_x + int(max(0.0, min(1.0, b_end / dur)) * bar_w)
+            bw = min(pad_x + bar_w - bx0, max(2, bx1 - bx0))
+            if bw > 0:
+                b_surf = pygame.Surface((bw, timeline_h - 4), pygame.SRCALPHA)
+                b_surf.fill((42, 165, 190, 130))
+                self.screen.blit(b_surf, (bx0, timeline_y + 2))
+                pygame.draw.line(self.screen, (94, 212, 224), (bx0, timeline_y + 2), (bx0 + bw - 1, timeline_y + 2), 1)
+                pygame.draw.line(self.screen, (94, 212, 224), (bx0, timeline_y + timeline_h - 3), (bx0 + bw - 1, timeline_y + timeline_h - 3), 1)
+
+        # Object tick markers on timeline
+        for obj in self.beatmap.hit_objects:
+            tx = pad_x + int((obj.time / dur) * bar_w)
+            if pad_x <= tx <= pad_x + bar_w:
+                col = (80, 160, 255) if obj.kind == "circle" else (255, 200, 50)
+                pygame.draw.line(self.screen, col, (tx, timeline_y + 2), (tx, timeline_y + timeline_h - 3), 1)
 
         # Scrubber handle
         handle_x = pad_x + fill_w
@@ -1899,11 +2034,47 @@ class Visualizer:
         pygame.draw.rect(surf, (160, 60, 80), (cx, cy, cw, ch), 1, border_radius=3)
         surf.blit(close_txt, close_txt.get_rect(center=(cx + cw // 2, cy + ch // 2)))
 
-        # 1. Engine & File info
+        # 1. Engine, MD5, warnings, and File info
         t = self.current_time_ms
         commit_tag = f" [{self.rust_commit_hash}]" if self.rust_commit_hash and self.rust_commit_hash != "unknown" else ""
         engine_str = f"Rust rosea-core{commit_tag}" if self.active_source == "rust" else "Python Standalone"
         eng_col = (74, 222, 128) if self.active_source == "rust" else (56, 189, 248)
+
+        rv = getattr(self, "replay_verification", None)
+        if self.active_replay_source == "rust":
+            rep_eng_str = "Rust (normalized)"
+            rep_eng_col = (74, 222, 128)
+        elif self.active_replay_source == "python_fallback":
+            err_tag = rv.error_code if (rv and rv.error_code) else "rejected"
+            rep_eng_str = f"Python fallback ({err_tag})"
+            rep_eng_col = (251, 146, 60)
+        elif self.active_replay_source == "python":
+            rep_eng_str = "Python Standalone"
+            rep_eng_col = (56, 189, 248)
+        else:
+            rep_eng_str = "Нет реплея"
+            rep_eng_col = (140, 145, 165)
+
+        md5_val = getattr(self.verification, "beatmap_md5", "") or getattr(self.beatmap, "beatmap_md5", "")
+        md5_short = md5_val[:12] + "..." if md5_val else "-"
+        if rv:
+            if rv.hash_status == "ok":
+                pair_md5_str = f"{md5_short} (OK)"
+                pair_md5_col = (74, 222, 128)
+            elif rv.hash_status == "BeatmapHashMismatch":
+                pair_md5_str = f"{md5_short} (MISMATCH)"
+                pair_md5_col = (248, 113, 113)
+            else:
+                pair_md5_str = f"{md5_short} ({rv.hash_status})"
+                pair_md5_col = (251, 191, 36)
+        else:
+            pair_md5_str = f"{md5_short} (без .osr)"
+            pair_md5_col = (180, 190, 210)
+
+        map_warns = getattr(self.verification, "warnings", []) or getattr(self.beatmap, "rust_warnings", [])
+        unk_count = sum(w.get("count", 0) for w in map_warns if w.get("code") == "UnknownBeatmapFields")
+        map_warn_str = f"UnknownBeatmapFields ({unk_count})" if unk_count > 0 else "Нет"
+        map_warn_col = (251, 191, 36) if unk_count > 0 else (140, 180, 150)
 
         # 2. Timing calculations
         un_tp, act_tp = self.beatmap.get_timing_at(t)
@@ -1953,9 +2124,30 @@ class Visualizer:
                     dist_col = (74, 222, 128) if dist <= circle_r_osu else (251, 146, 60)
                     dist_str = f"{dist:.1f} osu!px  {in_circle}"
 
+        breaks = getattr(self.beatmap, "breaks", [])
+        active_br = self.active_break_at(t)
+        if active_br is not None and active_br[1] > active_br[0]:
+            rem_br = max(0.0, (active_br[1] - t) / 1000.0)
+            br_str = f"ПЕРЕРЫВ ({rem_br:.1f}с ост.) | всего {len(breaks)}"
+            br_col = (94, 234, 212)
+        else:
+            br_str = f"Перерывы: {len(breaks)}"
+            if getattr(self.beatmap, "slider_track_override", None) or getattr(self.beatmap, "slider_border", None):
+                ov_parts = []
+                if getattr(self.beatmap, "slider_track_override", None):
+                    ov_parts.append("Track")
+                if getattr(self.beatmap, "slider_border", None):
+                    ov_parts.append("Border")
+                br_str += f" | Colours: {'/'.join(ov_parts)}"
+            br_col = (200, 210, 230)
+
         items = [
-            ("ROW", "Движок:", engine_str, eng_col),
+            ("ROW", "Движок карты:", engine_str, eng_col),
+            ("ROW", "Движок реплея:", rep_eng_str, rep_eng_col),
             ("ROW", "Файл:", os.path.basename(self.beatmap_path), (220, 225, 240)),
+            ("ROW", "MD5 пары:", pair_md5_str, pair_md5_col),
+            ("ROW", "Предупр. карты:", map_warn_str, map_warn_col),
+            ("ROW", "Карта / Цвета:", br_str, br_col),
             ("ROW", "Время карты:", f"{t:08.2f} мс ({t/1000.0:.2f} сек)", (250, 204, 21)),
             ("SECTION", "// ТАЙМИНГ & СКОРОСТЬ"),
             ("ROW", "BPM / BeatLen:", f"{bpm:.1f} BPM ({beat_len:.2f} мс)", (220, 225, 240)),
@@ -1977,13 +2169,30 @@ class Visualizer:
         else:
             items.append(("ROW", "Объект:", "Нет активных объектов", (140, 145, 165)))
 
-        if self.replay:
+        if self.replay or rv:
             items.append(("SECTION", "// РЕПЛЕЙ ИГРОКА"))
-            items.append(("ROW", "Курсор:", cursor_str, (220, 225, 240)))
-            items.append(("ROW", "Дистанция:", dist_str, dist_col))
-            latest_click = self.get_latest_click_at(t)
-            if latest_click:
-                items.append(("ROW", "Посл. клик:", latest_click.badge_text, latest_click.color))
+            if self.replay:
+                items.append(("ROW", "Курсор:", cursor_str, (220, 225, 240)))
+                items.append(("ROW", "Дистанция:", dist_str, dist_col))
+                latest_click = self.get_latest_click_at(t)
+                if latest_click:
+                    items.append(("ROW", "Посл. клик:", latest_click.badge_text, latest_click.color))
+            if rv:
+                norm = rv.normalization
+                if norm is not None:
+                    c_t = norm.get("changed_times", 0)
+                    c_d = norm.get("initial_dummy_removed", 0)
+                    c_b = norm.get("backward_removed", 0)
+                    norm_str = f"time:{c_t} dummy:{c_d} back:{c_b}"
+                    norm_col = (251, 191, 36) if (c_t + c_d + c_b) > 0 else (140, 180, 150)
+                else:
+                    norm_str = rv.error_code or "Не нормализован"
+                    norm_col = (251, 146, 60)
+                items.append(("ROW", "Нормализация:", norm_str, norm_col))
+                trailer_w = [w for w in rv.warnings if w.get("code") == "ReplayTrailerNotInterpreted"]
+                if trailer_w:
+                    tr_sz = trailer_w[0].get("trailer_size", 0)
+                    items.append(("ROW", "Предупр. .osr:", f"ReplayTrailerNotInterpreted ({tr_sz} B)", (251, 191, 36)))
         else:
             latest_click = self.get_latest_click_at(t)
             if latest_click:
@@ -1995,8 +2204,8 @@ class Visualizer:
         track_col = (74, 222, 128) if self.music_loaded else (251, 146, 60)
         items.append(("ROW", "Трек:", track_name, track_col))
         lead_in = getattr(self.beatmap, "audio_lead_in", 0)
-        set_id = getattr(self.beatmap, "beatmapset_id", 0)
-        if set_id > 0:
+        set_id = getattr(self.beatmap, "beatmapset_id", None)
+        if set_id is not None and set_id > 0:
             items.append(("ROW", "SetID / LeadIn:", f"{set_id} / {lead_in} мс", (220, 225, 240)))
         items.append(("ROW", "Смещение:", f"{self.audio_offset_ms:+.1f} мс [- / + / Alt+\u2190\u2192]", (220, 225, 240)))
         vol_str = "Выключен [U]" if self.audio_muted else f"Трек {int(self.music_volume*100)}% | Клики {int(self.hitsound_volume*100)}% [U]"
@@ -2004,29 +2213,34 @@ class Visualizer:
 
         y_pos = 38
         val_x = 135
+        row_step = 16 if panel_h < 600 else 17
+        sec_step = 18 if panel_h < 600 else 19
+        prev_clip = surf.get_clip()
         for item in items:
-            if y_pos + 18 > panel_h:
+            if y_pos + row_step > panel_h - 4:
                 break
             if item[0] == "SECTION":
-                y_pos += 4
-                pygame.draw.line(surf, (45, 52, 75), (14, y_pos + 8), (panel_w - 14, y_pos + 8), 1)
+                y_pos += 3
+                pygame.draw.line(surf, (45, 52, 75), (14, y_pos + 7), (panel_w - 14, y_pos + 7), 1)
                 sec_surf = self.font_small.render(item[1], True, (120, 135, 175))
                 surf.blit(sec_surf, (14, y_pos))
-                y_pos += 20
+                y_pos += sec_step
             else:
                 _, label, val, val_col = item
                 lbl_surf = self.font_small.render(label, True, (148, 163, 184))
                 surf.blit(lbl_surf, (14, y_pos))
+                surf.set_clip(pygame.Rect(val_x, y_pos, max(20, panel_w - val_x - 10), row_step + 2))
                 val_surf = self.font_small.render(val, True, val_col)
                 surf.blit(val_surf, (val_x, y_pos))
-                y_pos += 18
+                surf.set_clip(prev_clip)
+                y_pos += row_step
 
         self.screen.blit(surf, (panel_x, panel_y))
 
     def render_verification_overlay(self):
-        """Show full comparison report between Rust and Python parsers."""
-        overlay_w = min(800, self.width - 60)
-        overlay_h = min(480, self.height - 120)
+        """Show full comparison report between Rust and Python parsers (map + replay pair)."""
+        overlay_w = min(860, self.width - 40)
+        overlay_h = min(580, self.height - 80)
         ox = (self.width - overlay_w) // 2
         oy = (self.height - overlay_h) // 2
 
@@ -2035,39 +2249,148 @@ class Visualizer:
         pygame.draw.rect(surf, (100, 110, 150), (0, 0, overlay_w, overlay_h), 2)
 
         # Header
-        head = self.font_title.render("Rust rosea-core Parser Diagnostics", True, (255, 255, 255))
-        surf.blit(head, (20, 15))
+        head = self.font_title.render("Rust rosea-core Parser & Pair Diagnostics", True, (255, 255, 255))
+        surf.blit(head, (20, 14))
 
         st = self.verification.status
         col = (70, 220, 120) if st == "PASS" else ((255, 180, 50) if st == "SKIPPED_UNSUPPORTED" else (240, 70, 70))
-        st_surf = self.font_bold.render(f"Status: {st}", True, col)
-        surf.blit(st_surf, (20, 48))
+        st_surf = self.font_bold.render(f"Map Status: {st}", True, col)
+        surf.blit(st_surf, (20, 46))
 
-        active_str = f"Active Rendering Data: {'Rust Parser (rosea-core)' if self.active_source == 'rust' else 'Python Parser (Standalone)'}"
+        rv = getattr(self, "replay_verification", None)
+        rep_st = rv.status if rv else "NONE"
+        rep_col = (
+            (70, 220, 120)
+            if rep_st == "PASS"
+            else ((255, 180, 50) if rep_st in ("SKIPPED_UNSUPPORTED", "NONE") else (240, 70, 70))
+        )
+        rep_st_surf = self.font_bold.render(f"Replay: {rep_st}", True, rep_col)
+        surf.blit(rep_st_surf, (210, 46))
+
+        map_src = "Rust" if self.active_source == "rust" else "Python"
+        rep_src = (
+            "Rust"
+            if self.active_replay_source == "rust"
+            else ("Python (fallback)" if self.active_replay_source == "python_fallback" else ("Python" if self.active_replay_source == "python" else "None"))
+        )
+        active_str = f"Active Data: Map={map_src} | Replay={rep_src}"
         act_surf = self.font_small.render(active_str, True, (100, 220, 255))
-        surf.blit(act_surf, (350, 52))
+        surf.blit(act_surf, (410, 49))
 
+        md5_val = getattr(self.verification, "beatmap_md5", "") or getattr(self.beatmap, "beatmap_md5", "")
+        map_warns = getattr(self.verification, "warnings", [])
+        if map_warns:
+            map_warn_str = ", ".join(
+                f"{w.get('code')}(count={w.get('count')})"
+                if "count" in w
+                else str(w.get("code"))
+                for w in map_warns
+            )
+        else:
+            map_warn_str = "None"
+
+        if rv:
+            pair_md5_str = (
+                "OK (matches replay header)"
+                if rv.hash_status == "ok"
+                else (
+                    "BeatmapHashMismatch"
+                    if rv.hash_status == "BeatmapHashMismatch"
+                    else rv.hash_status
+                )
+            )
+        else:
+            pair_md5_str = "No replay paired"
+
+        sto = getattr(self.beatmap, "slider_track_override", None)
+        sb = getattr(self.beatmap, "slider_border", None)
         lines = [
-            f"Beatmap: {os.path.basename(self.beatmap_path)}",
-            f"Total Objects in Map: {len(self.py_beatmap.hit_objects)}",
-            f"Timing Points: {len(self.py_beatmap.timing_points)}",
-            f"Rust Supported Subset: {'Yes (Circles & L-Sliders)' if self.verification.rust_supported else 'No (Map contains B/P/C curves, spinners, or non-finite data)'}",
-            "",
-            "Verification Summary:",
-            f"  {self.verification.reason}",
+            (f"Beatmap: {os.path.basename(self.beatmap_path)}  |  MD5: {md5_val or '-'}", (220, 225, 240)),
+            (
+                f"Objects: {len(self.py_beatmap.hit_objects)}  |  TPs: {len(self.py_beatmap.timing_points)}  |  "
+                f"Breaks: {len(getattr(self.py_beatmap, 'breaks', []))}  |  StackLeniency: {self.py_beatmap.stack_leniency:.2f}",
+                (210, 215, 230),
+            ),
+            (
+                f"Rust Supported Map: {'Yes (v14 Standard: Circles, L/B/P-Sliders, Spinners)' if self.verification.rust_supported else 'No (Unsupported objects, curve, or syntax)'}",
+                (190, 225, 200) if self.verification.rust_supported else (255, 200, 140),
+            ),
+            (f"Colours Overrides: Track={sto or 'default'}, Border={sb or 'default'}", (200, 205, 220)),
+            (f"Map Warnings: {map_warn_str}", (251, 191, 36) if map_warns else (160, 175, 195)),
+            (f"Map Summary: {self.verification.reason}", (210, 215, 230)),
+            (f"Pair MD5 Check: {pair_md5_str}", (74, 222, 128) if (rv and rv.hash_status == "ok") else ((248, 113, 113) if (rv and rv.hash_status == "BeatmapHashMismatch") else (200, 205, 220))),
         ]
 
-        if self.verification.mismatches:
-            lines.append("")
-            lines.append("Discrepancies:")
-            for m in self.verification.mismatches[:8]:
-                lines.append(f"  * {m}")
+        if rv:
+            r_data = rv.rust_replay_data or {}
+            hdr = r_data.get("header") or {}
+            exp = r_data.get("expected") or {}
+            py_r = rv.py_replay
+            player = hdr.get("player", py_r.player if py_r else "?")
+            g_ver = hdr.get("game_version", py_r.game_version if py_r else "?")
+            mods = hdr.get("mods", py_r.mods if py_r else "?")
+            seed = hdr.get("seed", py_r.seed if py_r else None)
+            tr_sz = hdr.get("trailer_size", py_r.trailer_size if py_r else 0)
+            score = exp.get("score", py_r.score if py_r else 0)
+            m_combo = exp.get("max_combo", py_r.max_combo if py_r else 0)
+            c300 = exp.get("count_300", py_r.count_300 if py_r else 0)
+            c100 = exp.get("count_100", py_r.count_100 if py_r else 0)
+            c50 = exp.get("count_50", py_r.count_50 if py_r else 0)
+            cmiss = exp.get("count_miss", py_r.count_miss if py_r else 0)
 
-        y_off = 80
-        for line in lines:
-            txt = self.font_main.render(line, True, (210, 215, 230))
+            lines.append((f"Replay Summary: {rv.reason}", (210, 215, 230)))
+            lines.append((f"Replay Header: player={player}, game_version={g_ver}, mods={mods}, seed={seed}, trailer={tr_sz} B", (200, 210, 230)))
+            lines.append((f"Expected Stats: score={score:,}, max_combo={m_combo}x, 300/100/50/M={c300}/{c100}/{c50}/{cmiss}", (200, 210, 230)))
+
+            rep_warns = []
+            for w in rv.warnings:
+                code = w.get("code")
+                if code == "ReplayTrailerNotInterpreted":
+                    rep_warns.append(f"ReplayTrailerNotInterpreted({w.get('trailer_size', tr_sz)} B)")
+                elif code:
+                    rep_warns.append(str(code))
+            lines.append((f"Replay Warnings: {', '.join(rep_warns) if rep_warns else 'None'}", (251, 191, 36) if rep_warns else (160, 175, 195)))
+
+            norm = rv.normalization
+            if norm is not None:
+                c_t = norm.get("changed_times", 0)
+                c_d = norm.get("initial_dummy_removed", 0)
+                c_b = norm.get("backward_removed", 0)
+                sample_ch = norm.get("changes", [])[:3]
+                ch_desc = ""
+                if sample_ch:
+                    parts = []
+                    for ch in sample_ch:
+                        k = ch.get("kind")
+                        if k == "Time":
+                            parts.append(f"#{ch.get('index')}: {ch.get('old_ms')}->{ch.get('new_ms')}ms")
+                        elif k == "InitialDummy":
+                            parts.append(f"#{ch.get('index')}:Dummy")
+                        elif k == "BackwardFrame":
+                            parts.append(f"#{ch.get('index')}:Backward")
+                    more = f" (+{len(norm.get('changes', [])) - len(sample_ch)} more)" if len(norm.get("changes", [])) > len(sample_ch) else ""
+                    ch_desc = f" [{', '.join(parts)}{more}]"
+                lines.append((f"Normalization: changed_times={c_t}, initial_dummy_removed={c_d}, backward_removed={c_b}{ch_desc}", (167, 243, 208)))
+
+        all_mismatches = list(self.verification.mismatches)
+        if rv and rv.mismatches:
+            all_mismatches.extend(rv.mismatches)
+        if all_mismatches:
+            lines.append(("Discrepancies:", (248, 113, 113)))
+            for m in all_mismatches[:5]:
+                lines.append((f"  * {m}", (248, 160, 160)))
+
+        line_step = 18 if overlay_h < 460 else 21
+        y_off = 72 if overlay_h < 460 else 76
+        prev_clip = surf.get_clip()
+        surf.set_clip(pygame.Rect(16, 70, overlay_w - 32, overlay_h - 104))
+        for line_txt, line_col in lines:
+            if y_off + line_step - 2 > overlay_h - 34:
+                break
+            txt = self.font_small.render(line_txt, True, line_col)
             surf.blit(txt, (20, y_off))
-            y_off += 24
+            y_off += line_step
+        surf.set_clip(prev_clip)
 
         close_hint = self.font_small.render("Press 'V' or 'Tab' to close this overlay  |  Press 'S' to toggle Engine", True, (140, 145, 165))
         surf.blit(close_hint, (20, overlay_h - 28))
@@ -2298,14 +2621,33 @@ def main():
         return
 
     if args.verify:
-        res = verify_beatmap(args.beatmap)
+        res = verify_beatmap(args.beatmap, replay_path=args.replay)
         print(f"Verification Report for {args.beatmap}:")
         print(f"  Status: {res.status}")
+        print(f"  MD5:    {res.beatmap_md5}")
         print(f"  Reason: {res.reason}")
+        if res.warnings:
+            print(f"  Warnings: {res.warnings}")
+        if res.replay_verification:
+            rv = res.replay_verification
+            print(f"  Replay: {rv.status} ({rv.reason})")
+            if rv.warnings:
+                print(f"  Replay Warnings: {rv.warnings}")
+            if rv.normalization is not None:
+                print(f"  Normalization: {rv.normalization}")
+            if rv.mismatches:
+                print("  Replay Discrepancies:")
+                for m in rv.mismatches:
+                    print(f"    - {m}")
         if res.mismatches:
             print("  Discrepancies:")
             for m in res.mismatches:
                 print(f"    - {m}")
+        if res.status == "FAIL" or (
+            res.replay_verification
+            and res.replay_verification.status in ("FAIL", "HASH_MISMATCH")
+        ):
+            sys.exit(1)
         return
 
     # Visualizer mode

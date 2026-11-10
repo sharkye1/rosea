@@ -10,8 +10,11 @@ Covers:
 - Full corpus verification across tests/data
 """
 
+import hashlib
+import lzma
 import math
 import os
+import struct
 import sys
 import tempfile
 import pygame
@@ -31,9 +34,11 @@ from osu_parser import (
 )
 from rust_bridge import (
     verify_beatmap,
+    verify_replay,
     run_full_corpus_verification,
     run_rust_parser,
     beatmap_from_rust_json,
+    replay_from_rust_json,
 )
 from visualizer import Visualizer
 
@@ -443,6 +448,429 @@ def test_tech_hud_click_badges():
     print("test_tech_hud_click_badges: OK")
 
 
+def _encode_osr_str(text: str) -> bytes:
+    if not text:
+        return b"\x00"
+    raw = text.encode("utf-8")
+    n = len(raw)
+    uleb = bytearray()
+    while True:
+        byte = n & 0x7F
+        n >>= 7
+        if n != 0:
+            byte |= 0x80
+        uleb.append(byte)
+        if n == 0:
+            break
+    return b"\x0b" + bytes(uleb) + raw
+
+
+def _build_test_osr(
+    bm_hash: str,
+    player: str,
+    game_version: int,
+    mods: int,
+    frames_str: str,
+    trailer: bytes = b"",
+    score: int = 12345,
+    max_combo: int = 42,
+    counts: tuple = (10, 2, 1, 3, 4, 5),
+) -> bytes:
+    compressed = lzma.compress(frames_str.encode("ascii"), format=lzma.FORMAT_ALONE)
+    buf = bytearray()
+    buf.append(0)  # mode = osu!standard
+    buf.extend(struct.pack("<i", game_version))
+    buf.extend(_encode_osr_str(bm_hash))
+    buf.extend(_encode_osr_str(player))
+    buf.extend(_encode_osr_str("deadbeef" * 4))
+    buf.extend(struct.pack("<HHHHHH", *counts))
+    buf.extend(struct.pack("<iH", score, max_combo))
+    buf.append(1)  # perfect
+    buf.extend(struct.pack("<I", mods))
+    buf.extend(_encode_osr_str(""))  # life_graph
+    buf.extend(b"\x01\x02\x03\x04\x05\x06\x07\x08")
+    buf.extend(struct.pack("<i", len(compressed)))
+    buf.extend(compressed)
+    buf.extend(trailer)
+    return bytes(buf)
+
+
+def test_rust_json_metadata_colours_breaks_and_warnings():
+    content = (
+        "\ufeffosu file format v14\r\n"
+        "[General]\r\n"
+        "Mode: 0\r\n"
+        "AudioFilename: track.mp3\r\n"
+        "StackLeniency: 0.45\r\n"
+        "[Metadata]\r\n"
+        "Title: Test Song\r\n"
+        "TitleUnicode: Тест\r\n"
+        "Artist: Test Artist\r\n"
+        "ArtistUnicode: Артист\r\n"
+        "Creator: Mapper\r\n"
+        "Version: Insane\r\n"
+        "Source: Rosea\r\n"
+        "Tags: tag1 tag2\r\n"
+        "BeatmapID: 12345\r\n"
+        "BeatmapSetID: 67890\r\n"
+        "[Difficulty]\r\n"
+        "CircleSize: 4\r\n"
+        "OverallDifficulty: 7\r\n"
+        "HPDrainRate: 5\r\n"
+        "ApproachRate: 8\r\n"
+        "SliderMultiplier: 1.5\r\n"
+        "SliderTickRate: 2\r\n"
+        "[Events]\r\n"
+        "0,0,\"bg, with, comma.jpg\",0,0\r\n"
+        "2,1000,2500\r\n"
+        "Break,4000,3500\r\n"
+        "[Colours]\r\n"
+        "Combo2: 20,30,40\r\n"
+        "Combo1: 10,20,30\r\n"
+        "SliderTrackOverride: 12,34,56\r\n"
+        "SliderBorder: 210,220,230\r\n"
+        "[UnknownCustomSection]\r\n"
+        "Foo: Bar\r\n"
+        "[HitObjects]\r\n"
+        "256,192,500,1,0\r\n"
+        "100,100,3000,2,0,L|200:100,1,100\r\n"
+    )
+    raw_bytes = content.encode("utf-8")
+    expected_md5 = hashlib.md5(raw_bytes).hexdigest()
+
+    with tempfile.NamedTemporaryFile("wb", suffix=".osu", delete=False) as f:
+        f.write(raw_bytes)
+        tmp_path = f.name
+
+    try:
+        rust_data = run_rust_parser(tmp_path)
+        assert rust_data["status"] == "ok", f"Unexpected error: {rust_data}"
+        assert rust_data["beatmap_md5"] == expected_md5
+        assert abs(rust_data["stack_leniency"] - 0.45) < 1e-4
+
+        warn_codes = {w["code"]: w for w in rust_data.get("warnings", [])}
+        assert "UnknownBeatmapFields" in warn_codes
+        assert warn_codes["UnknownBeatmapFields"]["count"] >= 2
+
+        bm = beatmap_from_rust_json(rust_data, tmp_path)
+        assert bm.beatmap_md5 == expected_md5
+        assert bm.audio_filename == "track.mp3"
+        assert bm.title == "Test Song"
+        assert bm.title_unicode == "Тест"
+        assert bm.artist == "Test Artist"
+        assert bm.artist_unicode == "Артист"
+        assert bm.creator == "Mapper"
+        assert bm.version_name == "Insane"
+        assert bm.beatmap_id == 12345
+        assert bm.beatmapset_id == 67890
+        assert bm.combo_colours == [(10, 20, 30), (20, 30, 40)]
+        assert bm.slider_track_override == (12, 34, 56)
+        assert bm.slider_border == (210, 220, 230)
+        assert bm.breaks == [(1000.0, 2500.0), (4000.0, 4000.0)]
+
+        res = verify_beatmap(tmp_path)
+        assert res.status == "PASS", f"Verification failed: {res.reason}"
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    print("test_rust_json_metadata_colours_breaks_and_warnings: OK")
+
+
+def test_replay_pair_md5_and_normalization_bridge():
+    map_content = (
+        "osu file format v14\n"
+        "[General]\nMode: 0\n"
+        "[Difficulty]\nCircleSize: 4\nOverallDifficulty: 7\nHPDrainRate: 5\n"
+        "[HitObjects]\n256,192,1000,1,0\n"
+    ).encode("utf-8")
+    other_map_content = (
+        "osu file format v14\n"
+        "[General]\nMode: 0\n"
+        "[Difficulty]\nCircleSize: 4\nOverallDifficulty: 7\nHPDrainRate: 5\n"
+        "[HitObjects]\n256,192,1001,1,0\n"
+    ).encode("utf-8")
+    md5_ok = hashlib.md5(map_content).hexdigest()
+
+    # Frame stream:
+    # 0: delta=10, dummy (256,-500) -> t=10 -> prefix swaps -> t=0, removed as InitialDummy
+    # 1: delta=-20, dummy (256,-500) -> t=-10 -> prefix sets t=10, removed as InitialDummy
+    # 2: delta=50 (t=40)
+    # 3: delta=-10 (t=30) -> removed as BackwardFrame
+    # 4: delta=30 (t=60)
+    # 5: -12345|0|0|999 (seed)
+    frames_str = (
+        "10|256|-500|0,"
+        "-20|256|-500|0,"
+        "50|120|240|5,"
+        "-10|130|250|0,"
+        "30|140|260|1,"
+        "-12345|0|0|999,"
+    )
+    osr_ok = _build_test_osr(
+        bm_hash=md5_ok.upper(),
+        player="RoseaTester",
+        game_version=20240101,
+        mods=0,
+        frames_str=frames_str,
+        trailer=b"\x01\x02\x03\x04",
+        score=54321,
+        max_combo=12,
+        counts=(3, 1, 0, 2, 1, 0),
+    )
+    osr_mods = _build_test_osr(
+        bm_hash=md5_ok,
+        player="ModPlayer",
+        game_version=20240101,
+        mods=64,
+        frames_str="10|256|192|0,",
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        map_p = os.path.join(tmpdir, "map.osu")
+        other_p = os.path.join(tmpdir, "other.osu")
+        rep_p = os.path.join(tmpdir, "rep.osr")
+        rep_mods_p = os.path.join(tmpdir, "rep_mods.osr")
+        with open(map_p, "wb") as f:
+            f.write(map_content)
+        with open(other_p, "wb") as f:
+            f.write(other_map_content)
+        with open(rep_p, "wb") as f:
+            f.write(osr_ok)
+        with open(rep_mods_p, "wb") as f:
+            f.write(osr_mods)
+
+        # 1. Valid pair + normalization + seed + trailer
+        rv = verify_replay(map_p, rep_p)
+        assert rv.status == "PASS", f"Expected PASS, got {rv.status}: {rv.reason}"
+        assert rv.hash_status == "ok"
+        assert rv.hash_match is True
+        assert rv.rust_replay is not None
+        assert rv.rust_replay.player == "RoseaTester"
+        assert rv.rust_replay.seed == 999
+        assert rv.rust_replay.trailer_size == 4
+        assert rv.rust_replay.score == 54321
+        assert rv.rust_replay.max_combo == 12
+        assert rv.rust_replay.count_300 == 3
+        assert rv.rust_replay.count_100 == 1
+        assert rv.normalization is not None
+        assert rv.normalization["changed_times"] == 2
+        assert rv.normalization["initial_dummy_removed"] == 2
+        assert rv.normalization["backward_removed"] == 1
+        warn_codes = [w["code"] for w in rv.warnings]
+        assert "ReplayTrailerNotInterpreted" in warn_codes
+        assert "ReplayInputNormalized" in warn_codes
+        assert [(fr.time_ms, fr.x, fr.y, fr.keys) for fr in rv.rust_replay.frames] == [
+            (40.0, 120.0, 240.0, 5),
+            (60.0, 140.0, 260.0, 1),
+        ]
+
+        # 2. BeatmapHashMismatch
+        rv_bad = verify_replay(other_p, rep_p)
+        assert rv_bad.status == "HASH_MISMATCH"
+        assert rv_bad.error_code == "BeatmapHashMismatch"
+        assert rv_bad.hash_status == "BeatmapHashMismatch"
+        assert rv_bad.hash_match is False
+        assert rv_bad.rust_replay is None
+
+        # 3. UnsupportedMods
+        rv_mods = verify_replay(map_p, rep_mods_p)
+        assert rv_mods.status == "SKIPPED_UNSUPPORTED"
+        assert rv_mods.error_code == "UnsupportedMods"
+        assert rv_mods.rust_replay is None
+
+        # 4. UnsupportedReplayFeature (fractional delta)
+        rep_frac_p = os.path.join(tmpdir, "rep_frac.osr")
+        with open(rep_frac_p, "wb") as f:
+            f.write(_build_test_osr(md5_ok, "FracTester", 20240101, 0, "1.5|256|192|0,"))
+        rv_frac = verify_replay(map_p, rep_frac_p)
+        assert rv_frac.status == "SKIPPED_UNSUPPORTED"
+        assert rv_frac.error_code == "UnsupportedReplayFeature"
+        assert rv_frac.rust_replay is None
+
+        # 5. BeatmapHashMismatch fallback inside Visualizer
+        vis_mm = Visualizer(other_p, replay_path=rep_p, source="auto", headless=True)
+        assert vis_mm.active_source == "rust"
+        assert vis_mm.active_replay_source == "python_fallback"
+        assert vis_mm.replay is vis_mm.py_replay
+        assert vis_mm.replay_verification is not None
+        assert vis_mm.replay_verification.hash_status == "BeatmapHashMismatch"
+        vis_mm.show_verification_detail = True
+        vis_mm.show_tech_hud = True
+        vis_mm.update_playfield_layout()
+        vis_mm.render()
+        vis_mm.toggle_engine_source()
+        assert vis_mm.active_source == "python"
+        assert vis_mm.active_replay_source == "python"
+
+    # 6. Empty replay data fixture (NoReplayData)
+    empty_osr = os.path.join("tests", "data", "05_special", "empty_replay_data.osr")
+    micro_osu = os.path.join("tests", "data", "01_micro", "2dearbrave.osu")
+    if os.path.isfile(empty_osr) and os.path.isfile(micro_osu):
+        rv_empty = verify_replay(micro_osu, empty_osr)
+        assert rv_empty.status == "SKIPPED_UNSUPPORTED"
+        assert rv_empty.error_code == "NoReplayData"
+
+    print("test_replay_pair_md5_and_normalization_bridge: OK")
+
+
+def test_visualizer_replay_source_switch_breaks_and_colours():
+    # 1. Valid pair with normalization & SliderBorder (1936782_pchir)
+    vis = Visualizer(
+        "tests/data/02_sliders_geometry/1936782_pchir.osu",
+        replay_path="tests/data/02_sliders_geometry/1936782_pchir.osr",
+        source="auto",
+        headless=True,
+    )
+    assert vis.active_source == "rust"
+    assert vis.active_replay_source == "rust"
+    assert vis.replay is vis.rust_replay
+    assert vis.beatmap.slider_border == (254, 255, 198)
+    assert vis.replay_verification is not None
+    assert vis.replay_verification.status == "PASS"
+    assert len(vis.rust_replay.frames) < len(vis.py_replay.frames)
+
+    # Toggle S -> Python for both map and replay
+    vis.toggle_engine_source()
+    assert vis.active_source == "python"
+    assert vis.active_replay_source == "python"
+    assert vis.replay is vis.py_replay
+
+    # Toggle S -> Rust for both map and replay
+    vis.toggle_engine_source()
+    assert vis.active_source == "rust"
+    assert vis.active_replay_source == "rust"
+    assert vis.replay is vis.rust_replay
+
+    # Render diagnostics overlay (V) and Tech HUD (T)
+    vis.show_tech_hud = True
+    vis.show_verification_detail = True
+    vis.update_playfield_layout()
+    vis.render()
+
+    # 2. Valid Rust map + rejected replay (mods=64 on 06_personal/1.osr) -> Python replay fallback
+    vis_fb = Visualizer(
+        "tests/data/06_personal/1.osu",
+        replay_path="tests/data/06_personal/1.osr",
+        source="auto",
+        headless=True,
+    )
+    assert vis_fb.active_source == "rust"
+    assert vis_fb.active_replay_source == "python_fallback"
+    assert vis_fb.replay is vis_fb.py_replay
+    assert vis_fb.replay_verification.error_code == "UnsupportedMods"
+    vis_fb.show_verification_detail = True
+    vis_fb.render()
+
+    # 3. Map with breaks (galaxy.osu has 7 breaks) + break band remains visible past scrubber
+    vis_br = Visualizer("tests/data/04_errors/galaxy.osu", headless=True)
+    assert len(vis_br.beatmap.breaks) == 7
+    b_start, b_end = vis_br.beatmap.breaks[0]
+    vis_br.seek_to((b_start + b_end) / 2.0)
+    assert vis_br.active_break_at(vis_br.current_time_ms) == (b_start, b_end)
+    vis_br.show_tech_hud = True
+    vis_br.update_playfield_layout()
+    vis_br.render()
+
+    # Seek past break[0] and verify timeline break band still renders cyan border (94, 212, 224)
+    vis_br.seek_to(b_end + 10000.0)
+    vis_br.render()
+    bar_w = vis_br.width - 40
+    mid_ms = (b_start + b_end) / 2.0
+    bx_mid = 20 + int((mid_ms / vis_br.last_time) * bar_w)
+    tl_top_rgb = tuple(vis_br.screen.get_at((bx_mid, vis_br.height - 50))[:3])
+    assert tl_top_rgb == (94, 212, 224), f"Expected cyan break highlight on timeline, got {tl_top_rgb}"
+
+    # 4. Synthetic map with SliderTrackOverride and SliderBorder pixel verification
+    slider_osu = (
+        "osu file format v14\n[General]\nMode: 0\n"
+        "[Difficulty]\nCircleSize: 4\nOverallDifficulty: 7\nHPDrainRate: 5\n"
+        "SliderMultiplier: 1.4\nSliderTickRate: 1\n"
+        "[TimingPoints]\n0,500,4,1,0,100,1,0\n"
+        "[Colours]\nCombo1: 255,255,0\nSliderTrackOverride: 10,200,30\nSliderBorder: 250,40,40\n"
+        "[HitObjects]\n100,192,1000,2,0,L|400:192,1,300\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".osu", delete=False, encoding="utf-8") as f:
+        f.write(slider_osu)
+        sl_path = f.name
+    try:
+        vis_col = Visualizer(sl_path, headless=True, width=640, height=480)
+        vis_col.seek_to(1100.0)
+        vis_col.render()
+        cx, cy = vis_col.osu_to_screen(250, 192)
+        center_rgb = tuple(vis_col.screen.get_at((cx, cy))[:3])
+        assert center_rgb[1] > center_rgb[0] + 100 and center_rgb[1] > center_rgb[2] + 100, (
+            f"Expected green SliderTrackOverride center, got {center_rgb}"
+        )
+        border_y = cy - max(1, int(vis_col.screen_radius) - 2)
+        border_rgb = tuple(vis_col.screen.get_at((cx, border_y))[:3])
+        assert border_rgb[0] > border_rgb[1] + 100 and border_rgb[0] > border_rgb[2] + 100, (
+            f"Expected red SliderBorder edge, got {border_rgb}"
+        )
+        vis_col.show_verification_detail = True
+        vis_col.render()
+    finally:
+        if os.path.exists(sl_path):
+            os.remove(sl_path)
+
+    print("test_visualizer_replay_source_switch_breaks_and_colours: OK")
+
+
+def test_unsupported_version_mode_and_cli_verify_codes():
+    import subprocess
+
+    v13_osu = (
+        "osu file format v13\n[General]\nMode: 0\n"
+        "[Difficulty]\nCircleSize: 4\nOverallDifficulty: 7\nHPDrainRate: 5\n"
+        "[HitObjects]\n256,192,1000,1,0\n"
+    )
+    taiko_osu = (
+        "osu file format v14\n[General]\nMode: 1\n"
+        "[Difficulty]\nCircleSize: 4\nOverallDifficulty: 7\nHPDrainRate: 5\n"
+        "[HitObjects]\n256,192,1000,1,0\n"
+    )
+    for txt in (v13_osu, taiko_osu):
+        with tempfile.NamedTemporaryFile("w", suffix=".osu", delete=False, encoding="utf-8") as f:
+            f.write(txt)
+            p = f.name
+        try:
+            res = verify_beatmap(p)
+            assert res.status == "SKIPPED_UNSUPPORTED", f"Expected SKIPPED_UNSUPPORTED, got {res.status}: {res.reason}"
+        finally:
+            if os.path.exists(p):
+                os.remove(p)
+
+    # --verify CLI exit codes: 0 on valid pair, 1 on BeatmapHashMismatch
+    ok_proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/visualizer.py",
+            "--verify",
+            "tests/data/01_micro/2dearbrave.osu",
+            "--replay",
+            "tests/data/01_micro/2dearbrave.osr",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert ok_proc.returncode == 0, f"Expected exit 0, got {ok_proc.returncode}: {ok_proc.stdout}"
+
+    mm_proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/visualizer.py",
+            "--verify",
+            "tests/data/01_micro/2dearbrave.osu",
+            "--replay",
+            "tests/data/01_micro/2yomi.osr",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert mm_proc.returncode == 1, f"Expected exit 1 on BeatmapHashMismatch, got {mm_proc.returncode}"
+
+    print("test_unsupported_version_mode_and_cli_verify_codes: OK")
+
+
 if __name__ == "__main__":
     test_linear_curve()
     test_bezier_multi_segment()
@@ -459,4 +887,8 @@ if __name__ == "__main__":
     test_osu_stable_pairs_and_browser()
     test_safe_hitsound_playback_with_dummy_wav()
     test_tech_hud_click_badges()
+    test_rust_json_metadata_colours_breaks_and_warnings()
+    test_replay_pair_md5_and_normalization_bridge()
+    test_visualizer_replay_source_switch_breaks_and_colours()
+    test_unsupported_version_mode_and_cli_verify_codes()
     print("\nALL AUTOMATED TESTS PASSED!")

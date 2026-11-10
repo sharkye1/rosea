@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::process::Command;
 
 fn main() {
@@ -9,9 +11,7 @@ fn main() {
         .output();
 
     let hash = match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         _ => "dev".to_string(),
     };
 
