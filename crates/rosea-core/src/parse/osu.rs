@@ -1,7 +1,94 @@
 //! Заголовок .osu и поддерживаемые поля секций General и Difficulty.
 
 use crate::error::RoseaError;
-use crate::model::ObjectId;
+use crate::model::{Beatmap, ObjectId, Parsed, Warning};
+
+pub fn osu(bytes: &[u8]) -> Result<Parsed<Beatmap>, RoseaError> {
+    super::osu_mode(bytes)?;
+    let value = Beatmap {
+        difficulty: osu_difficulty(bytes)?,
+        stack_leniency: osu_stack_leniency(bytes)?,
+        objects: super::osu_hit_objects(bytes)?,
+        timing_points: super::osu_timing_points(bytes)?,
+        breaks: super::osu_breaks(bytes)?,
+        metadata: super::osu_metadata(bytes)?,
+        colours: super::osu_colours(bytes)?,
+    };
+    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let mut section = "";
+    let mut count = 0_u32;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with('[') {
+            section = line;
+            if !matches!(
+                section,
+                "[General]"
+                    | "[Metadata]"
+                    | "[Difficulty]"
+                    | "[TimingPoints]"
+                    | "[Colours]"
+                    | "[HitObjects]"
+                    | "[Events]"
+            ) {
+                count = count.saturating_add(1);
+            }
+            continue;
+        }
+        let key = line.split_once(':').map_or(line, |(key, _)| key).trim();
+        let known = match section {
+            "[General]" => matches!(key, "Mode" | "StackLeniency"),
+            "[Metadata]" => matches!(
+                key,
+                "Title"
+                    | "TitleUnicode"
+                    | "Artist"
+                    | "ArtistUnicode"
+                    | "Creator"
+                    | "Version"
+                    | "Source"
+                    | "Tags"
+                    | "BeatmapID"
+                    | "BeatmapSetID"
+            ),
+            "[Difficulty]" => matches!(
+                key,
+                "CircleSize"
+                    | "OverallDifficulty"
+                    | "HPDrainRate"
+                    | "ApproachRate"
+                    | "SliderMultiplier"
+                    | "SliderTickRate"
+            ),
+            "[Colours]" => matches!(
+                key,
+                "Combo1"
+                    | "Combo2"
+                    | "Combo3"
+                    | "Combo4"
+                    | "Combo5"
+                    | "Combo6"
+                    | "Combo7"
+                    | "Combo8"
+                    | "SliderTrackOverride"
+                    | "SliderBorder"
+            ),
+            _ => true,
+        };
+        if !known {
+            count = count.saturating_add(1);
+        }
+    }
+    let warnings = if count == 0 {
+        vec![]
+    } else {
+        vec![Warning::UnknownBeatmapFields { count }]
+    };
+    Ok(Parsed { value, warnings })
+}
 
 #[derive(Debug, PartialEq)]
 pub struct Difficulty {

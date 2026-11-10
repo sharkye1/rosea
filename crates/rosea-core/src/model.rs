@@ -85,12 +85,77 @@ pub struct Parsed<T> {
 #[derive(Debug, PartialEq)]
 pub enum Warning {
     ReplayTrailerNotInterpreted,
+    UnknownBeatmapFields {
+        count: u32,
+    },
     ReplayInputNormalized {
         changed_times: u32,
         initial_dummy_removed: u32,
         backward_removed: u32,
         changes: Vec<ReplayChange>,
     },
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ObjectCounts {
+    pub circles: u32,
+    pub sliders_l: u32,
+    pub sliders_b: u32,
+    pub sliders_p: u32,
+    pub spinners: u32,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Beatmap {
+    pub(crate) difficulty: crate::parse::Difficulty,
+    pub(crate) stack_leniency: f32,
+    pub(crate) objects: Vec<HitObject>,
+    pub(crate) timing_points: Vec<TimingPoint>,
+    pub(crate) breaks: Vec<BreakPeriod>,
+    pub(crate) metadata: Metadata,
+    pub(crate) colours: Colours,
+}
+
+impl Beatmap {
+    pub fn difficulty(&self) -> &crate::parse::Difficulty {
+        &self.difficulty
+    }
+    pub fn stack_leniency(&self) -> f32 {
+        self.stack_leniency
+    }
+    pub fn objects(&self) -> &[HitObject] {
+        &self.objects
+    }
+    pub fn timing_points(&self) -> &[TimingPoint] {
+        &self.timing_points
+    }
+    pub fn breaks(&self) -> &[BreakPeriod] {
+        &self.breaks
+    }
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+    pub fn colours(&self) -> &Colours {
+        &self.colours
+    }
+    pub fn object_count(&self) -> u32 {
+        self.objects.len() as u32
+    }
+    pub fn object_counts(&self) -> ObjectCounts {
+        let mut counts = ObjectCounts::default();
+        for object in &self.objects {
+            match &object.kind {
+                HitObjectKind::Circle => counts.circles += 1,
+                HitObjectKind::Spinner { .. } => counts.spinners += 1,
+                HitObjectKind::Slider { kind, .. } => match kind {
+                    CurveKind::Linear => counts.sliders_l += 1,
+                    CurveKind::Bezier => counts.sliders_b += 1,
+                    CurveKind::PerfectCurve => counts.sliders_p += 1,
+                },
+            }
+        }
+        counts
+    }
 }
 
 #[derive(Debug, PartialEq)]

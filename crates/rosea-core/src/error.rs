@@ -42,6 +42,7 @@ pub enum RoseaError {
     ReplayTimeOverflow {
         index: u32,
     },
+    BeatmapHashMismatch,
     InvalidEncoding,
     InvalidHeader,
     UnsupportedBeatmapVersion(u32),
@@ -144,6 +145,7 @@ impl fmt::Display for RoseaError {
             Self::ReplayTimeOverflow { index } => {
                 write!(f, "Переполнение времени в записи реплея {index}")
             }
+            Self::BeatmapHashMismatch => write!(f, "Хеш карты не совпадает с хешем реплея"),
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),
             Self::UnsupportedBeatmapVersion(version) => {
