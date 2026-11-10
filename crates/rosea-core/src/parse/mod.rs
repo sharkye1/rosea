@@ -5,6 +5,7 @@ mod colours;
 mod events;
 mod hit_objects;
 mod metadata;
+mod osr;
 mod osu;
 mod timing;
 

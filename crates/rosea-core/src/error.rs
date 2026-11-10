@@ -7,6 +7,9 @@ use crate::model::ObjectId;
 // Вызывающий код может различать причины через match, без разбора сообщений Display.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RoseaError {
+    UnexpectedEof {
+        offset: usize,
+    },
     InvalidEncoding,
     InvalidHeader,
     UnsupportedBeatmapVersion(u32),
@@ -75,6 +78,12 @@ pub enum RoseaError {
 impl fmt::Display for RoseaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnexpectedEof { offset } => {
+                write!(
+                    f,
+                    "Недостаточно байтов реплея для чтения поля с позиции {offset}"
+                )
+            }
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),
             Self::UnsupportedBeatmapVersion(version) => {
