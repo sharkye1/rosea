@@ -30,6 +30,9 @@ pub enum RoseaError {
     NoReplayData {
         offset: usize,
     },
+    InvalidLzma {
+        offset: usize,
+    },
     InvalidEncoding,
     InvalidHeader,
     UnsupportedBeatmapVersion(u32),
@@ -121,6 +124,9 @@ impl fmt::Display for RoseaError {
             ),
             Self::NoReplayData { offset } => {
                 write!(f, "Отсутствуют данные реплея по смещению {offset}")
+            }
+            Self::InvalidLzma { offset } => {
+                write!(f, "Некорректные данные LZMA по смещению {offset}")
             }
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),

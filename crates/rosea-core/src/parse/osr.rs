@@ -1,4 +1,77 @@
 use crate::error::RoseaError;
+use std::io::{self, Write};
+
+const LZMA_DICTIONARY_LIMIT: usize = 64 * 1024 * 1024;
+const REPLAY_OUTPUT_LIMIT: usize = 256 * 1024 * 1024;
+
+#[allow(dead_code)]
+struct LimitedOutput {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: Option<u64>,
+}
+
+impl Write for LimitedOutput {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let len = self.bytes.len().saturating_add(data.len());
+        if len > self.limit {
+            self.exceeded = Some(len as u64);
+            return Err(io::Error::other("Превышен лимит распакованных данных"));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+fn decompress_replay(data: &[u8], offset: usize) -> Result<Vec<u8>, RoseaError> {
+    let header = data.get(..13).ok_or(RoseaError::InvalidLzma { offset })?;
+    let dictionary = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as u64;
+    if dictionary > LZMA_DICTIONARY_LIMIT as u64 {
+        return Err(RoseaError::ResourceLimit {
+            resource: "LZMA dictionary",
+            limit: LZMA_DICTIONARY_LIMIT as u64,
+            observed: dictionary,
+        });
+    }
+    let size = u64::from_le_bytes([
+        header[5], header[6], header[7], header[8], header[9], header[10], header[11], header[12],
+    ]);
+    if size != u64::MAX && size > REPLAY_OUTPUT_LIMIT as u64 {
+        return Err(RoseaError::ResourceLimit {
+            resource: "decompressed replay",
+            limit: REPLAY_OUTPUT_LIMIT as u64,
+            observed: size,
+        });
+    }
+    let mut output = LimitedOutput {
+        bytes: Vec::new(),
+        limit: REPLAY_OUTPUT_LIMIT,
+        exceeded: None,
+    };
+    let options = lzma_rs::decompress::Options {
+        unpacked_size: lzma_rs::decompress::UnpackedSize::ReadFromHeader,
+        memlimit: Some(LZMA_DICTIONARY_LIMIT),
+        allow_incomplete: false,
+    };
+    let result = lzma_rs::lzma_decompress_with_options(&mut &data[..], &mut output, &options);
+    if let Some(observed) = output.exceeded {
+        return Err(RoseaError::ResourceLimit {
+            resource: "decompressed replay",
+            limit: REPLAY_OUTPUT_LIMIT as u64,
+            observed,
+        });
+    }
+    result.map_err(|_| RoseaError::InvalidLzma { offset })?;
+    if output.bytes.is_empty() {
+        return Err(RoseaError::NoReplayData { offset });
+    }
+    Ok(output.bytes)
+}
 
 // Разобранные данные пока используются только внутренними тестами.
 #[allow(dead_code)]
@@ -195,6 +268,50 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decompresses_and_checks_lzma_limits() {
+        let data = [
+            93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 12, 3, 65, 4,
+            153, 91, 83, 160, 122, 219, 176, 37, 27, 45, 1, 127, 255, 225, 190, 128, 0,
+        ];
+        assert_eq!(decompress_replay(&data, 50).unwrap(), b"10|256|192|5,");
+        assert_eq!(
+            decompress_replay(&data[..12], 50),
+            Err(RoseaError::InvalidLzma { offset: 50 })
+        );
+        assert_eq!(
+            decompress_replay(&data[..16], 50),
+            Err(RoseaError::InvalidLzma { offset: 50 })
+        );
+        let mut bad = data;
+        bad[1..5].copy_from_slice(&(LZMA_DICTIONARY_LIMIT as u32 + 1).to_le_bytes());
+        assert!(matches!(
+            decompress_replay(&bad, 50),
+            Err(RoseaError::ResourceLimit {
+                resource: "LZMA dictionary",
+                ..
+            })
+        ));
+        let mut bad = data;
+        bad[5..13].copy_from_slice(&(REPLAY_OUTPUT_LIMIT as u64 + 1).to_le_bytes());
+        assert!(matches!(
+            decompress_replay(&bad, 50),
+            Err(RoseaError::ResourceLimit {
+                resource: "decompressed replay",
+                ..
+            })
+        ));
+        let mut output = LimitedOutput {
+            bytes: Vec::new(),
+            limit: 2,
+            exceeded: None,
+        };
+        assert_eq!(output.write(b"ab").unwrap(), 2);
+        assert!(output.write(b"c").is_err());
+        assert_eq!(output.exceeded, Some(3));
+        assert_eq!(output.bytes, b"ab");
+    }
 
     fn example_replay() -> Vec<u8> {
         let mut bytes = vec![0];
