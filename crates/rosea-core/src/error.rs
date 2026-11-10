@@ -19,6 +19,17 @@ pub enum RoseaError {
     InvalidReplayString {
         offset: usize,
     },
+    UnsupportedReplayMode {
+        mode: u8,
+        offset: usize,
+    },
+    UnsupportedMods {
+        mods: u32,
+        offset: usize,
+    },
+    NoReplayData {
+        offset: usize,
+    },
     InvalidEncoding,
     InvalidHeader,
     UnsupportedBeatmapVersion(u32),
@@ -99,6 +110,17 @@ impl fmt::Display for RoseaError {
             }
             Self::InvalidReplayString { offset } => {
                 write!(f, "Некорректный UTF-8 строки реплея по смещению {offset}")
+            }
+            Self::UnsupportedReplayMode { mode, offset } => write!(
+                f,
+                "Режим реплея {mode} по смещению {offset} не поддерживается"
+            ),
+            Self::UnsupportedMods { mods, offset } => write!(
+                f,
+                "Моды реплея {mods} по смещению {offset} не поддерживаются"
+            ),
+            Self::NoReplayData { offset } => {
+                write!(f, "Отсутствуют данные реплея по смещению {offset}")
             }
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),
