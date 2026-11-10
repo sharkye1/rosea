@@ -11,7 +11,8 @@
 Thumbs.db
 
 # файлы для локального тестирования
-tests/data/
+tests/data*/
+
 
 scripts/
 

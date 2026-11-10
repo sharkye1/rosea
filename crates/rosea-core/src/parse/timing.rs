@@ -102,7 +102,10 @@ fn parse_timing_point(line: &str, line_number: usize) -> Result<TimingPoint, Ros
     if sample_set > 3 {
         return Err(invalid("sampleSet"));
     }
-    let sample_index: u32 = values[4].parse().map_err(|_| invalid("sampleIndex"))?;
+    let sample_index: i32 = values[4]
+        .parse::<i32>()
+        .or_else(|_| values[4].parse::<u32>().map(|v| v as i32))
+        .map_err(|_| invalid("sampleIndex"))?;
     let volume: u8 = values[5].parse().map_err(|_| invalid("volume"))?;
     if volume > 100 {
         return Err(invalid("volume"));

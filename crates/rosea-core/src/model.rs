@@ -11,6 +11,168 @@ pub struct Point {
     pub y: f32,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct ReplayRecord {
+    pub index: u32,
+    pub delta_ms: i64,
+    pub cursor: Point,
+    pub keys: u32,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ReplayInput {
+    pub(crate) records: Vec<ReplayRecord>,
+    pub(crate) seed: Option<i32>,
+}
+
+impl ReplayInput {
+    pub fn records(&self) -> &[ReplayRecord] {
+        &self.records
+    }
+    pub fn seed(&self) -> Option<i32> {
+        self.seed
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReplayMeta {
+    pub mode: u8,
+    pub(crate) game_version: i32,
+    pub(crate) beatmap_hash: String,
+    pub player: String,
+    pub replay_hash: String,
+    pub count_geki: u16,
+    pub count_katu: u16,
+    pub perfect: u8,
+    pub mods: u32,
+    pub life_graph: String,
+    pub timestamp: [u8; 8],
+    pub trailer: Vec<u8>,
+}
+
+impl ReplayMeta {
+    pub fn game_version(&self) -> i32 {
+        self.game_version
+    }
+    pub fn beatmap_hash(&self) -> &str {
+        &self.beatmap_hash
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ExpectedStats {
+    pub score: i32,
+    pub max_combo: u16,
+    pub count_300: u16,
+    pub count_100: u16,
+    pub count_50: u16,
+    pub count_miss: u16,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ParsedReplay {
+    pub meta: ReplayMeta,
+    pub expected: ExpectedStats,
+    pub input: ReplayInput,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Parsed<T> {
+    pub value: T,
+    pub warnings: Vec<Warning>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Warning {
+    ReplayTrailerNotInterpreted,
+    UnknownBeatmapFields {
+        count: u32,
+    },
+    ReplayInputNormalized {
+        changed_times: u32,
+        initial_dummy_removed: u32,
+        backward_removed: u32,
+        changes: Vec<ReplayChange>,
+    },
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ObjectCounts {
+    pub circles: u32,
+    pub sliders_l: u32,
+    pub sliders_b: u32,
+    pub sliders_p: u32,
+    pub spinners: u32,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Beatmap {
+    pub(crate) difficulty: crate::parse::Difficulty,
+    pub(crate) stack_leniency: f32,
+    pub(crate) objects: Vec<HitObject>,
+    pub(crate) timing_points: Vec<TimingPoint>,
+    pub(crate) breaks: Vec<BreakPeriod>,
+    pub(crate) metadata: Metadata,
+    pub(crate) colours: Colours,
+}
+
+impl Beatmap {
+    pub fn difficulty(&self) -> &crate::parse::Difficulty {
+        &self.difficulty
+    }
+    pub fn stack_leniency(&self) -> f32 {
+        self.stack_leniency
+    }
+    pub fn objects(&self) -> &[HitObject] {
+        &self.objects
+    }
+    pub fn timing_points(&self) -> &[TimingPoint] {
+        &self.timing_points
+    }
+    pub fn breaks(&self) -> &[BreakPeriod] {
+        &self.breaks
+    }
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
+    pub fn colours(&self) -> &Colours {
+        &self.colours
+    }
+    pub fn object_count(&self) -> u32 {
+        self.objects.len() as u32
+    }
+    pub fn object_counts(&self) -> ObjectCounts {
+        let mut counts = ObjectCounts::default();
+        for object in &self.objects {
+            match &object.kind {
+                HitObjectKind::Circle => counts.circles += 1,
+                HitObjectKind::Spinner { .. } => counts.spinners += 1,
+                HitObjectKind::Slider { kind, .. } => match kind {
+                    CurveKind::Linear => counts.sliders_l += 1,
+                    CurveKind::Bezier => counts.sliders_b += 1,
+                    CurveKind::PerfectCurve => counts.sliders_p += 1,
+                },
+            }
+        }
+        counts
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ReplayChange {
+    Time {
+        index: u32,
+        old_ms: i64,
+        new_ms: i64,
+    },
+    InitialDummy {
+        index: u32,
+    },
+    BackwardFrame {
+        index: u32,
+    },
+}
+
 /// Круг до подготовки геометрии: время в мс, line — строка исходника с единицы.
 #[derive(Debug, PartialEq)]
 pub struct Circle {
@@ -69,8 +231,96 @@ pub struct TimingPoint {
     pub beat_length: f64,
     pub meter: u32,
     pub sample_set: u8,
-    pub sample_index: u32,
+    pub sample_index: i32,
     pub volume: u8,
     pub uninherited: bool,
     pub effects: u32,
+}
+
+/// Интервал перерыва между объектами в мс.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BreakPeriod {
+    pub start_time: f64,
+    pub end_time: f64,
+}
+
+/// Метаданные карты из секции `[Metadata]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Metadata {
+    pub title: String,
+    pub title_unicode: Option<String>,
+    pub artist: String,
+    pub artist_unicode: Option<String>,
+    pub creator: String,
+    pub version: String,
+    pub source: String,
+    pub tags: String,
+    pub beatmap_id: Option<i32>,
+    pub beatmap_set_id: Option<i32>,
+}
+
+impl Metadata {
+    /// Возвращает Юникод-вариант названия песни, если он задан и не пуст, иначе романизированное `title`.
+    pub fn title_unicode_or_title(&self) -> &str {
+        match &self.title_unicode {
+            Some(u) if !u.is_empty() => u,
+            _ => &self.title,
+        }
+    }
+
+    /// Возвращает Юникод-вариант имени исполнителя, если он задан и не пуст, иначе романизированное `artist`.
+    pub fn artist_unicode_or_artist(&self) -> &str {
+        match &self.artist_unicode {
+            Some(u) if !u.is_empty() => u,
+            _ => &self.artist,
+        }
+    }
+}
+
+/// Цвет в формате RGB (0..=255 на канал).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Rgb {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    /// Упаковывает цвет в формат `0x00RRGGBB` для кадрового буфера.
+    pub const fn to_u32(self) -> u32 {
+        ((self.r as u32) << 16) | ((self.g as u32) << 8) | (self.b as u32)
+    }
+}
+
+/// Четыре стандартных цвета комбо, используемых по умолчанию при отсутствии секции `[Colours]`.
+pub const DEFAULT_COMBO_COLOURS: [Rgb; 4] = [
+    Rgb::new(255, 192, 0),
+    Rgb::new(0, 202, 0),
+    Rgb::new(18, 124, 255),
+    Rgb::new(242, 24, 57),
+];
+
+/// Цветовая информация карты из секции `[Colours]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Colours {
+    /// Цвета комбо (Combo1..Combo8 по порядку номеров; при отсутствии используются 4 стандартных цвета).
+    pub combo: Vec<Rgb>,
+    /// Переопределение цвета дорожки слайдера.
+    pub slider_track_override: Option<Rgb>,
+    /// Переопределение цвета границы слайдера.
+    pub slider_border: Option<Rgb>,
+}
+
+impl Default for Colours {
+    fn default() -> Self {
+        Self {
+            combo: DEFAULT_COMBO_COLOURS.to_vec(),
+            slider_track_override: None,
+            slider_border: None,
+        }
+    }
 }

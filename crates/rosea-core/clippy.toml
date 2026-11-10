@@ -1,0 +1,6 @@
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "использовать BTreeMap или Vec с явной сортировкой вместо него (детерминированный порядок итерации)" },
+    { path = "std::collections::HashSet", reason = "использовать BTreeSet или Vec с явной сортировкой вместо него (детерминированный порядок итерации)" },
+    { path = "std::time::Instant", reason = "rosea-core симуляция является дискретной и не должна использовать wall-clock время" },
+    { path = "std::time::SystemTime", reason = "rosea-core симуляция является дискретной и не должна использовать wall-clock время" },
+]

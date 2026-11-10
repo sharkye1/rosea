@@ -305,13 +305,23 @@ fn validate_hit_sample(sample: &str, line: usize, id: ObjectId) -> Result<(), Ro
         object_id: id,
     };
     let mut fields = sample.splitn(5, ':');
-    for _ in 0..4 {
+    for _ in 0..2 {
         fields
             .next()
             .unwrap_or("")
             .parse::<u32>()
             .map_err(|_| invalid())?;
     }
+    let index_str = fields.next().unwrap_or("");
+    index_str
+        .parse::<i32>()
+        .or_else(|_| index_str.parse::<u32>().map(|v| v as i32))
+        .map_err(|_| invalid())?;
+    fields
+        .next()
+        .unwrap_or("")
+        .parse::<u32>()
+        .map_err(|_| invalid())?;
     if fields.next().is_none() {
         return Err(invalid());
     }

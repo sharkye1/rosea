@@ -7,6 +7,42 @@ use crate::model::ObjectId;
 // Вызывающий код может различать причины через match, без разбора сообщений Display.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RoseaError {
+    UnexpectedEof {
+        offset: usize,
+    },
+    InvalidLength {
+        offset: usize,
+    },
+    InvalidStringMarker {
+        offset: usize,
+    },
+    InvalidReplayString {
+        offset: usize,
+    },
+    UnsupportedReplayMode {
+        mode: u8,
+        offset: usize,
+    },
+    UnsupportedMods {
+        mods: u32,
+        offset: usize,
+    },
+    NoReplayData {
+        offset: usize,
+    },
+    InvalidLzma {
+        offset: usize,
+    },
+    InvalidReplayRecord {
+        index: u32,
+    },
+    UnsupportedReplayFeature {
+        index: u32,
+    },
+    ReplayTimeOverflow {
+        index: u32,
+    },
+    BeatmapHashMismatch,
     InvalidEncoding,
     InvalidHeader,
     UnsupportedBeatmapVersion(u32),
@@ -18,6 +54,14 @@ pub enum RoseaError {
     DuplicateField,
     MissingDifficultyField(&'static str),
     InvalidDifficultyField {
+        field: &'static str,
+        line: usize,
+    },
+    InvalidMetadataField {
+        field: &'static str,
+        line: usize,
+    },
+    InvalidColourField {
         field: &'static str,
         line: usize,
     },
@@ -37,6 +81,10 @@ pub enum RoseaError {
         object_id: ObjectId,
     },
     InvalidTimingPointField {
+        field: &'static str,
+        line: usize,
+    },
+    InvalidBreakField {
         field: &'static str,
         line: usize,
     },
@@ -63,6 +111,41 @@ pub enum RoseaError {
 impl fmt::Display for RoseaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnexpectedEof { offset } => {
+                write!(
+                    f,
+                    "Недостаточно байтов реплея для чтения поля с позиции {offset}"
+                )
+            }
+            Self::InvalidLength { offset } => write!(f, "Некорректная длина по смещению {offset}"),
+            Self::InvalidStringMarker { offset } => {
+                write!(f, "Некорректный маркер строки по смещению {offset}")
+            }
+            Self::InvalidReplayString { offset } => {
+                write!(f, "Некорректный UTF-8 строки реплея по смещению {offset}")
+            }
+            Self::UnsupportedReplayMode { mode, offset } => write!(
+                f,
+                "Режим реплея {mode} по смещению {offset} не поддерживается"
+            ),
+            Self::UnsupportedMods { mods, offset } => write!(
+                f,
+                "Моды реплея {mods} по смещению {offset} не поддерживаются"
+            ),
+            Self::NoReplayData { offset } => {
+                write!(f, "Отсутствуют данные реплея по смещению {offset}")
+            }
+            Self::InvalidLzma { offset } => {
+                write!(f, "Некорректные данные LZMA по смещению {offset}")
+            }
+            Self::InvalidReplayRecord { index } => write!(f, "Некорректная запись реплея {index}"),
+            Self::UnsupportedReplayFeature { index } => {
+                write!(f, "Неподдерживаемая дельта в записи реплея {index}")
+            }
+            Self::ReplayTimeOverflow { index } => {
+                write!(f, "Переполнение времени в записи реплея {index}")
+            }
+            Self::BeatmapHashMismatch => write!(f, "Хеш карты не совпадает с хешем реплея"),
             Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
             Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),
             Self::UnsupportedBeatmapVersion(version) => {
@@ -92,6 +175,12 @@ impl fmt::Display for RoseaError {
                     "конечным числом от 0 до 10"
                 };
                 write!(f, "Строка {line}: поле {field} должно быть {range}")
+            }
+            Self::InvalidMetadataField { field, line } => {
+                write!(f, "Строка {line}: некорректное поле metadata {field}")
+            }
+            Self::InvalidColourField { field, line } => {
+                write!(f, "Строка {line}: некорректное поле colours {field}")
             }
             Self::EmptyBeatmap => write!(f, "В карте нет объектов HitObjects"),
             Self::InvalidHitObjectField {
@@ -125,6 +214,9 @@ impl fmt::Display for RoseaError {
             }
             Self::InvalidTimingPointField { field, line } => {
                 write!(f, "Строка {line}: некорректное поле timing point {field}")
+            }
+            Self::InvalidBreakField { field, line } => {
+                write!(f, "Строка {line}: некорректное поле перерыва {field}")
             }
             Self::InvalidSliderLength { line, object_id } => {
                 write!(

@@ -76,11 +76,19 @@ fn canonicalizes_zero_and_preserves_all_effect_bits() {
     assert_eq!(points[1].time.to_bits(), 0.0_f64.to_bits());
     assert_eq!(points[0].meter, 1);
     assert_eq!(points[0].sample_set, 1);
-    assert_eq!(points[0].sample_index, u32::MAX);
+    assert_eq!(points[0].sample_index, -1);
     assert_eq!(points[0].effects, u32::MAX);
     assert!(points[0].uninherited);
     assert!(!points[1].uninherited);
     assert_eq!(points[1].effects, 8);
+}
+
+#[test]
+fn accepts_negative_sample_index_used_by_osu_stable_maps() {
+    let text = map("3769,425.531914893617,4,2,-1,100,1,0\n4196,327.8688524590164,4,2,-1,100,1,0");
+    let points = osu_timing_points(text.as_bytes()).unwrap();
+    assert_eq!(points[0].sample_index, -1);
+    assert_eq!(points[1].sample_index, -1);
 }
 
 #[test]
@@ -94,7 +102,7 @@ fn rejects_invalid_field_values_with_line_and_field() {
         ),
         (2, "meter", vec!["", "abc", "0", "-1", "1.5", "4294967296"]),
         (3, "sampleSet", vec!["", "abc", "-1", "1.5", "4", "256"]),
-        (4, "sampleIndex", vec!["", "abc", "-1", "1.5", "4294967296"]),
+        (4, "sampleIndex", vec!["", "abc", "1.5", "4294967296"]),
         (5, "volume", vec!["", "abc", "-1", "1.5", "101", "256"]),
         (6, "uninherited", vec!["", "abc", "-1", "1.5", "2", "256"]),
         (7, "effects", vec!["", "abc", "-1", "1.5", "4294967296"]),
@@ -211,7 +219,7 @@ fn rejects_invalid_inherited_fields() {
         ),
         (2, "meter", vec!["", "abc", "-1", "1.5", "4294967296"]),
         (3, "sampleSet", vec!["", "abc", "-1", "1.5", "4", "256"]),
-        (4, "sampleIndex", vec!["", "abc", "-1", "1.5", "4294967296"]),
+        (4, "sampleIndex", vec!["", "abc", "1.5", "4294967296"]),
         (5, "volume", vec!["", "abc", "-1", "1.5", "101", "256"]),
         (7, "effects", vec!["", "abc", "-1", "1.5", "4294967296"]),
     ] {
