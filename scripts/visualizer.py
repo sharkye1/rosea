@@ -474,7 +474,11 @@ class Visualizer:
             except Exception:
                 return None
 
-        skins_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Skins")
+        skins_dir = (
+            os.path.join(self.osu_dir, "Skins")
+            if self.osu_dir and os.path.isdir(os.path.join(self.osu_dir, "Skins"))
+            else os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Skins")
+        )
         if os.path.isdir(skins_dir):
             skin_candidates = []
             try:
@@ -564,7 +568,11 @@ class Visualizer:
                     if os.path.getsize(full) > 200000:
                         return full
 
-        songs_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Songs")
+        songs_dir = (
+            os.path.join(self.osu_dir, "Songs")
+            if self.osu_dir and os.path.isdir(os.path.join(self.osu_dir, "Songs"))
+            else os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Songs")
+        )
         if not os.path.isdir(songs_dir):
             return None
 
