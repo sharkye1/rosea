@@ -7,14 +7,19 @@ player info, high scores, Rust compatibility, and replay availability with real-
 """
 
 import glob
+import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 
 try:
     from osu_db import OsuStableDatabase, parse_replay_header_fast
@@ -262,17 +267,21 @@ def scan_all_maps(
 
 
 class MapBrowserApp:
-    """Tkinter-based companion browser window running on a dedicated thread."""
+    """Tkinter-based companion browser window for selecting beatmaps."""
 
     def __init__(
         self,
-        map_queue: queue.Queue,
+        map_queue: Optional[queue.Queue] = None,
         root_dir: str = "tests/data",
         osu_dir: Optional[str] = None,
+        is_companion: bool = False,
+        start_hidden: bool = False,
     ):
         self.map_queue = map_queue
         self.root_dir = root_dir
         self.osu_dir = osu_dir
+        self.is_companion = is_companion
+        self.start_hidden = start_hidden
         self.root: Optional[tk.Tk] = None
         self.tree: Optional[ttk.Treeview] = None
         self.all_entries: List[MapEntry] = []
@@ -290,7 +299,10 @@ class MapBrowserApp:
         self.root.minsize(800, 480)
         self.root.configure(bg="#12141c")
 
-        # Hide on close instead of destroying to keep thread alive
+        if self.start_hidden:
+            self.root.withdraw()
+
+        # Hide on close instead of destroying to keep thread/process alive
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
 
         # Style configuration
@@ -306,8 +318,31 @@ class MapBrowserApp:
         self.root.bind("<Escape>", lambda e: self.hide())
         self.root.bind("<Return>", lambda e: self.on_load_clicked())
 
+        if self.is_companion:
+            self._start_ipc_listener()
+
         # Start mainloop
         self.root.mainloop()
+
+    def _start_ipc_listener(self):
+        def listener():
+            for line in sys.stdin:
+                cmd = line.strip()
+                if not cmd:
+                    continue
+                if cmd == "SHOW":
+                    if self.root:
+                        self.root.after(0, self.show)
+                elif cmd == "HIDE":
+                    if self.root:
+                        self.root.after(0, self.hide)
+                elif cmd == "QUIT":
+                    if self.root:
+                        self.root.after(0, self.root.destroy)
+                    break
+
+        t = threading.Thread(target=listener, daemon=True)
+        t.start()
 
     def setup_styles(self):
         style = ttk.Style(self.root)
@@ -666,7 +701,16 @@ class MapBrowserApp:
         if 0 <= idx < len(self.filtered_entries):
             entry = self.filtered_entries[idx]
             # Send tuple (file_path, replay_path) so visualizer loads both map & replay
-            self.map_queue.put((entry.file_path, entry.replay_path))
+            if self.map_queue is not None:
+                self.map_queue.put((entry.file_path, entry.replay_path))
+            if self.is_companion:
+                msg = json.dumps({
+                    "action": "select",
+                    "file_path": entry.file_path,
+                    "replay_path": entry.replay_path,
+                })
+                sys.stdout.write(msg + "\n")
+                sys.stdout.flush()
             rep_text = f" + Реплей ({entry.player_name})" if entry.replay_path else ""
             if self.info_lbl:
                 self.info_lbl.config(
@@ -685,13 +729,13 @@ class MapBrowserApp:
             self.root.focus_force()
 
     def hide(self):
-        """Hide window without terminating thread."""
+        """Hide window without terminating thread/process."""
         if self.root:
             self.root.after(0, self.root.withdraw)
 
 
 class MapBrowserManager:
-    """Thread-safe manager for the non-blocking map browser companion window."""
+    """Process-isolated manager for the non-blocking map browser companion window."""
 
     def __init__(
         self,
@@ -701,28 +745,90 @@ class MapBrowserManager:
         self.map_queue: queue.Queue = queue.Queue()
         self.root_dir = root_dir
         self.osu_dir = osu_dir
-        self.app: Optional[MapBrowserApp] = None
-        self.thread: Optional[threading.Thread] = None
+        self.process: Optional[subprocess.Popen] = None
+        self.reader_thread: Optional[threading.Thread] = None
 
     def start(self):
-        self.thread = threading.Thread(target=self._run_thread, daemon=True)
-        self.thread.start()
+        """Start companion window in a separate Python process to prevent GUI/Cocoa conflicts."""
+        if self.process and self.process.poll() is None:
+            return
 
-    def _run_thread(self):
-        self.app = MapBrowserApp(
-            self.map_queue,
-            root_dir=self.root_dir,
-            osu_dir=self.osu_dir,
-        )
-        self.app.start()
+        script_path = os.path.join(REPO_ROOT, "scripts", "map_browser.py")
+        cmd = [
+            sys.executable,
+            script_path,
+            "--companion",
+            "--start-hidden",
+            "--root-dir", self.root_dir,
+        ]
+        if self.osu_dir:
+            cmd.extend(["--osu-dir", self.osu_dir])
+
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self.reader_thread.start()
+        except Exception as e:
+            print(f"Warning: could not start MapBrowser process: {e}", file=sys.stderr)
+
+    def _reader_loop(self):
+        if not self.process or not self.process.stdout:
+            return
+        try:
+            for line in self.process.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if data.get("action") == "select":
+                        self.map_queue.put((data.get("file_path"), data.get("replay_path")))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def show(self):
-        if self.app:
-            self.app.show()
+        """Bring the map browser companion window to front."""
+        if self.process is None or self.process.poll() is not None:
+            self.start()
+
+        if self.process and self.process.stdin and self.process.poll() is None:
+            try:
+                self.process.stdin.write("SHOW\n")
+                self.process.stdin.flush()
+            except Exception:
+                pass
 
     def hide(self):
-        if self.app:
-            self.app.hide()
+        """Hide the companion window."""
+        if self.process and self.process.stdin and self.process.poll() is None:
+            try:
+                self.process.stdin.write("HIDE\n")
+                self.process.stdin.flush()
+            except Exception:
+                pass
+
+    def close(self):
+        """Terminate the companion window process cleanly."""
+        if self.process and self.process.poll() is None:
+            try:
+                if self.process.stdin:
+                    self.process.stdin.write("QUIT\n")
+                    self.process.stdin.flush()
+                self.process.wait(timeout=0.5)
+            except Exception:
+                try:
+                    self.process.terminate()
+                except Exception:
+                    pass
 
     def get_selected_map(self) -> Optional[Tuple[str, Optional[str]]]:
         """Poll for newly selected map and replay paths from queue without blocking."""
@@ -731,14 +837,34 @@ class MapBrowserManager:
         except queue.Empty:
             return None
 
+    def __del__(self):
+        self.close()
+
 
 if __name__ == "__main__":
-    import time
-    print("Testing MapBrowser standalone...")
-    entries = scan_all_maps()
-    print(f"Total maps scanned: {len(entries)}")
-    with_rep = sum(1 for e in entries if e.has_replay)
-    print(f"Maps with replay: {with_rep}")
-    for e in entries[:8]:
-        rep_p = f"Replay: {e.player_name}" if e.has_replay else "No replay"
-        print(f"  [{e.category}] {e.display_title} -> {rep_p}")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Rosea Map Browser")
+    parser.add_argument("--companion", action="store_true", help="Run in companion IPC mode for Visualizer")
+    parser.add_argument("--start-hidden", action="store_true", help="Start with window withdrawn/hidden")
+    parser.add_argument("--root-dir", type=str, default=os.path.join(REPO_ROOT, "tests", "data"), help="Root directory for tests/data")
+    parser.add_argument("--osu-dir", type=str, default=None, help="osu! stable installation directory")
+    parser.add_argument("--scan-only", action="store_true", help="Only scan and print map entries to console")
+    args = parser.parse_args()
+
+    if args.scan_only:
+        entries = scan_all_maps(root_dir=args.root_dir, osu_dir=args.osu_dir)
+        print(f"Total maps scanned: {len(entries)}")
+        with_rep = sum(1 for e in entries if e.has_replay)
+        print(f"Maps with replay: {with_rep}")
+        for e in entries[:8]:
+            rep_p = f"Replay: {e.player_name}" if e.has_replay else "No replay"
+            print(f"  [{e.category}] {e.display_title} -> {rep_p}")
+    else:
+        app = MapBrowserApp(
+            root_dir=args.root_dir,
+            osu_dir=args.osu_dir,
+            is_companion=args.companion,
+            start_hidden=args.start_hidden,
+        )
+        app.start()
