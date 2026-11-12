@@ -1,0 +1,10 @@
+# Rosea osu! Beatmap Visualizer & Test Suite
+# Совместимо с Python 3.10 - 3.15+
+
+# Pygame Community Edition — современный drop-in форк pygame.
+# Полностью совместим с `import pygame`, но содержит готовые бинарные wheels (macOS ARM64/x86_64, Windows, Linux)
+# и не падает с ошибками компиляции C/SDL2 на новых версиях Python (3.12, 3.13, 3.15+).
+pygame-ce>=2.5.0
+
+# Фреймворк для запуска тестов (опционально)
+pytest>=8.0.0

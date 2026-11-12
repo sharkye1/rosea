@@ -502,7 +502,11 @@ class Visualizer:
             except Exception:
                 return None
 
-        skins_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Skins")
+        skins_dir = (
+            os.path.join(self.osu_dir, "Skins")
+            if self.osu_dir and os.path.isdir(os.path.join(self.osu_dir, "Skins"))
+            else os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Skins")
+        )
         if os.path.isdir(skins_dir):
             skin_candidates = []
             try:
@@ -592,7 +596,11 @@ class Visualizer:
                     if os.path.getsize(full) > 200000:
                         return full
 
-        songs_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Songs")
+        songs_dir = (
+            os.path.join(self.osu_dir, "Songs")
+            if self.osu_dir and os.path.isdir(os.path.join(self.osu_dir, "Songs"))
+            else os.path.join(os.path.expanduser("~"), "AppData", "Local", "osu!", "Songs")
+        )
         if not os.path.isdir(songs_dir):
             return None
 
@@ -3248,7 +3256,7 @@ class Visualizer:
             self.clock.tick(60)
 
         if self.map_browser:
-            self.map_browser.hide()
+            self.map_browser.close()
         pygame.quit()
 
 
@@ -3263,7 +3271,7 @@ def main():
     parser.add_argument("--no-audio", action="store_true", help="Disable music audio playback")
     parser.add_argument("--no-hitsounds", action="store_true", help="Disable hitsounds (note click sounds)")
     parser.add_argument("--offset", type=float, default=0.0, help="Universal audio offset in milliseconds (default: 0.0)")
-    parser.add_argument("--osu-dir", type=str, default=None, help="Path to osu! stable installation folder (default: autodetect %LOCALAPPDATA%/osu!)")
+    parser.add_argument("--osu-dir", type=str, default=None, help="Path to osu! stable installation folder (default: autodetect %%LOCALAPPDATA%%/osu!)")
     parser.add_argument("--test", action="store_true", help="Run automated test suite verifying Rust parser across corpus")
     parser.add_argument("--verify", action="store_true", help="Verify single map against Rust parser and exit")
     parser.add_argument("--headless", action="store_true", help="Run visualizer in headless dummy mode for testing")
