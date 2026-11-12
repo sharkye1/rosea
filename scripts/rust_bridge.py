@@ -183,6 +183,452 @@ def _rgb_tuple(obj: Optional[Dict[str, Any]]) -> Optional[Tuple[int, int, int]]:
     return (int(obj["r"]), int(obj["g"]), int(obj["b"]))
 
 
+def _read_osu_lines_map(file_path: str) -> Dict[int, str]:
+    """Read 1-based line number -> trimmed line text from a .osu file."""
+    lines_map: Dict[int, str] = {}
+    if not file_path or not os.path.isfile(file_path):
+        return lines_map
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            for idx, raw in enumerate(f, 1):
+                lines_map[idx] = raw.strip()
+    except Exception:
+        pass
+    return lines_map
+
+
+def scan_unknown_beatmap_fields(file_path: str) -> List[Dict[str, Any]]:
+    """Scan unknown sections and skipped .osu fields matching rosea-core::parse::osu."""
+    if not file_path or not os.path.isfile(file_path):
+        return []
+    known_sections = {
+        "[General]",
+        "[Metadata]",
+        "[Difficulty]",
+        "[TimingPoints]",
+        "[Colours]",
+        "[HitObjects]",
+        "[Events]",
+    }
+    known_keys = {
+        "[General]": {"Mode", "StackLeniency"},
+        "[Metadata]": {
+            "Title",
+            "TitleUnicode",
+            "Artist",
+            "ArtistUnicode",
+            "Creator",
+            "Version",
+            "Source",
+            "Tags",
+            "BeatmapID",
+            "BeatmapSetID",
+        },
+        "[Difficulty]": {
+            "CircleSize",
+            "OverallDifficulty",
+            "HPDrainRate",
+            "ApproachRate",
+            "SliderMultiplier",
+            "SliderTickRate",
+        },
+        "[Colours]": {
+            "Combo1",
+            "Combo2",
+            "Combo3",
+            "Combo4",
+            "Combo5",
+            "Combo6",
+            "Combo7",
+            "Combo8",
+            "SliderTrackOverride",
+            "SliderBorder",
+        },
+    }
+    entries: List[Dict[str, Any]] = []
+    section = ""
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            for idx, raw in enumerate(f, 1):
+                line = raw.strip()
+                if not line or line.startswith("//"):
+                    continue
+                if line.startswith("["):
+                    section = line
+                    if section not in known_sections:
+                        entries.append(
+                            {
+                                "line": idx,
+                                "section": section,
+                                "kind": "section",
+                                "key": section,
+                                "text": line[:160],
+                            }
+                        )
+                    continue
+                if section in known_keys:
+                    key = line.split(":", 1)[0].strip() if ":" in line else line
+                    if key not in known_keys[section]:
+                        entries.append(
+                            {
+                                "line": idx,
+                                "section": section,
+                                "kind": "field",
+                                "key": key,
+                                "text": line[:160],
+                            }
+                        )
+    except Exception:
+        pass
+    return entries
+
+
+def _try_parse_float(token: str) -> Optional[float]:
+    try:
+        import math
+
+        v = float(token.strip().strip('"'))
+        return v if math.isfinite(v) else None
+    except ValueError:
+        return None
+
+
+def build_map_issues(
+    file_path: str,
+    py_bm: Optional[Beatmap],
+    rust_out: Optional[Dict[str, Any]],
+    mismatches: List[str],
+) -> List[Dict[str, Any]]:
+    """Build jumpable list of map errors, unsupported objects, and mismatches."""
+    issues: List[Dict[str, Any]] = []
+    seen_keys = set()
+    primary_locs = set()
+    lines_map = _read_osu_lines_map(file_path)
+
+    objs_by_id: Dict[int, HitObject] = {}
+    objs_by_line: Dict[int, HitObject] = {}
+    if py_bm:
+        for o in py_bm.hit_objects:
+            objs_by_id[o.id] = o
+            objs_by_line[o.line] = o
+
+    def add_issue(
+        tag: str,
+        summary: str,
+        line: Optional[int] = None,
+        object_id: Optional[int] = None,
+        time_ms: Optional[float] = None,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        raw_line: str = "",
+        primary: bool = False,
+    ):
+        key = (tag, line, object_id, summary)
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        if not raw_line and line is not None:
+            raw_line = lines_map.get(line, "")
+        issues.append(
+            {
+                "tag": tag,
+                "summary": summary,
+                "line": line,
+                "object_id": object_id,
+                "time_ms": time_ms,
+                "x": x,
+                "y": y,
+                "raw_line": raw_line[:160],
+                "primary": primary,
+            }
+        )
+
+    # 1. Exact Rust parser stop / error_location
+    if rust_out and rust_out.get("status") != "ok":
+        err_code = str(rust_out.get("error_code") or "RustError")
+        err_msg = str(rust_out.get("error") or err_code)
+        loc = rust_out.get("error_location") or {}
+        loc_kind = loc.get("kind")
+        line = loc.get("line")
+        obj_id = loc.get("object_id")
+        raw_line = lines_map.get(line, "") if isinstance(line, int) else ""
+
+        t_ms: Optional[float] = None
+        px: Optional[float] = None
+        py: Optional[float] = None
+        if loc_kind == "hit_object":
+            obj = (
+                objs_by_id.get(int(obj_id))
+                if obj_id is not None
+                else None
+            ) or (objs_by_line.get(int(line)) if isinstance(line, int) else None)
+            if obj is not None:
+                t_ms = float(obj.time)
+                px = float(obj.stacked_x)
+                py = float(obj.stacked_y)
+            elif raw_line:
+                parts = raw_line.split(",")
+                if len(parts) >= 3:
+                    px = _try_parse_float(parts[0])
+                    py = _try_parse_float(parts[1])
+                    t_ms = _try_parse_float(parts[2])
+        elif loc_kind == "timing_point" and raw_line:
+            parts = raw_line.split(",")
+            if parts:
+                t_ms = _try_parse_float(parts[0])
+        elif loc_kind == "break" and raw_line:
+            parts = raw_line.split(",")
+            if len(parts) >= 2:
+                t_ms = _try_parse_float(parts[1])
+
+        add_issue(
+            tag=f"RUST: {err_code}",
+            summary=err_msg,
+            line=line,
+            object_id=obj_id,
+            time_ms=t_ms,
+            x=px,
+            y=py,
+            raw_line=raw_line,
+            primary=True,
+        )
+        if line is not None:
+            primary_locs.add(("line", line))
+        if obj_id is not None:
+            primary_locs.add(("obj", obj_id))
+
+    # 2. All Catmull sliders and other unsupported objects across the entire map
+    if py_bm:
+        for obj in py_bm.hit_objects:
+            if obj.kind == "slider" and obj.curve_type == "C":
+                if ("line", obj.line) in primary_locs or ("obj", obj.id) in primary_locs:
+                    continue
+                add_issue(
+                    tag="Catmull (C)",
+                    summary=f"Слайдер Catmull на строке {obj.line} (#{obj.id}) не поддерживается ядром Rust",
+                    line=obj.line,
+                    object_id=obj.id,
+                    time_ms=float(obj.time),
+                    x=float(obj.stacked_x),
+                    y=float(obj.stacked_y),
+                    raw_line=lines_map.get(obj.line, ""),
+                )
+
+        for entry in getattr(py_bm, "unsupported_objects", []):
+            line_num, raw_line, reason = entry
+            if ("line", line_num) in primary_locs:
+                continue
+            parts = raw_line.split(",")
+            px = _try_parse_float(parts[0]) if len(parts) >= 1 else None
+            py = _try_parse_float(parts[1]) if len(parts) >= 2 else None
+            t_ms = _try_parse_float(parts[2]) if len(parts) >= 3 else None
+            add_issue(
+                tag="Unsupported",
+                summary=f"Строка {line_num}: {reason}",
+                line=line_num,
+                object_id=None,
+                time_ms=t_ms,
+                x=px,
+                y=py,
+                raw_line=raw_line,
+            )
+
+    # 3. Discrepancies between Python and Rust parsers
+    for msg in mismatches:
+        line_num = None
+        obj_id = None
+        t_ms = None
+        px = None
+        py = None
+        if py_bm:
+            if msg.startswith("Obj["):
+                try:
+                    idx = int(msg.split("[", 1)[1].split("]", 1)[0])
+                    if 0 <= idx < len(py_bm.hit_objects):
+                        obj = py_bm.hit_objects[idx]
+                        line_num = obj.line
+                        obj_id = obj.id
+                        t_ms = float(obj.time)
+                        px = float(obj.stacked_x)
+                        py = float(obj.stacked_y)
+                except (ValueError, IndexError):
+                    pass
+            elif msg.startswith("TP["):
+                try:
+                    idx = int(msg.split("[", 1)[1].split("]", 1)[0])
+                    if 0 <= idx < len(py_bm.timing_points):
+                        tp = py_bm.timing_points[idx]
+                        line_num = tp.line
+                        t_ms = float(tp.time)
+                except (ValueError, IndexError):
+                    pass
+            elif msg.startswith("Break["):
+                try:
+                    idx = int(msg.split("[", 1)[1].split("]", 1)[0])
+                    if 0 <= idx < len(py_bm.breaks):
+                        t_ms = float(py_bm.breaks[idx][0])
+                except (ValueError, IndexError):
+                    pass
+        add_issue(
+            tag="Mismatch",
+            summary=msg,
+            line=line_num,
+            object_id=obj_id,
+            time_ms=t_ms,
+            x=px,
+            y=py,
+        )
+
+    return issues
+
+
+def build_replay_issues(
+    py_rep: Optional[Replay],
+    rust_replay: Optional[Replay],
+    r_rep: Optional[Dict[str, Any]],
+    mismatches: List[str],
+    error_code: Optional[str],
+    error_location: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build jumpable list of replay normalization events and errors."""
+    issues: List[Dict[str, Any]] = []
+    raw_by_idx: Dict[int, ReplayFrame] = {}
+    if py_rep:
+        for seq_idx, fr in enumerate(py_rep.frames):
+            raw_by_idx[fr.index if fr.index is not None else seq_idx] = fr
+    rust_by_idx: Dict[int, ReplayFrame] = {}
+    if rust_replay:
+        for fr in rust_replay.frames:
+            if fr.index is not None:
+                rust_by_idx[fr.index] = fr
+
+    first_kept_t = (
+        float(rust_replay.frames[0].time_ms)
+        if (rust_replay and rust_replay.frames)
+        else (float(py_rep.frames[0].time_ms) if (py_rep and py_rep.frames) else 0.0)
+    )
+
+    def _nearest_kept_time(raw_index: int) -> float:
+        if rust_replay and rust_replay.frames:
+            prev_t = first_kept_t
+            for fr in rust_replay.frames:
+                if fr.index is not None and fr.index <= raw_index:
+                    prev_t = float(fr.time_ms)
+                elif fr.index is not None and fr.index > raw_index:
+                    return prev_t
+            return prev_t
+        return first_kept_t
+
+    # 1. Replay error / rejection point
+    if r_rep and r_rep.get("status") != "ok":
+        err_msg = str(r_rep.get("error") or error_code or "ReplayError")
+        loc = error_location or {}
+        idx = loc.get("index")
+        t_ms: Optional[float] = None
+        px: Optional[float] = None
+        py: Optional[float] = None
+        if isinstance(idx, int) and idx in raw_by_idx:
+            fr = raw_by_idx[idx]
+            t_ms = float(fr.time_ms)
+            px = float(fr.x)
+            py = float(fr.y)
+        elif py_rep and py_rep.frames:
+            fr = py_rep.frames[-1] if isinstance(idx, int) else py_rep.frames[0]
+            t_ms = float(fr.time_ms)
+            px = float(fr.x)
+            py = float(fr.y)
+
+        issues.append(
+            {
+                "tag": f"RUST: {error_code or 'Error'}",
+                "summary": err_msg,
+                "index": idx,
+                "time_ms": t_ms,
+                "x": px,
+                "y": py,
+                "detail": f"offset={loc.get('offset')}" if "offset" in loc else "",
+                "primary": True,
+            }
+        )
+
+    # 2. All normalization events (Time / InitialDummy / BackwardFrame)
+    norm = (r_rep or {}).get("normalization") or {}
+    for ch in norm.get("changes", []):
+        kind = str(ch.get("kind", ""))
+        idx = ch.get("index")
+        r_fr = rust_by_idx.get(idx) if isinstance(idx, int) else None
+        p_fr = raw_by_idx.get(idx) if isinstance(idx, int) else None
+        if kind == "Time":
+            old_ms = ch.get("old_ms", 0)
+            new_ms = ch.get("new_ms", 0)
+            t_ms = float(new_ms)
+            px = float(r_fr.x) if r_fr else (float(p_fr.x) if p_fr else None)
+            py = float(r_fr.y) if r_fr else (float(p_fr.y) if p_fr else None)
+            issues.append(
+                {
+                    "tag": "Time",
+                    "summary": f"Кадр #{idx}: время {old_ms} -> {new_ms} мс",
+                    "index": idx,
+                    "time_ms": t_ms,
+                    "x": px,
+                    "y": py,
+                    "detail": f"coords=({px:.1f}, {py:.1f})" if px is not None and py is not None else "",
+                    "primary": False,
+                }
+            )
+        elif kind == "InitialDummy":
+            px = float(p_fr.x) if p_fr else 256.0
+            py = float(p_fr.y) if p_fr else -500.0
+            t_ms = first_kept_t
+            issues.append(
+                {
+                    "tag": "InitialDummy",
+                    "summary": f"Кадр #{idx}: удалён стартовый dummy ({px:.0f}, {py:.0f})",
+                    "index": idx,
+                    "time_ms": t_ms,
+                    "x": px,
+                    "y": py,
+                    "detail": f"переход к началу ({t_ms:.0f} мс)",
+                    "primary": False,
+                }
+            )
+        elif kind == "BackwardFrame":
+            px = float(p_fr.x) if p_fr else None
+            py = float(p_fr.y) if p_fr else None
+            raw_t = p_fr.time_ms if p_fr else None
+            t_ms = _nearest_kept_time(int(idx)) if isinstance(idx, int) else first_kept_t
+            t_note = f"сырое время {raw_t:.0f} мс, " if raw_t is not None else ""
+            issues.append(
+                {
+                    "tag": "BackwardFrame",
+                    "summary": f"Кадр #{idx}: удалён обратный ход ({t_note}кадр пропущен)",
+                    "index": idx,
+                    "time_ms": t_ms,
+                    "x": px,
+                    "y": py,
+                    "detail": f"рядом с {t_ms:.0f} мс",
+                    "primary": False,
+                }
+            )
+
+    # 3. Mismatches
+    for msg in mismatches:
+        issues.append(
+            {
+                "tag": "Mismatch",
+                "summary": msg,
+                "index": None,
+                "time_ms": first_kept_t if py_rep else None,
+                "x": None,
+                "y": None,
+                "detail": "",
+                "primary": False,
+            }
+        )
+
+    return issues
+
+
 class ReplayVerificationResult:
     def __init__(self, beatmap_path: str, replay_path: Optional[str]):
         self.beatmap_path = beatmap_path
@@ -190,11 +636,17 @@ class ReplayVerificationResult:
         self.status = "NONE"  # "NONE", "PASS", "SKIPPED_UNSUPPORTED", "HASH_MISMATCH", "FAIL"
         self.reason = "No replay"
         self.error_code: Optional[str] = None
+        self.error_location: Optional[Dict[str, Any]] = None
         self.hash_status = "none"
         self.hash_match: Optional[bool] = None
         self.mismatches: List[str] = []
         self.warnings: List[Dict[str, Any]] = []
         self.normalization: Optional[Dict[str, Any]] = None
+        self.trailer_offset: int = 0
+        self.trailer_hex: str = ""
+        self.trailer_ascii: str = ""
+        self.trailer_i64_le: Optional[int] = None
+        self.replay_issues: List[Dict[str, Any]] = []
         self.rust_replay_data: Optional[Dict[str, Any]] = None
         self.py_replay: Optional[Replay] = None
         self.rust_replay: Optional[Replay] = None
@@ -205,6 +657,8 @@ class VerificationResult:
         self.file_path = file_path
         self.status = "UNKNOWN"  # "PASS", "SKIPPED_UNSUPPORTED", "FAIL"
         self.reason = ""
+        self.error_code: Optional[str] = None
+        self.error_location: Optional[Dict[str, Any]] = None
         self.mismatches: List[str] = []
         self.objects_checked = 0
         self.rust_supported = False
@@ -214,6 +668,8 @@ class VerificationResult:
         self.rust_commit: str = ""
         self.beatmap_md5: str = ""
         self.warnings: List[Dict[str, Any]] = []
+        self.unknown_fields: List[Dict[str, Any]] = []
+        self.map_issues: List[Dict[str, Any]] = []
         self.replay_verification: Optional[ReplayVerificationResult] = None
 
     def __repr__(self):
@@ -463,10 +919,28 @@ def verify_replay_from_json(
         return res
 
     res.error_code = r_rep.get("error_code")
+    res.error_location = r_rep.get("error_location")
     res.hash_status = str(r_rep.get("hash_status", "unchecked"))
     res.hash_match = r_rep.get("hash_match")
     res.warnings = list(r_rep.get("warnings", []))
     res.normalization = r_rep.get("normalization")
+
+    hdr = r_rep.get("header") or {}
+    res.trailer_offset = int(hdr.get("trailer_offset", 0))
+    res.trailer_hex = str(hdr.get("trailer_hex", ""))
+    res.trailer_ascii = str(hdr.get("trailer_ascii", ""))
+    res.trailer_i64_le = hdr.get("trailer_i64_le")
+
+    def _finalize(result: ReplayVerificationResult) -> ReplayVerificationResult:
+        result.replay_issues = build_replay_issues(
+            py_rep,
+            result.rust_replay,
+            r_rep,
+            result.mismatches,
+            result.error_code,
+            result.error_location,
+        )
+        return result
 
     # Compute raw map MD5 independently in Python if py_bm doesn't have it
     py_md5 = py_bm.beatmap_md5 if (py_bm and py_bm.beatmap_md5) else ""
@@ -484,9 +958,9 @@ def verify_replay_from_json(
                 res.reason = f"Rust reported BeatmapHashMismatch, but Python MD5 matches ({py_md5})"
             else:
                 res.status = "HASH_MISMATCH"
-                rep_h = py_rep.beatmap_hash if py_rep else r_rep.get("header", {}).get("beatmap_hash", "?")
+                rep_h = py_rep.beatmap_hash if py_rep else hdr.get("beatmap_hash", "?")
                 res.reason = f"BeatmapHashMismatch (map={py_md5[:8]}..., replay={str(rep_h)[:8]}...)"
-            return res
+            return _finalize(res)
 
         if err_code in (
             "UnsupportedMods",
@@ -497,24 +971,24 @@ def verify_replay_from_json(
             if err_code == "UnsupportedMods" and py_rep and py_rep.mods == 0:
                 res.status = "FAIL"
                 res.reason = "Rust reported UnsupportedMods for mods=0"
-                return res
+                return _finalize(res)
             if err_code == "UnsupportedReplayMode" and py_rep and py_rep.mode == 0:
                 res.status = "FAIL"
                 res.reason = "Rust reported UnsupportedReplayMode for mode=0"
-                return res
+                return _finalize(res)
             res.status = "SKIPPED_UNSUPPORTED"
             res.reason = f"Rust rejected replay ({err_code}): {err_msg}"
-            return res
+            return _finalize(res)
 
         res.status = "FAIL"
         res.reason = f"Rust replay failed ({err_code}): {err_msg}"
-        return res
+        return _finalize(res)
 
     # Status == "ok": compare Rust replay header, expected stats, MD5, and normalized count
     if py_rep is None:
         res.status = "FAIL"
         res.reason = "Python parse_osr_replay failed on replay that Rust accepted"
-        return res
+        return _finalize(res)
 
     if res.hash_match is not True or res.hash_status != "ok":
         res.mismatches.append(f"Expected hash_match=True/ok, got {res.hash_match}/{res.hash_status}")
@@ -524,7 +998,6 @@ def verify_replay_from_json(
             f"MD5 mismatch bypassed Rust check: map={py_md5}, replay={py_rep.beatmap_hash}"
         )
 
-    hdr = r_rep.get("header", {})
     exp = r_rep.get("expected", {})
 
     if hdr.get("mode") != py_rep.mode:
@@ -597,7 +1070,7 @@ def verify_replay_from_json(
     if res.mismatches:
         res.status = "FAIL"
         res.reason = "; ".join(res.mismatches[:3])
-        return res
+        return _finalize(res)
 
     try:
         res.rust_replay = replay_from_rust_json(r_rep)
@@ -605,7 +1078,7 @@ def verify_replay_from_json(
         res.status = "FAIL"
         res.mismatches.append(str(e))
         res.reason = f"Failed to build Replay from Rust JSON: {e}"
-        return res
+        return _finalize(res)
 
     res.status = "PASS"
     res.reason = (
@@ -613,7 +1086,7 @@ def verify_replay_from_json(
         f"norm(t={norm.get('changed_times', 0)}, dummy={norm.get('initial_dummy_removed', 0)}, "
         f"back={norm.get('backward_removed', 0)})"
     )
-    return res
+    return _finalize(res)
 
 
 def verify_replay(beatmap_path: str, replay_path: str) -> ReplayVerificationResult:
@@ -637,6 +1110,8 @@ def verify_beatmap(
     except Exception as e:
         res.status = "FAIL"
         res.reason = f"Python parser failed: {e}"
+        res.unknown_fields = scan_unknown_beatmap_fields(file_path)
+        res.map_issues = build_map_issues(file_path, None, None, res.mismatches)
         return res
 
     # Determine what kinds of objects this map has
@@ -664,11 +1139,21 @@ def verify_beatmap(
     res.rust_commit = rust_out.get("commit", get_rust_commit_hash())
     res.beatmap_md5 = str(rust_out.get("beatmap_md5", py_bm.beatmap_md5))
     res.warnings = list(rust_out.get("warnings", []))
+    res.error_code = rust_out.get("error_code")
+    res.error_location = rust_out.get("error_location")
+    if isinstance(rust_out.get("unknown_fields"), list):
+        res.unknown_fields = list(rust_out["unknown_fields"])
+    else:
+        res.unknown_fields = scan_unknown_beatmap_fields(file_path)
 
     if replay_path and rust_out.get("replay") is not None:
         res.replay_verification = verify_replay_from_json(
             file_path, replay_path, py_bm, rust_out
         )
+
+    def _finalize_map(result: VerificationResult) -> VerificationResult:
+        result.map_issues = build_map_issues(file_path, py_bm, rust_out, result.mismatches)
+        return result
 
     if not rust_supported:
         if rust_out.get("status") == "error":
@@ -686,19 +1171,19 @@ def verify_beatmap(
                 f"Map contains unsupported objects ({', '.join(sorted(unsupported_kinds))}). "
                 f"Rust correctly rejected: {rust_out.get('error')}"
             )
-            return res
+            return _finalize_map(res)
         else:
             res.status = "FAIL"
             res.reason = (
                 "Map contains unsupported objects in current Rust parser, "
                 "but Rust parser returned status 'ok' unexpectedly."
             )
-            return res
+            return _finalize_map(res)
 
     if rust_out.get("status") != "ok":
         res.status = "FAIL"
         res.reason = f"Rust parser failed unexpectedly: {rust_out.get('error')}"
-        return res
+        return _finalize_map(res)
 
     # Verify header, mode, MD5, stack_leniency
     if rust_out.get("version") != py_bm.version:
@@ -927,7 +1412,7 @@ def verify_beatmap(
             res.mismatches.append(f"Failed to build Beatmap from Rust JSON: {e}")
             res.status = "FAIL"
 
-    return res
+    return _finalize_map(res)
 
 
 def run_full_corpus_verification(

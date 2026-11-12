@@ -871,6 +871,130 @@ def test_unsupported_version_mode_and_cli_verify_codes():
     print("test_unsupported_version_mode_and_cli_verify_codes: OK")
 
 
+def test_interactive_inspector_modals_and_jump_to_issue():
+    # 1. Valid map + replay with UnknownBeatmapFields, Normalization events, and Trailer bytes
+    osu_txt = (
+        "osu file format v14\n"
+        "[General]\nMode: 0\nAudioFilename: test.mp3\nCountdown: 1\n"
+        "[Editor]\nDistanceSpacing: 1.2\n"
+        "[Difficulty]\nCircleSize: 4\nOverallDifficulty: 7\nHPDrainRate: 5\n"
+        "[HitObjects]\n256,192,1500,1,0\n320,240,3500,1,0\n"
+    )
+    raw_bytes = osu_txt.encode("utf-8")
+    md5 = hashlib.md5(raw_bytes).hexdigest()
+    # Frame 0: dummy (256,-500) @ 0ms; Frame 1: real @ 1500ms; Frame 2: backward @ 1450ms; Frame 3: click @ 1500ms
+    frames_str = "0|256|-500|0,1500|256|192|4,-50|300|200|0,50|256|192|4,"
+    trailer_bytes = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+    osr_bytes = _build_test_osr(md5, "InspectPlayer", 20260101, 0, frames_str, trailer=trailer_bytes)
+
+    with tempfile.NamedTemporaryFile("wb", suffix=".osu", delete=False) as fm:
+        fm.write(raw_bytes)
+        osu_path = fm.name
+    with tempfile.NamedTemporaryFile("wb", suffix=".osr", delete=False) as fr:
+        fr.write(osr_bytes)
+        osr_path = fr.name
+
+    try:
+        vis = Visualizer(osu_path, replay_path=osr_path, headless=True)
+        vis.show_tech_hud = True
+        vis.update_playfield_layout()
+        vis.render()
+
+        # UnknownBeatmapFields list matches count
+        assert len(vis.verification.unknown_fields) >= 3
+        unk_hitboxes = [r for r, a in vis.tech_hud_hitboxes if a == "unknown_fields"]
+        assert unk_hitboxes, "Expected clickable unknown_fields row in Tech HUD"
+        assert vis._try_click_tech_hud(*unk_hitboxes[0].center)
+        assert vis.detail_modal_kind == "unknown_fields"
+        vis.render()
+        assert vis.detail_modal_rect.width > 0
+        vis.close_detail_modal()
+
+        # Trailer hex dump modal
+        tr_hitboxes = [r for r, a in vis.tech_hud_hitboxes if a == "trailer"]
+        assert tr_hitboxes, "Expected clickable trailer row in Tech HUD"
+        assert vis._try_click_tech_hud(*tr_hitboxes[0].center)
+        assert vis.detail_modal_kind == "trailer"
+        _, tr_sub, tr_rows, tr_jump = vis._build_modal_rows()
+        assert not tr_jump and len(tr_rows) == 1
+        assert "01 02 03 04 05 06 07 08" in tr_rows[0]["text"]
+        assert "8" in tr_sub
+        vis.close_detail_modal()
+
+        # Normalization replay_issues list + click jump + step Prev/Next
+        norm_hitboxes = [r for r, a in vis.tech_hud_hitboxes if a == "replay_issues"]
+        assert norm_hitboxes, "Expected clickable replay_issues row in Tech HUD"
+        assert vis._try_click_tech_hud(*norm_hitboxes[0].center)
+        assert vis.detail_modal_kind == "replay_issues"
+        vis.render()
+        assert len(vis.detail_modal_item_hitboxes) >= 2
+        first_box, first_idx = vis.detail_modal_item_hitboxes[0]
+        vis.jump_to_issue("replay_issues", first_idx)
+        assert vis.detail_modal_kind is None
+        assert not vis.is_playing
+        assert vis.focused_issue is not None
+        assert vis.focused_issue["tag"] == "InitialDummy"
+        vis.render()
+        assert vis.focus_btn_next_rect is not None
+        vis._try_click_focus_callout(*vis.focus_btn_next_rect.center)
+        assert vis.focused_issue["tag"] == "BackwardFrame"
+        assert abs(vis.current_time_ms - 1500.0) < 1e-3
+
+        # Jump to last click from Tech HUD
+        vis.seek_to(1600.0)
+        vis.render()
+        click_hb = [r for r, a in vis.tech_hud_hitboxes if a == "last_click"]
+        if click_hb:
+            assert vis._try_click_tech_hud(*click_hb[0].center)
+            assert abs(vis.current_time_ms - 1500.0) < 1e-3
+    finally:
+        for p in (osu_path, osr_path):
+            if os.path.exists(p):
+                os.remove(p)
+
+    # 2. Map with multiple Catmull unsupported sliders -> multi-item map_issues + jump to note #2
+    catmull_osu = (
+        "osu file format v14\n"
+        "[General]\nMode: 0\n"
+        "[Difficulty]\nCircleSize: 4\nOverallDifficulty: 7\nHPDrainRate: 5\n"
+        "SliderMultiplier: 1.4\nSliderTickRate: 1\n"
+        "[TimingPoints]\n0,500,4,1,0,100,1,0\n"
+        "[HitObjects]\n"
+        "100,100,1200,2,0,C|150:150|200:100,1,100\n"
+        "250,220,4200,2,0,C|300:220|350:260,1,100\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".osu", delete=False, encoding="utf-8") as fm2:
+        fm2.write(catmull_osu)
+        cm_path = fm2.name
+    try:
+        vis2 = Visualizer(cm_path, headless=True)
+        assert vis2.verification.status == "SKIPPED_UNSUPPORTED"
+        assert len(vis2.verification.map_issues) >= 2
+        assert vis2.verification.map_issues[0]["primary"] is True
+        assert abs(vis2.verification.map_issues[0]["time_ms"] - 1200.0) < 1e-3
+
+        vis2.show_tech_hud = True
+        vis2.update_playfield_layout()
+        vis2.render()
+        mi_hb = [r for r, a in vis2.tech_hud_hitboxes if a == "map_issues"]
+        assert mi_hb, "Expected clickable map_issues row in Tech HUD"
+        assert vis2._try_click_tech_hud(*mi_hb[0].center)
+        assert vis2.detail_modal_kind == "map_issues"
+        vis2.render()
+        assert len(vis2.detail_modal_item_hitboxes) >= 2
+        # Jump directly to second Catmull note at 4200ms
+        _, second_idx = vis2.detail_modal_item_hitboxes[1]
+        vis2.jump_to_issue("map_issues", second_idx)
+        assert not vis2.is_playing
+        assert abs(vis2.current_time_ms - 4200.0) < 1e-3
+        vis2.render()
+    finally:
+        if os.path.exists(cm_path):
+            os.remove(cm_path)
+
+    print("test_interactive_inspector_modals_and_jump_to_issue: OK")
+
+
 if __name__ == "__main__":
     test_linear_curve()
     test_bezier_multi_segment()
@@ -891,4 +1015,5 @@ if __name__ == "__main__":
     test_replay_pair_md5_and_normalization_bridge()
     test_visualizer_replay_source_switch_breaks_and_colours()
     test_unsupported_version_mode_and_cli_verify_codes()
+    test_interactive_inspector_modals_and_jump_to_issue()
     print("\nALL AUTOMATED TESTS PASSED!")

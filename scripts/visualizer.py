@@ -41,6 +41,7 @@ try:
         run_full_corpus_verification,
         beatmap_from_rust_json,
         get_rust_commit_hash,
+        scan_unknown_beatmap_fields,
     )
     from map_browser import MapBrowserManager, scan_all_maps, MapEntry
 except ImportError:
@@ -58,6 +59,7 @@ except ImportError:
         run_full_corpus_verification,
         beatmap_from_rust_json,
         get_rust_commit_hash,
+        scan_unknown_beatmap_fields,
     )
     from scripts.map_browser import MapBrowserManager, scan_all_maps, MapEntry
 
@@ -142,6 +144,27 @@ class Visualizer:
         self.tech_panel_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_dock_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
         self.btn_tech_close_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+
+        # Interactive diagnostic detail modal & playfield issue focus state
+        self.detail_modal_kind: Optional[str] = None
+        self.detail_modal_scroll: int = 0
+        self.detail_modal_max_scroll: int = 0
+        self.detail_modal_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+        self.detail_modal_close_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+        self.detail_modal_item_hitboxes: List[Tuple[pygame.Rect, int]] = []
+        self.detail_modal_scroll_track_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+        self.detail_modal_scroll_thumb_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
+        self.detail_modal_visible_rows: int = 12
+        self.focused_issue_kind: Optional[str] = None
+        self.focused_issue_idx: int = 0
+        self.focused_issue: Optional[Dict[str, Any]] = None
+        self.focus_btn_prev_rect: Optional[pygame.Rect] = None
+        self.focus_btn_next_rect: Optional[pygame.Rect] = None
+        self.focus_btn_list_rect: Optional[pygame.Rect] = None
+        self.focus_btn_close_rect: Optional[pygame.Rect] = None
+        self.tech_hud_hitboxes: List[Tuple[pygame.Rect, str]] = []
+        self.verif_hitboxes: List[Tuple[pygame.Rect, str, Optional[int]]] = []
+        self.verif_overlay_rect: pygame.Rect = pygame.Rect(0, 0, 0, 0)
 
         # Smooth keyboard repeat state for speed control
         self.speed_key_held: Optional[int] = None
@@ -238,6 +261,11 @@ class Visualizer:
             return
 
         self.beatmap_path = norm_path
+        self.detail_modal_kind = None
+        self.detail_modal_scroll = 0
+        self.focused_issue_kind = None
+        self.focused_issue_idx = 0
+        self.focused_issue = None
         pygame.display.set_caption(f"Rosea Visualizer - {os.path.basename(norm_path)}")
 
         # Parse with Python parser
@@ -1137,11 +1165,20 @@ class Visualizer:
         if self.show_tech_hud:
             self.render_recent_clicks()
 
+        # Render Focused Issue / Normalization Target on Playfield
+        self.focus_btn_prev_rect = None
+        self.focus_btn_next_rect = None
+        self.focus_btn_list_rect = None
+        self.focus_btn_close_rect = None
+        if self.focused_issue is not None:
+            self.render_focused_issue()
+
         # Render HUD & Diagnostics
         if self.show_hud:
             self.render_hud()
 
         # Render Technical Inspector HUD if toggled
+        self.tech_hud_hitboxes = []
         if self.show_tech_hud:
             self.render_tech_hud()
 
@@ -1153,8 +1190,19 @@ class Visualizer:
             self.render_toast()
 
         # Render Verification Details if toggled
+        self.verif_hitboxes = []
+        self.verif_overlay_rect = pygame.Rect(0, 0, 0, 0)
         if self.show_verification_detail:
             self.render_verification_overlay()
+
+        # Render Topmost Scrollable Detail / Issue Inspector Modal
+        self.detail_modal_item_hitboxes = []
+        self.detail_modal_rect = pygame.Rect(0, 0, 0, 0)
+        self.detail_modal_close_rect = pygame.Rect(0, 0, 0, 0)
+        self.detail_modal_scroll_track_rect = pygame.Rect(0, 0, 0, 0)
+        self.detail_modal_scroll_thumb_rect = pygame.Rect(0, 0, 0, 0)
+        if self.detail_modal_kind is not None:
+            self.render_detail_modal()
 
     def render_replay_cursor(self):
         pos, keys = self.replay.cursor_at(self.current_time_ms)
@@ -1992,6 +2040,484 @@ class Visualizer:
         t_surf = self.font_small.render(time_str, True, (160, 165, 185))
         self.screen.blit(t_surf, (pad_x, self.height - 22))
 
+    def get_issue_list_for_kind(self, kind: Optional[str]) -> List[Dict[str, Any]]:
+        if kind == "map_issues" and getattr(self, "verification", None):
+            return list(self.verification.map_issues)
+        if kind == "replay_issues" and getattr(self, "replay_verification", None):
+            return list(self.replay_verification.replay_issues)
+        return []
+
+    def open_detail_modal(self, kind: str):
+        self.detail_modal_kind = kind
+        self.detail_modal_scroll = 0
+
+    def close_detail_modal(self):
+        self.detail_modal_kind = None
+        self.detail_modal_scroll = 0
+
+    def scroll_detail_modal(self, delta: int):
+        self.detail_modal_scroll = max(
+            0, min(self.detail_modal_max_scroll, self.detail_modal_scroll + delta)
+        )
+
+    def _pause_for_inspection(self):
+        if self.is_playing:
+            self.toggle_playback()
+
+    def jump_to_issue(self, kind: str, idx: int):
+        """Seek and pause directly on the selected map issue or replay frame."""
+        issues = self.get_issue_list_for_kind(kind)
+        if not issues or idx < 0 or idx >= len(issues):
+            return
+        issue = issues[idx]
+        self.focused_issue_kind = kind
+        self.focused_issue_idx = idx
+        self.focused_issue = issue
+        self._pause_for_inspection()
+        target_t = issue.get("time_ms")
+        if target_t is not None:
+            self.seek_to(float(target_t))
+        self.detail_modal_kind = None
+        self.show_verification_detail = False
+        self.set_toast(f">> {issue.get('tag', 'Focus')}: {issue.get('summary', '')[:56]}", 2.5)
+
+    def jump_to_last_click(self):
+        """Seek and pause directly on the latest replay/live click event."""
+        click_ev = self.get_latest_click_at(self.current_time_ms)
+        if click_ev is None:
+            return
+        self._pause_for_inspection()
+        self.seek_to(float(click_ev.time_ms))
+        delta_txt = f"{click_ev.delta_ms:+.1f} мс" if click_ev.delta_ms is not None else "мимо ноты"
+        self.focused_issue_kind = "click"
+        self.focused_issue_idx = 0
+        self.focused_issue = {
+            "tag": f"Клик {click_ev.key}",
+            "summary": click_ev.badge_text,
+            "time_ms": float(click_ev.time_ms),
+            "x": float(click_ev.x),
+            "y": float(click_ev.y),
+            "raw_line": f"Дельта: {delta_txt} | Результат: {click_ev.result}",
+        }
+        self.set_toast(f">> Переход к клику: {click_ev.badge_text}", 2.0)
+
+    def step_focused_issue(self, delta: int):
+        if self.focused_issue_kind not in ("map_issues", "replay_issues"):
+            return
+        issues = self.get_issue_list_for_kind(self.focused_issue_kind)
+        if not issues:
+            return
+        new_idx = (self.focused_issue_idx + delta) % len(issues)
+        self.jump_to_issue(self.focused_issue_kind, new_idx)
+
+    def _handle_tech_hud_action(self, action_id: str):
+        if action_id == "unknown_fields":
+            self.open_detail_modal("unknown_fields")
+        elif action_id == "trailer":
+            self.open_detail_modal("trailer")
+        elif action_id == "map_issues":
+            issues = self.get_issue_list_for_kind("map_issues")
+            if len(issues) == 1 and issues[0].get("time_ms") is not None:
+                self.jump_to_issue("map_issues", 0)
+            else:
+                self.open_detail_modal("map_issues")
+        elif action_id == "replay_issues":
+            issues = self.get_issue_list_for_kind("replay_issues")
+            if len(issues) == 1 and issues[0].get("time_ms") is not None:
+                self.jump_to_issue("replay_issues", 0)
+            else:
+                self.open_detail_modal("replay_issues")
+        elif action_id == "last_click":
+            self.jump_to_last_click()
+
+    def _handle_verif_action(self, action_kind: str, action_idx: Optional[int]):
+        if action_kind in ("unknown_fields", "trailer", "map_issues", "replay_issues"):
+            self.open_detail_modal(action_kind)
+        elif action_kind == "map_issue_idx" and action_idx is not None:
+            self.jump_to_issue("map_issues", action_idx)
+        elif action_kind == "replay_issue_idx" and action_idx is not None:
+            self.jump_to_issue("replay_issues", action_idx)
+
+    def _try_click_verification(self, mx: int, my: int) -> bool:
+        for hit_r, act_kind, act_idx in self.verif_hitboxes:
+            if hit_r.collidepoint(mx, my):
+                self._handle_verif_action(act_kind, act_idx)
+                return True
+        return self.verif_overlay_rect.collidepoint(mx, my)
+
+    def _try_click_focus_callout(self, mx: int, my: int) -> bool:
+        if self.focus_btn_close_rect and self.focus_btn_close_rect.collidepoint(mx, my):
+            self.focused_issue = None
+            return True
+        if self.focus_btn_prev_rect and self.focus_btn_prev_rect.collidepoint(mx, my):
+            self.step_focused_issue(-1)
+            return True
+        if self.focus_btn_next_rect and self.focus_btn_next_rect.collidepoint(mx, my):
+            self.step_focused_issue(1)
+            return True
+        if (
+            self.focus_btn_list_rect
+            and self.focus_btn_list_rect.collidepoint(mx, my)
+            and self.focused_issue_kind in ("map_issues", "replay_issues")
+        ):
+            self.open_detail_modal(self.focused_issue_kind)
+            return True
+        return False
+
+    def _try_click_tech_hud(self, mx: int, my: int) -> bool:
+        for hit_r, act_id in self.tech_hud_hitboxes:
+            if hit_r.collidepoint(mx, my):
+                self._handle_tech_hud_action(act_id)
+                return True
+        return self.tech_panel_rect.collidepoint(mx, my)
+
+    def render_focused_issue(self):
+        """Highlight the targeted error note / replay normalization frame on the playfield."""
+        issue = self.focused_issue
+        if not issue:
+            return
+        px = issue.get("x")
+        py = issue.get("y")
+        tag = str(issue.get("tag", "Focus"))
+
+        if px is not None and py is not None:
+            sx, sy = self.osu_to_screen(float(px), float(py))
+            in_pf = self.pf_rect.inflate(16, 16).collidepoint(sx, sy)
+            pulse_r = int(max(18.0, self.screen_radius * 1.3) + math.sin(time.time() * 7.0) * 3.0)
+            ring_col = (250, 204, 21) if not tag.startswith("RUST") else (248, 113, 113)
+            if in_pf:
+                pygame.draw.circle(self.screen, ring_col, (sx, sy), pulse_r, 3)
+                pygame.draw.circle(self.screen, (255, 255, 255), (sx, sy), max(6, int(self.screen_radius * 0.4)), 1)
+                pygame.draw.line(self.screen, ring_col, (sx - pulse_r - 5, sy), (sx + pulse_r + 5, sy), 1)
+                pygame.draw.line(self.screen, ring_col, (sx, sy - pulse_r - 5), (sx, sy + pulse_r + 5), 1)
+                lbl = self.font_bold.render(f"[{tag}] ({float(px):.0f}, {float(py):.0f})", True, ring_col)
+                lx = max(self.pf_rect.x + 6, min(self.pf_rect.right - lbl.get_width() - 14, sx - lbl.get_width() // 2))
+                ly = sy - pulse_r - 24
+                if ly < self.pf_rect.y + 6:
+                    ly = sy + pulse_r + 6
+                pill = pygame.Surface((lbl.get_width() + 10, 20), pygame.SRCALPHA)
+                pill.fill((14, 16, 26, 225))
+                pygame.draw.rect(pill, ring_col, (0, 0, pill.get_width(), 20), 1, border_radius=4)
+                pill.blit(lbl, (5, 2))
+                self.screen.blit(pill, (lx, ly))
+            else:
+                cx = max(self.pf_rect.x + 12, min(self.pf_rect.right - 12, sx))
+                cy = max(self.pf_rect.y + 12, min(self.pf_rect.bottom - 58, sy))
+                pygame.draw.circle(self.screen, ring_col, (cx, cy), 9, 2)
+                off_txt = self.font_bold.render(
+                    f"[{tag}] ВНЕ ПОЛЯ ({float(px):.0f}, {float(py):.0f})", True, ring_col
+                )
+                ox = max(self.pf_rect.x + 8, min(self.pf_rect.right - off_txt.get_width() - 16, cx - off_txt.get_width() // 2))
+                oy = cy + 12 if cy < self.pf_rect.centery else cy - 30
+                pill = pygame.Surface((off_txt.get_width() + 12, 22), pygame.SRCALPHA)
+                pill.fill((24, 18, 28, 235))
+                pygame.draw.rect(pill, ring_col, (0, 0, pill.get_width(), 22), 1, border_radius=4)
+                pill.blit(off_txt, (6, 3))
+                self.screen.blit(pill, (ox, oy))
+
+        # Bottom compact inspector callout inside playfield
+        box_w = min(self.pf_rect.width - 16, 680)
+        box_h = 46
+        bx = self.pf_rect.x + (self.pf_rect.width - box_w) // 2
+        by = self.pf_rect.bottom - box_h - 8
+        callout = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+        callout.fill((16, 18, 28, 240))
+        border_c = (248, 113, 113) if tag.startswith("RUST") else (250, 204, 21)
+        pygame.draw.rect(callout, border_c, (0, 0, box_w, box_h), 1, border_radius=6)
+
+        issues = self.get_issue_list_for_kind(self.focused_issue_kind)
+        mx, my = pygame.mouse.get_pos()
+
+        # Right-side action buttons in callout
+        cur_x = box_w - 8
+        btn_y = 6
+        btn_h = 20
+
+        def _draw_mini_btn(label: str, bg: Tuple[int, int, int], fg: Tuple[int, int, int]) -> pygame.Rect:
+            nonlocal cur_x
+            txt = self.font_small.render(label, True, fg)
+            bw = txt.get_width() + 10
+            cur_x -= bw
+            rel_r = pygame.Rect(cur_x, btn_y, bw, btn_h)
+            abs_r = pygame.Rect(bx + cur_x, by + btn_y, bw, btn_h)
+            hov = abs_r.collidepoint(mx, my)
+            col = (min(255, bg[0] + 25), min(255, bg[1] + 25), min(255, bg[2] + 25)) if hov else bg
+            pygame.draw.rect(callout, col, rel_r, border_radius=3)
+            pygame.draw.rect(callout, (100, 115, 155), rel_r, 1, border_radius=3)
+            callout.blit(txt, (rel_r.x + 5, rel_r.y + 2))
+            cur_x -= 4
+            return abs_r
+
+        self.focus_btn_close_rect = _draw_mini_btn("✕", (55, 25, 35), (248, 160, 160))
+        if self.focused_issue_kind in ("map_issues", "replay_issues"):
+            self.focus_btn_list_rect = _draw_mini_btn("☰ Список", (32, 46, 76), (190, 215, 255))
+        if len(issues) > 1:
+            self.focus_btn_next_rect = _draw_mini_btn("▶", (35, 42, 62), (220, 225, 240))
+            cnt_surf = self.font_small.render(
+                f"{self.focused_issue_idx + 1}/{len(issues)}", True, (180, 190, 215)
+            )
+            cur_x -= cnt_surf.get_width() + 4
+            callout.blit(cnt_surf, (cur_x, btn_y + 3))
+            cur_x -= 4
+            self.focus_btn_prev_rect = _draw_mini_btn("◀", (35, 42, 62), (220, 225, 240))
+
+        t_str = f"{issue['time_ms']:.1f} мс" if issue.get("time_ms") is not None else "без времени"
+        line_str = f"Стр.{issue['line']} " if issue.get("line") is not None else ""
+        head_line = f"[{tag}] {line_str}({t_str}): {issue.get('summary', '')}"
+        sub_line = issue.get("raw_line") or issue.get("detail") or "Нажмите Esc или ✕ чтобы скрыть"
+
+        prev_clip = callout.get_clip()
+        callout.set_clip(pygame.Rect(8, 2, max(40, cur_x - 10), 22))
+        callout.blit(self.font_small.render(head_line, True, border_c), (10, 5))
+        callout.set_clip(pygame.Rect(8, 24, box_w - 16, 20))
+        callout.blit(self.font_small.render(str(sub_line), True, (190, 198, 215)), (10, 24))
+        callout.set_clip(prev_clip)
+
+        self.screen.blit(callout, (bx, by))
+
+    def _build_modal_rows(self) -> Tuple[str, str, List[Dict[str, Any]], bool]:
+        """Return (title, subtitle, rows, jumpable) for active detail modal."""
+        kind = self.detail_modal_kind
+        if kind == "unknown_fields":
+            fields = list(getattr(self.verification, "unknown_fields", []))
+            if not fields and self.beatmap_path:
+                fields = scan_unknown_beatmap_fields(self.beatmap_path)
+            rows = [
+                {
+                    "tag": f.get("section", "?"),
+                    "tag_col": (251, 191, 36) if f.get("kind") == "section" else (147, 197, 253),
+                    "meta": f"Стр. {f.get('line', '?')}",
+                    "text": f.get("text", ""),
+                    "idx": i,
+                }
+                for i, f in enumerate(fields)
+            ]
+            return (
+                f"Неизвестные секции и поля .osu ({len(rows)})",
+                "Игнорируются ядром Rust при расчёте игры (аудио, редактор, прочие секции).",
+                rows,
+                False,
+            )
+
+        if kind == "trailer":
+            rv = getattr(self, "replay_verification", None)
+            rows: List[Dict[str, Any]] = []
+            if rv and rv.trailer_hex:
+                bytes_hex = rv.trailer_hex.split()
+                base_off = rv.trailer_offset
+                for off in range(0, len(bytes_hex), 16):
+                    chunk = bytes_hex[off : off + 16]
+                    ascii_part = rv.trailer_ascii[off : off + 16]
+                    rows.append(
+                        {
+                            "tag": f"0x{base_off + off:06x}",
+                            "tag_col": (251, 191, 36),
+                            "meta": f"+{off:03d}",
+                            "text": f"{' '.join(chunk):<47}  |{ascii_part}|",
+                            "idx": len(rows),
+                        }
+                    )
+                hdr = (rv.rust_replay_data or {}).get("header") or {}
+                total_sz = hdr.get("trailer_size", len(bytes_hex))
+                i64_note = f" | i64(LE): {rv.trailer_i64_le}" if rv.trailer_i64_le is not None else ""
+                sub = f"Смещение: {base_off} (0x{base_off:x}) | Размер: {total_sz} байт{i64_note} (не интерпретируется Rosea)"
+            else:
+                sub = "В реплее нет неиспользуемых байтов хвоста."
+            return ("Неиспользуемые байты хвоста .osr (Opaque Trailer)", sub, rows, False)
+
+        if kind == "map_issues":
+            issues = self.get_issue_list_for_kind("map_issues")
+            rows = []
+            for i, it in enumerate(issues):
+                t_ms = it.get("time_ms")
+                t_str = f"{t_ms:08.1f} мс" if t_ms is not None else "без времени"
+                line_s = f"Стр.{it['line']}" if it.get("line") is not None else ""
+                obj_s = f" #{it['object_id']}" if it.get("object_id") is not None else ""
+                meta = f"{t_str}  {line_s}{obj_s}".strip()
+                tag = str(it.get("tag", "Issue"))
+                tcol = (248, 113, 113) if (it.get("primary") or tag.startswith("Mismatch")) else (251, 191, 36)
+                rows.append(
+                    {
+                        "tag": tag,
+                        "tag_col": tcol,
+                        "meta": meta,
+                        "text": it.get("summary") or it.get("raw_line", ""),
+                        "jumpable": True,
+                        "idx": i,
+                    }
+                )
+            return (
+                f"Проблемные ноты и ошибки карты ({len(rows)})",
+                "Нажмите на любую строку, чтобы перейти и поставить паузу на этой ноте / времени.",
+                rows,
+                True,
+            )
+
+        if kind == "replay_issues":
+            issues = self.get_issue_list_for_kind("replay_issues")
+            rows = []
+            for i, it in enumerate(issues):
+                t_ms = it.get("time_ms")
+                t_str = f"{t_ms:08.1f} мс" if t_ms is not None else "-"
+                idx_s = f"Кадр #{it['index']}" if it.get("index") is not None else ""
+                tag = str(it.get("tag", "Norm"))
+                tcol = (
+                    (248, 113, 113)
+                    if tag.startswith("RUST") or tag == "Mismatch"
+                    else ((251, 146, 60) if tag in ("InitialDummy", "BackwardFrame") else (110, 231, 183))
+                )
+                rows.append(
+                    {
+                        "tag": tag,
+                        "tag_col": tcol,
+                        "meta": f"{t_str}  {idx_s}".strip(),
+                        "text": f"{it.get('summary', '')}  {it.get('detail', '')}".strip(),
+                        "jumpable": t_ms is not None,
+                        "idx": i,
+                    }
+                )
+            return (
+                f"Кадры нормализации и ошибки реплея ({len(rows)})",
+                "Нажмите на строку, чтобы перейти к кадру и подсветить позицию курсора на поле.",
+                rows,
+                True,
+            )
+
+        return ("Детали", "", [], False)
+
+    def render_detail_modal(self):
+        """Render scrollable detail/issue inspector modal centered on screen."""
+        modal_w = min(880, self.width - 44)
+        modal_h = min(540, self.height - 70)
+        mx0 = (self.width - modal_w) // 2
+        my0 = (self.height - modal_h) // 2
+        self.detail_modal_rect = pygame.Rect(mx0, my0, modal_w, modal_h)
+
+        # Dim backdrop
+        dim = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        dim.fill((6, 8, 14, 150))
+        self.screen.blit(dim, (0, 0))
+
+        surf = pygame.Surface((modal_w, modal_h), pygame.SRCALPHA)
+        surf.fill((16, 18, 28, 250))
+        pygame.draw.rect(surf, (110, 130, 175), (0, 0, modal_w, modal_h), 2, border_radius=8)
+
+        title, subtitle, rows, jumpable = self._build_modal_rows()
+
+        # Header & Close button
+        surf.blit(self.font_title.render(title, True, (255, 255, 255)), (18, 12))
+        surf.blit(self.font_small.render(subtitle, True, (165, 175, 200)), (18, 40))
+
+        cw, ch = 26, 24
+        cx, cy = modal_w - cw - 14, 14
+        self.detail_modal_close_rect = pygame.Rect(mx0 + cx, my0 + cy, cw, ch)
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        hov_close = self.detail_modal_close_rect.collidepoint(mouse_x, mouse_y)
+        pygame.draw.rect(
+            surf, (95, 30, 45) if hov_close else (50, 22, 32), (cx, cy, cw, ch), border_radius=4
+        )
+        pygame.draw.rect(surf, (200, 80, 100), (cx, cy, cw, ch), 1, border_radius=4)
+        x_txt = self.font_bold.render("X", True, (255, 190, 190))
+        surf.blit(x_txt, x_txt.get_rect(center=(cx + cw // 2, cy + ch // 2)))
+
+        list_x = 14
+        list_y = 66
+        list_h = modal_h - list_y - 34
+        sb_w = 12
+        list_w = modal_w - list_x * 2 - sb_w - 6
+        row_h = 26
+        visible_rows = max(1, list_h // row_h)
+        self.detail_modal_visible_rows = visible_rows
+        self.detail_modal_max_scroll = max(0, len(rows) - visible_rows)
+        self.detail_modal_scroll = max(
+            0, min(self.detail_modal_max_scroll, self.detail_modal_scroll)
+        )
+
+        pygame.draw.rect(surf, (11, 13, 20), (list_x, list_y, list_w, list_h), border_radius=5)
+        pygame.draw.rect(surf, (45, 52, 75), (list_x, list_y, list_w, list_h), 1, border_radius=5)
+
+        if not rows:
+            empty_s = self.font_main.render("Записи отсутствуют", True, (140, 150, 175))
+            surf.blit(empty_s, empty_s.get_rect(center=(list_x + list_w // 2, list_y + list_h // 2)))
+        else:
+            prev_clip = surf.get_clip()
+            start_i = self.detail_modal_scroll
+            end_i = min(len(rows), start_i + visible_rows)
+            for vis_i, r_idx in enumerate(range(start_i, end_i)):
+                row = rows[r_idx]
+                ry = list_y + 2 + vis_i * row_h
+                rel_row = pygame.Rect(list_x + 2, ry, list_w - 4, row_h - 2)
+                abs_row = pygame.Rect(mx0 + rel_row.x, my0 + rel_row.y, rel_row.width, rel_row.height)
+                can_jump = bool(row.get("jumpable", jumpable))
+                hov = abs_row.collidepoint(mouse_x, mouse_y)
+                bg = (
+                    (36, 48, 76)
+                    if (hov and can_jump)
+                    else ((26, 32, 48) if hov else ((18, 21, 32) if vis_i % 2 == 0 else (14, 17, 26)))
+                )
+                pygame.draw.rect(surf, bg, rel_row, border_radius=3)
+                if hov and can_jump:
+                    pygame.draw.rect(surf, (96, 165, 250), rel_row, 1, border_radius=3)
+
+                # Tag pill
+                t_col = row["tag_col"]
+                tag_surf = self.font_small.render(str(row["tag"]), True, t_col)
+                tag_w = min(135, tag_surf.get_width() + 10)
+                tag_rect = pygame.Rect(rel_row.x + 4, rel_row.y + 3, tag_w, row_h - 8)
+                pygame.draw.rect(surf, (25, 30, 46), tag_rect, border_radius=3)
+                pygame.draw.rect(surf, t_col, tag_rect, 1, border_radius=3)
+                surf.set_clip(tag_rect)
+                surf.blit(tag_surf, (tag_rect.x + 5, tag_rect.y + 1))
+
+                # Meta column (line / timestamp)
+                meta_x = tag_rect.right + 8
+                meta_surf = self.font_small.render(str(row["meta"]), True, (160, 175, 205))
+                meta_w = min(155, max(54, meta_surf.get_width() + 4))
+                surf.set_clip(pygame.Rect(meta_x, rel_row.y, meta_w, rel_row.height))
+                surf.blit(meta_surf, (meta_x, rel_row.y + 4))
+
+                # Right hint & main text
+                jump_hint_w = 0
+                if can_jump and hov:
+                    jh = self.font_small.render("[-> Перейти]", True, (125, 211, 252))
+                    jump_hint_w = jh.get_width() + 10
+                    surf.set_clip(rel_row)
+                    surf.blit(jh, (rel_row.right - jump_hint_w + 4, rel_row.y + 4))
+
+                txt_x = meta_x + meta_w + 8
+                txt_w = max(40, rel_row.right - txt_x - jump_hint_w - 6)
+                surf.set_clip(pygame.Rect(txt_x, rel_row.y, txt_w, rel_row.height))
+                surf.blit(
+                    self.font_small.render(str(row["text"]), True, (225, 230, 242)),
+                    (txt_x, rel_row.y + 4),
+                )
+                surf.set_clip(prev_clip)
+
+                if can_jump:
+                    self.detail_modal_item_hitboxes.append((abs_row, int(row["idx"])))
+
+        # Scrollbar
+        sb_x = list_x + list_w + 6
+        track_rel = pygame.Rect(sb_x, list_y, sb_w, list_h)
+        self.detail_modal_scroll_track_rect = pygame.Rect(mx0 + sb_x, my0 + list_y, sb_w, list_h)
+        pygame.draw.rect(surf, (24, 28, 42), track_rel, border_radius=4)
+        if len(rows) > visible_rows:
+            thumb_h = max(24, int(list_h * visible_rows / len(rows)))
+            avail = max(1, list_h - thumb_h)
+            thumb_y = list_y + int(avail * self.detail_modal_scroll / max(1, self.detail_modal_max_scroll))
+            thumb_rel = pygame.Rect(sb_x + 1, thumb_y, sb_w - 2, thumb_h)
+            self.detail_modal_scroll_thumb_rect = pygame.Rect(
+                mx0 + thumb_rel.x, my0 + thumb_rel.y, thumb_rel.width, thumb_rel.height
+            )
+            pygame.draw.rect(surf, (96, 130, 195), thumb_rel, border_radius=4)
+
+        footer = "Колесо мыши / ↑↓: прокрутка | Esc или X: закрыть"
+        if jumpable:
+            footer = "Клик по строке: перейти к ноте/кадру | Колесо / ↑↓: прокрутка | Esc: закрыть"
+        surf.blit(self.font_small.render(footer, True, (140, 150, 175)), (16, modal_h - 24))
+
+        self.screen.blit(surf, (mx0, my0))
+
     def render_tech_hud(self):
         """Render in-depth technical inspection overlay as a side dock without overlapping playfield."""
         panel_x = self.tech_panel_rect.x
@@ -2072,9 +2598,17 @@ class Visualizer:
             pair_md5_col = (180, 190, 210)
 
         map_warns = getattr(self.verification, "warnings", []) or getattr(self.beatmap, "rust_warnings", [])
+        unk_fields = getattr(self.verification, "unknown_fields", [])
         unk_count = sum(w.get("count", 0) for w in map_warns if w.get("code") == "UnknownBeatmapFields")
-        map_warn_str = f"UnknownBeatmapFields ({unk_count})" if unk_count > 0 else "Нет"
+        if unk_count == 0 and unk_fields:
+            unk_count = len(unk_fields)
+        map_warn_str = f"UnknownBeatmapFields ({unk_count}) [список]" if unk_count > 0 else "Нет"
         map_warn_col = (251, 191, 36) if unk_count > 0 else (140, 180, 150)
+        map_warn_act = "unknown_fields" if unk_count > 0 else None
+
+        map_issues = getattr(self.verification, "map_issues", [])
+        rep_issues = getattr(rv, "replay_issues", []) if rv else []
+        rep_eng_act = "replay_issues" if (rv and rep_issues and rv.status != "PASS") else None
 
         # 2. Timing calculations
         un_tp, act_tp = self.beatmap.get_timing_at(t)
@@ -2141,75 +2675,82 @@ class Visualizer:
                 br_str += f" | Colours: {'/'.join(ov_parts)}"
             br_col = (200, 210, 230)
 
-        items = [
-            ("ROW", "Движок карты:", engine_str, eng_col),
-            ("ROW", "Движок реплея:", rep_eng_str, rep_eng_col),
-            ("ROW", "Файл:", os.path.basename(self.beatmap_path), (220, 225, 240)),
-            ("ROW", "MD5 пары:", pair_md5_str, pair_md5_col),
-            ("ROW", "Предупр. карты:", map_warn_str, map_warn_col),
-            ("ROW", "Карта / Цвета:", br_str, br_col),
-            ("ROW", "Время карты:", f"{t:08.2f} мс ({t/1000.0:.2f} сек)", (250, 204, 21)),
-            ("SECTION", "// ТАЙМИНГ & СКОРОСТЬ"),
-            ("ROW", "BPM / BeatLen:", f"{bpm:.1f} BPM ({beat_len:.2f} мс)", (220, 225, 240)),
-            ("ROW", "Скорость (SV):", f"{sv:.2f}x (TP строка {tp_line})", (220, 225, 240)),
-            ("SECTION", "// СЛОЖНОСТЬ (OD / AR / CS)"),
-            ("ROW", "Радиус CS:", f"{circle_r_osu:.2f} osu!px ({circle_r_screen:.1f} px)", (220, 225, 240)),
-            ("ROW", "Появление AR:", f"Preempt {preempt:.1f} мс, FadeIn {fade_in:.1f} мс", (220, 225, 240)),
-            ("ROW", "Окна OD:", f"300: ±{w300:.1f}мс | 100: ±{w100:.1f}мс | 50: ±{w50:.1f}мс", (167, 139, 250)),
-            ("SECTION", "// АКТИВНЫЙ ОБЪЕКТ"),
+        items: List[Tuple[Any, ...]] = [
+            ("ROW", "Движок карты:", engine_str, eng_col, None),
+            ("ROW", "Движок реплея:", rep_eng_str + (" [список]" if rep_eng_act else ""), rep_eng_col, rep_eng_act),
+            ("ROW", "Файл:", os.path.basename(self.beatmap_path), (220, 225, 240), None),
+            ("ROW", "MD5 пары:", pair_md5_str, pair_md5_col, None),
+            ("ROW", "Предупр. карты:", map_warn_str, map_warn_col, map_warn_act),
         ]
+        if map_issues:
+            iss_col = (248, 113, 113) if self.verification.status == "FAIL" else (251, 191, 36)
+            items.append(("ROW", "Пробл. карты:", f"{len(map_issues)} нот/ошибок [список]", iss_col, "map_issues"))
+        items.extend([
+            ("ROW", "Карта / Цвета:", br_str, br_col, None),
+            ("ROW", "Время карты:", f"{t:08.2f} мс ({t/1000.0:.2f} сек)", (250, 204, 21), None),
+            ("SECTION", "// ТАЙМИНГ & СКОРОСТЬ"),
+            ("ROW", "BPM / BeatLen:", f"{bpm:.1f} BPM ({beat_len:.2f} мс)", (220, 225, 240), None),
+            ("ROW", "Скорость (SV):", f"{sv:.2f}x (TP строка {tp_line})", (220, 225, 240), None),
+            ("SECTION", "// СЛОЖНОСТЬ (OD / AR / CS)"),
+            ("ROW", "Радиус CS:", f"{circle_r_osu:.2f} osu!px ({circle_r_screen:.1f} px)", (220, 225, 240), None),
+            ("ROW", "Появление AR:", f"Preempt {preempt:.1f} мс, FadeIn {fade_in:.1f} мс", (220, 225, 240), None),
+            ("ROW", "Окна OD:", f"300: ±{w300:.1f}мс | 100: ±{w100:.1f}мс | 50: ±{w50:.1f}мс", (167, 139, 250), None),
+            ("SECTION", "// АКТИВНЫЙ ОБЪЕКТ"),
+        ])
 
         if active_obj:
             obj_kind_str = active_obj.kind.capitalize()
             if active_obj.kind == "slider":
                 obj_kind_str = f"Slider ({active_obj.curve_type}, sp={active_obj.spans}, len={active_obj.declared_length:.1f})"
-            items.append(("ROW", "Объект:", f"#{active_obj.id} [Строка {active_obj.line}]: {obj_kind_str}", (244, 114, 182)))
-            items.append(("ROW", "Время начала:", f"{active_obj.time:.1f} мс (дельта {active_obj.time - t:+.1f} мс)", (220, 225, 240)))
-            items.append(("ROW", "Координаты:", f"({active_obj.x:.1f}, {active_obj.y:.1f}) osu!px", (220, 225, 240)))
+            items.append(("ROW", "Объект:", f"#{active_obj.id} [Строка {active_obj.line}]: {obj_kind_str}", (244, 114, 182), None))
+            items.append(("ROW", "Время начала:", f"{active_obj.time:.1f} мс (дельта {active_obj.time - t:+.1f} мс)", (220, 225, 240), None))
+            items.append(("ROW", "Координаты:", f"({active_obj.x:.1f}, {active_obj.y:.1f}) osu!px", (220, 225, 240), None))
         else:
-            items.append(("ROW", "Объект:", "Нет активных объектов", (140, 145, 165)))
+            items.append(("ROW", "Объект:", "Нет активных объектов", (140, 145, 165), None))
 
         if self.replay or rv:
             items.append(("SECTION", "// РЕПЛЕЙ ИГРОКА"))
             if self.replay:
-                items.append(("ROW", "Курсор:", cursor_str, (220, 225, 240)))
-                items.append(("ROW", "Дистанция:", dist_str, dist_col))
+                items.append(("ROW", "Курсор:", cursor_str, (220, 225, 240), None))
+                items.append(("ROW", "Дистанция:", dist_str, dist_col, None))
                 latest_click = self.get_latest_click_at(t)
                 if latest_click:
-                    items.append(("ROW", "Посл. клик:", latest_click.badge_text, latest_click.color))
+                    items.append(("ROW", "Посл. клик:", latest_click.badge_text, latest_click.color, "last_click"))
             if rv:
                 norm = rv.normalization
+                norm_act = "replay_issues" if rep_issues else None
                 if norm is not None:
                     c_t = norm.get("changed_times", 0)
                     c_d = norm.get("initial_dummy_removed", 0)
                     c_b = norm.get("backward_removed", 0)
-                    norm_str = f"time:{c_t} dummy:{c_d} back:{c_b}"
+                    suffix = " [список]" if rep_issues else ""
+                    norm_str = f"time:{c_t} dummy:{c_d} back:{c_b}{suffix}"
                     norm_col = (251, 191, 36) if (c_t + c_d + c_b) > 0 else (140, 180, 150)
                 else:
-                    norm_str = rv.error_code or "Не нормализован"
+                    norm_str = (rv.error_code or "Не нормализован") + (" [список]" if rep_issues else "")
                     norm_col = (251, 146, 60)
-                items.append(("ROW", "Нормализация:", norm_str, norm_col))
+                items.append(("ROW", "Нормализация:", norm_str, norm_col, norm_act))
                 trailer_w = [w for w in rv.warnings if w.get("code") == "ReplayTrailerNotInterpreted"]
-                if trailer_w:
-                    tr_sz = trailer_w[0].get("trailer_size", 0)
-                    items.append(("ROW", "Предупр. .osr:", f"ReplayTrailerNotInterpreted ({tr_sz} B)", (251, 191, 36)))
+                if trailer_w or rv.trailer_hex:
+                    tr_sz = trailer_w[0].get("trailer_size", 0) if trailer_w else len(rv.trailer_hex.split())
+                    items.append(("ROW", "Предупр. .osr:", f"ReplayTrailerNotInterpreted ({tr_sz} B) [дамп]", (251, 191, 36), "trailer"))
         else:
             latest_click = self.get_latest_click_at(t)
             if latest_click:
                 items.append(("SECTION", "// ИНСПЕКЦИЯ КЛИКОВ"))
-                items.append(("ROW", "Посл. клик:", latest_click.badge_text, latest_click.color))
+                items.append(("ROW", "Посл. клик:", latest_click.badge_text, latest_click.color, "last_click"))
 
         items.append(("SECTION", "// АУДИО & СИНХРОНИЗАЦИЯ"))
         track_name = os.path.basename(self.audio_path) if self.audio_path else "Не найден (только клики)"
         track_col = (74, 222, 128) if self.music_loaded else (251, 146, 60)
-        items.append(("ROW", "Трек:", track_name, track_col))
+        items.append(("ROW", "Трек:", track_name, track_col, None))
         lead_in = getattr(self.beatmap, "audio_lead_in", 0)
         set_id = getattr(self.beatmap, "beatmapset_id", None)
         if set_id is not None and set_id > 0:
-            items.append(("ROW", "SetID / LeadIn:", f"{set_id} / {lead_in} мс", (220, 225, 240)))
-        items.append(("ROW", "Смещение:", f"{self.audio_offset_ms:+.1f} мс [- / + / Alt+\u2190\u2192]", (220, 225, 240)))
+            items.append(("ROW", "SetID / LeadIn:", f"{set_id} / {lead_in} мс", (220, 225, 240), None))
+        items.append(("ROW", "Смещение:", f"{self.audio_offset_ms:+.1f} мс [- / + / Alt+\u2190\u2192]", (220, 225, 240), None))
         vol_str = "Выключен [U]" if self.audio_muted else f"Трек {int(self.music_volume*100)}% | Клики {int(self.hitsound_volume*100)}% [U]"
-        items.append(("ROW", "Громкость:", vol_str, (167, 139, 250)))
+        items.append(("ROW", "Громкость:", vol_str, (167, 139, 250), None))
 
         y_pos = 38
         val_x = 135
@@ -2226,10 +2767,21 @@ class Visualizer:
                 surf.blit(sec_surf, (14, y_pos))
                 y_pos += sec_step
             else:
-                _, label, val, val_col = item
+                _, label, val, val_col = item[:4]
+                act_id = item[4] if len(item) > 4 else None
+                rel_row = pygame.Rect(8, y_pos - 1, panel_w - 16, row_step)
+                abs_row = pygame.Rect(panel_x + rel_row.x, panel_y + rel_row.y, rel_row.width, rel_row.height)
+                if act_id is not None:
+                    self.tech_hud_hitboxes.append((abs_row, act_id))
+                    is_hov = (self.detail_modal_kind is None) and abs_row.collidepoint(mx, my)
+                    if is_hov:
+                        pygame.draw.rect(surf, (36, 46, 72), rel_row, border_radius=3)
+                        pygame.draw.rect(surf, (96, 165, 250), rel_row, 1, border_radius=3)
+                    else:
+                        pygame.draw.rect(surf, (24, 28, 44), rel_row, border_radius=3)
                 lbl_surf = self.font_small.render(label, True, (148, 163, 184))
                 surf.blit(lbl_surf, (14, y_pos))
-                surf.set_clip(pygame.Rect(val_x, y_pos, max(20, panel_w - val_x - 10), row_step + 2))
+                surf.set_clip(pygame.Rect(val_x, y_pos, max(20, panel_w - val_x - 12), row_step + 2))
                 val_surf = self.font_small.render(val, True, val_col)
                 surf.blit(val_surf, (val_x, y_pos))
                 surf.set_clip(prev_clip)
@@ -2243,6 +2795,7 @@ class Visualizer:
         overlay_h = min(580, self.height - 80)
         ox = (self.width - overlay_w) // 2
         oy = (self.height - overlay_h) // 2
+        self.verif_overlay_rect = pygame.Rect(ox, oy, overlay_w, overlay_h)
 
         surf = pygame.Surface((overlay_w, overlay_h), pygame.SRCALPHA)
         surf.fill((16, 18, 26, 245))
@@ -2304,21 +2857,46 @@ class Visualizer:
 
         sto = getattr(self.beatmap, "slider_track_override", None)
         sb = getattr(self.beatmap, "slider_border", None)
-        lines = [
-            (f"Beatmap: {os.path.basename(self.beatmap_path)}  |  MD5: {md5_val or '-'}", (220, 225, 240)),
+        map_issues = getattr(self.verification, "map_issues", [])
+        rep_issues = getattr(rv, "replay_issues", []) if rv else []
+        unk_count = sum(w.get("count", 0) for w in map_warns if w.get("code") == "UnknownBeatmapFields")
+        if unk_count == 0 and getattr(self.verification, "unknown_fields", []):
+            unk_count = len(self.verification.unknown_fields)
+
+        lines: List[Tuple[str, Tuple[int, int, int], Optional[str], Optional[int]]] = [
+            (f"Beatmap: {os.path.basename(self.beatmap_path)}  |  MD5: {md5_val or '-'}", (220, 225, 240), None, None),
             (
                 f"Objects: {len(self.py_beatmap.hit_objects)}  |  TPs: {len(self.py_beatmap.timing_points)}  |  "
                 f"Breaks: {len(getattr(self.py_beatmap, 'breaks', []))}  |  StackLeniency: {self.py_beatmap.stack_leniency:.2f}",
                 (210, 215, 230),
+                None,
+                None,
             ),
             (
                 f"Rust Supported Map: {'Yes (v14 Standard: Circles, L/B/P-Sliders, Spinners)' if self.verification.rust_supported else 'No (Unsupported objects, curve, or syntax)'}",
                 (190, 225, 200) if self.verification.rust_supported else (255, 200, 140),
+                None,
+                None,
             ),
-            (f"Colours Overrides: Track={sto or 'default'}, Border={sb or 'default'}", (200, 205, 220)),
-            (f"Map Warnings: {map_warn_str}", (251, 191, 36) if map_warns else (160, 175, 195)),
-            (f"Map Summary: {self.verification.reason}", (210, 215, 230)),
-            (f"Pair MD5 Check: {pair_md5_str}", (74, 222, 128) if (rv and rv.hash_status == "ok") else ((248, 113, 113) if (rv and rv.hash_status == "BeatmapHashMismatch") else (200, 205, 220))),
+            (f"Colours Overrides: Track={sto or 'default'}, Border={sb or 'default'}", (200, 205, 220), None, None),
+            (
+                f"Map Warnings: {map_warn_str}" + (" [клик: список полей]" if unk_count > 0 else ""),
+                (251, 191, 36) if map_warns else (160, 175, 195),
+                "unknown_fields" if unk_count > 0 else None,
+                None,
+            ),
+            (
+                f"Map Summary: {self.verification.reason}" + (f" [клик: список {len(map_issues)}]" if map_issues else ""),
+                (251, 191, 36) if map_issues else (210, 215, 230),
+                "map_issues" if map_issues else None,
+                None,
+            ),
+            (
+                f"Pair MD5 Check: {pair_md5_str}",
+                (74, 222, 128) if (rv and rv.hash_status == "ok") else ((248, 113, 113) if (rv and rv.hash_status == "BeatmapHashMismatch") else (200, 205, 220)),
+                None,
+                None,
+            ),
         ]
 
         if rv:
@@ -2338,18 +2916,33 @@ class Visualizer:
             c50 = exp.get("count_50", py_r.count_50 if py_r else 0)
             cmiss = exp.get("count_miss", py_r.count_miss if py_r else 0)
 
-            lines.append((f"Replay Summary: {rv.reason}", (210, 215, 230)))
-            lines.append((f"Replay Header: player={player}, game_version={g_ver}, mods={mods}, seed={seed}, trailer={tr_sz} B", (200, 210, 230)))
-            lines.append((f"Expected Stats: score={score:,}, max_combo={m_combo}x, 300/100/50/M={c300}/{c100}/{c50}/{cmiss}", (200, 210, 230)))
+            rep_sum_act = "replay_issues" if (rep_issues and rv.status != "PASS") else None
+            lines.append((
+                f"Replay Summary: {rv.reason}" + (" [клик: открыть]" if rep_sum_act else ""),
+                (251, 191, 36) if rep_sum_act else (210, 215, 230),
+                rep_sum_act,
+                None,
+            ))
+            lines.append((f"Replay Header: player={player}, game_version={g_ver}, mods={mods}, seed={seed}, trailer={tr_sz} B", (200, 210, 230), None, None))
+            lines.append((f"Expected Stats: score={score:,}, max_combo={m_combo}x, 300/100/50/M={c300}/{c100}/{c50}/{cmiss}", (200, 210, 230), None, None))
 
             rep_warns = []
+            has_trailer_w = False
             for w in rv.warnings:
                 code = w.get("code")
                 if code == "ReplayTrailerNotInterpreted":
                     rep_warns.append(f"ReplayTrailerNotInterpreted({w.get('trailer_size', tr_sz)} B)")
+                    has_trailer_w = True
                 elif code:
                     rep_warns.append(str(code))
-            lines.append((f"Replay Warnings: {', '.join(rep_warns) if rep_warns else 'None'}", (251, 191, 36) if rep_warns else (160, 175, 195)))
+            rw_act = "trailer" if (has_trailer_w or rv.trailer_hex) else ("replay_issues" if rep_issues else None)
+            rw_hint = " [клик: дамп байтов]" if rw_act == "trailer" else (" [клик: список]" if rw_act else "")
+            lines.append((
+                f"Replay Warnings: {', '.join(rep_warns) if rep_warns else 'None'}{rw_hint}",
+                (251, 191, 36) if rep_warns else (160, 175, 195),
+                rw_act,
+                None,
+            ))
 
             norm = rv.normalization
             if norm is not None:
@@ -2370,29 +2963,54 @@ class Visualizer:
                             parts.append(f"#{ch.get('index')}:Backward")
                     more = f" (+{len(norm.get('changes', [])) - len(sample_ch)} more)" if len(norm.get("changes", [])) > len(sample_ch) else ""
                     ch_desc = f" [{', '.join(parts)}{more}]"
-                lines.append((f"Normalization: changed_times={c_t}, initial_dummy_removed={c_d}, backward_removed={c_b}{ch_desc}", (167, 243, 208)))
+                norm_act = "replay_issues" if rep_issues else None
+                norm_hint = " [клик: список кадров]" if norm_act else ""
+                lines.append((
+                    f"Normalization: changed_times={c_t}, initial_dummy_removed={c_d}, backward_removed={c_b}{ch_desc}{norm_hint}",
+                    (167, 243, 208),
+                    norm_act,
+                    None,
+                ))
 
+        map_idx_by_msg = {it.get("summary"): i for i, it in enumerate(map_issues)}
+        rep_idx_by_msg = {it.get("summary"): i for i, it in enumerate(rep_issues)}
         all_mismatches = list(self.verification.mismatches)
         if rv and rv.mismatches:
             all_mismatches.extend(rv.mismatches)
         if all_mismatches:
-            lines.append(("Discrepancies:", (248, 113, 113)))
+            lines.append(("Discrepancies:", (248, 113, 113), None, None))
             for m in all_mismatches[:5]:
-                lines.append((f"  * {m}", (248, 160, 160)))
+                if m in map_idx_by_msg:
+                    lines.append((f"  * {m} [-> перейти]", (248, 160, 160), "map_issue_idx", map_idx_by_msg[m]))
+                elif m in rep_idx_by_msg:
+                    lines.append((f"  * {m} [-> перейти]", (248, 160, 160), "replay_issue_idx", rep_idx_by_msg[m]))
+                else:
+                    lines.append((f"  * {m}", (248, 160, 160), None, None))
 
+        mx, my = pygame.mouse.get_pos()
         line_step = 18 if overlay_h < 460 else 21
         y_off = 72 if overlay_h < 460 else 76
         prev_clip = surf.get_clip()
         surf.set_clip(pygame.Rect(16, 70, overlay_w - 32, overlay_h - 104))
-        for line_txt, line_col in lines:
+        for line_txt, line_col, act_kind, act_idx in lines:
             if y_off + line_step - 2 > overlay_h - 34:
                 break
+            rel_row = pygame.Rect(16, y_off - 1, overlay_w - 32, line_step - 1)
+            abs_row = pygame.Rect(ox + rel_row.x, oy + rel_row.y, rel_row.width, rel_row.height)
+            if act_kind is not None:
+                self.verif_hitboxes.append((abs_row, act_kind, act_idx))
+                hov = (self.detail_modal_kind is None) and abs_row.collidepoint(mx, my)
+                if hov:
+                    pygame.draw.rect(surf, (36, 46, 74), rel_row, border_radius=3)
+                    pygame.draw.rect(surf, (96, 165, 250), rel_row, 1, border_radius=3)
+                else:
+                    pygame.draw.rect(surf, (24, 28, 42), rel_row, border_radius=3)
             txt = self.font_small.render(line_txt, True, line_col)
             surf.blit(txt, (20, y_off))
             y_off += line_step
         surf.set_clip(prev_clip)
 
-        close_hint = self.font_small.render("Press 'V' or 'Tab' to close this overlay  |  Press 'S' to toggle Engine", True, (140, 145, 165))
+        close_hint = self.font_small.render("Click highlighted lines to inspect/jump | Press 'V' or 'Tab' to close | Press 'S' to toggle Engine", True, (140, 145, 165))
         surf.blit(close_hint, (20, overlay_h - 28))
 
         self.screen.blit(surf, (ox, oy))
@@ -2444,7 +3062,29 @@ class Visualizer:
                     is_ctrl = bool(mods & pygame.KMOD_CTRL)
 
                     if event.key == pygame.K_ESCAPE:
-                        running = False
+                        if self.detail_modal_kind is not None:
+                            self.close_detail_modal()
+                        elif self.show_verification_detail:
+                            self.show_verification_detail = False
+                        elif self.focused_issue is not None:
+                            self.focused_issue = None
+                        else:
+                            running = False
+                    elif self.detail_modal_kind is not None and event.key in (
+                        pygame.K_UP,
+                        pygame.K_DOWN,
+                        pygame.K_PAGEUP,
+                        pygame.K_PAGEDOWN,
+                    ):
+                        page = max(1, self.detail_modal_visible_rows - 2)
+                        if event.key == pygame.K_UP:
+                            self.scroll_detail_modal(-1)
+                        elif event.key == pygame.K_DOWN:
+                            self.scroll_detail_modal(1)
+                        elif event.key == pygame.K_PAGEUP:
+                            self.scroll_detail_modal(-page)
+                        elif event.key == pygame.K_PAGEDOWN:
+                            self.scroll_detail_modal(page)
                     elif event.key == pygame.K_SPACE:
                         self.toggle_playback()
                     elif event.key == pygame.K_u:
@@ -2508,32 +3148,63 @@ class Visualizer:
                         else:
                             self.set_toast("No .osr replay available for this map", 2.0)
                     elif event.key == pygame.K_v:
-                        self.show_verification_detail = not self.show_verification_detail
+                        if self.detail_modal_kind is not None:
+                            self.close_detail_modal()
+                            self.show_verification_detail = True
+                        else:
+                            self.show_verification_detail = not self.show_verification_detail
                     elif event.key == pygame.K_t:
                         self.toggle_tech_hud()
                     elif event.key in (pygame.K_TAB, pygame.K_F1):
                         self.show_hud = not self.show_hud
 
+                elif event.type == pygame.MOUSEWHEEL:
+                    if self.detail_modal_kind is not None:
+                        self.scroll_detail_modal(-event.y * 3)
+
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     mx, my = event.pos
-                    if event.button == 1:
+                    if self.detail_modal_kind is not None:
+                        if event.button == 1:
+                            if self.detail_modal_close_rect.collidepoint(mx, my):
+                                self.close_detail_modal()
+                            else:
+                                handled = False
+                                for hit_r, row_idx in self.detail_modal_item_hitboxes:
+                                    if hit_r.collidepoint(mx, my):
+                                        self.jump_to_issue(self.detail_modal_kind, row_idx)
+                                        handled = True
+                                        break
+                                if not handled and self.detail_modal_scroll_track_rect.collidepoint(mx, my):
+                                    tr = self.detail_modal_scroll_track_rect
+                                    frac = max(0.0, min(1.0, (my - tr.y) / max(1, tr.height)))
+                                    self.detail_modal_scroll = int(round(frac * self.detail_modal_max_scroll))
+                                elif not handled and not self.detail_modal_rect.collidepoint(mx, my):
+                                    self.close_detail_modal()
+                    elif event.button == 1:
                         if self.btn_skip_rect and self.btn_skip_rect.collidepoint(mx, my):
                             self.skip_intro()
                         elif self.btn_maps_rect.collidepoint(mx, my):
                             self.open_map_browser()
                         elif self.btn_tech_rect.collidepoint(mx, my):
                             self.toggle_tech_hud()
+                        elif self.show_verification_detail and self._try_click_verification(mx, my):
+                            pass
+                        elif self.focused_issue is not None and self._try_click_focus_callout(mx, my):
+                            pass
                         elif self.show_tech_hud and self.btn_tech_close_rect.collidepoint(mx, my):
                             self.toggle_tech_hud()
                         elif self.show_tech_hud and self.btn_tech_dock_rect.collidepoint(mx, my):
                             self.toggle_tech_hud_dock()
+                        elif self.show_tech_hud and self._try_click_tech_hud(mx, my):
+                            pass
                         elif my >= self.height - 60:
                             self.is_scrubbing = True
                             self.handle_mouse_seek(mx)
                         elif self.pf_rect.collidepoint(mx, my):
                             self.record_live_click("M1")
                     elif event.button == 3:
-                        if self.pf_rect.collidepoint(mx, my):
+                        if self.detail_modal_kind is None and self.pf_rect.collidepoint(mx, my):
                             self.record_live_click("M2")
 
                 elif event.type == pygame.KEYUP:

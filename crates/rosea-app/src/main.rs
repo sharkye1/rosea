@@ -150,15 +150,17 @@ fn main() -> ExitCode {
                 println!("{output}");
                 ExitCode::SUCCESS
             }
-            Err((err_code, err_msg, replay_json)) => {
+            Err((err_code, err_msg, err_loc_json, replay_json)) => {
                 if json {
+                    let loc_part = err_loc_json.as_deref().unwrap_or("null");
                     let replay_part = replay_json.as_deref().unwrap_or("null");
                     println!(
-                        r#"{{"status":"error","profile":"{}","commit":"{}","error_code":"{}","error":"{}","replay":{}}}"#,
+                        r#"{{"status":"error","profile":"{}","commit":"{}","error_code":"{}","error":"{}","error_location":{},"replay":{}}}"#,
                         rosea_core::PROFILE_ID,
                         ROSEA_COMMIT,
                         escape_json(err_code),
                         escape_json(&err_msg),
+                        loc_part,
                         replay_part
                     );
                 } else {
@@ -201,7 +203,7 @@ USAGE:
     );
 }
 
-type CliError = (&'static str, String, Option<String>);
+type CliError = (&'static str, String, Option<String>, Option<String>);
 
 fn read_limited(
     path: &Path,
@@ -236,15 +238,20 @@ fn read_limited(
 
 fn run_parse(path: &Path, replay_path: Option<&Path>, json: bool) -> Result<String, CliError> {
     let map_bytes = read_limited(path, MAX_OSU_FILE_BYTES, "osu_file_bytes")
-        .map_err(|(code, msg)| (code, msg, None))?;
+        .map_err(|(code, msg)| (code, msg, None, None))?;
 
     let parsed_map = osu(&map_bytes).map_err(|e| {
+        let loc_part = if json {
+            Some(format_error_location_json(&e))
+        } else {
+            None
+        };
         let replay_part = if json {
             replay_path.map(|rp| build_replay_json(&map_bytes, rp))
         } else {
             None
         };
-        (error_code(&e), e.to_string(), replay_part)
+        (error_code(&e), e.to_string(), loc_part, replay_part)
     })?;
 
     if !json {
@@ -258,7 +265,7 @@ fn run_parse(path: &Path, replay_path: Option<&Path>, json: bool) -> Result<Stri
         );
         if let Some(rp) = replay_path {
             let replay_summary =
-                run_replay_text(&map_bytes, rp).map_err(|(code, msg)| (code, msg, None))?;
+                run_replay_text(&map_bytes, rp).map_err(|(code, msg)| (code, msg, None, None))?;
             let _ = write!(summary, "\n{replay_summary}");
         }
         return Ok(summary);
@@ -266,6 +273,7 @@ fn run_parse(path: &Path, replay_path: Option<&Path>, json: bool) -> Result<Stri
 
     let beatmap = &parsed_map.value;
     let md5 = md5_hex(beatmap_md5(&map_bytes));
+    let unknown_fields_json = format_unknown_fields_json(&map_bytes);
     let replay_json = match replay_path {
         Some(rp) => build_replay_json(&map_bytes, rp),
         None => "null".to_string(),
@@ -275,6 +283,7 @@ fn run_parse(path: &Path, replay_path: Option<&Path>, json: bool) -> Result<Stri
         beatmap,
         &md5,
         &parsed_map.warnings,
+        &unknown_fields_json,
         &replay_json,
     ))
 }
@@ -305,6 +314,7 @@ fn format_beatmap_json(
     beatmap: &Beatmap,
     md5: &str,
     warnings: &[Warning],
+    unknown_fields_json: &str,
     replay_json: &str,
 ) -> String {
     let difficulty = beatmap.difficulty();
@@ -339,7 +349,7 @@ fn format_beatmap_json(
     let warnings_json = format_warnings_json(warnings, 0);
 
     format!(
-        r#"{{"status":"ok","profile":"{}","commit":"{}","beatmap_md5":"{}","version":14,"mode":0,"stack_leniency":{},"metadata":{},"colours":{},"breaks":{},"difficulty":{},"timing_points":{},"hit_objects":{},"object_counts":{},"warnings":{},"replay":{}}}"#,
+        r#"{{"status":"ok","profile":"{}","commit":"{}","beatmap_md5":"{}","version":14,"mode":0,"stack_leniency":{},"metadata":{},"colours":{},"breaks":{},"difficulty":{},"timing_points":{},"hit_objects":{},"object_counts":{},"warnings":{},"unknown_fields":{},"replay":{}}}"#,
         rosea_core::PROFILE_ID,
         ROSEA_COMMIT,
         md5,
@@ -352,6 +362,7 @@ fn format_beatmap_json(
         ho_json,
         counts_json,
         warnings_json,
+        unknown_fields_json,
         replay_json
     )
 }
@@ -536,9 +547,10 @@ fn build_replay_json_from_bytes(map_bytes: &[u8], replay_bytes: &[u8]) -> String
         Ok(p) => p,
         Err(e) => {
             return format!(
-                r#"{{"status":"error","error_code":"{}","error":"{}","hash_status":"unchecked","hash_match":null,"warnings":[]}}"#,
+                r#"{{"status":"error","error_code":"{}","error":"{}","error_location":{},"hash_status":"unchecked","hash_match":null,"warnings":[]}}"#,
                 escape_json(error_code(&e)),
-                escape_json(&e.to_string())
+                escape_json(&e.to_string()),
+                format_error_location_json(&e)
             );
         }
     };
@@ -549,6 +561,8 @@ fn build_replay_json_from_bytes(map_bytes: &[u8], replay_bytes: &[u8]) -> String
     let seed = input.seed();
     let raw_record_count = input.records().len();
     let trailer_size = meta.trailer.len();
+    let trailer_offset = replay_bytes.len().saturating_sub(trailer_size);
+    let (trailer_hex, trailer_ascii, trailer_i64_le) = format_trailer_preview(&meta.trailer);
 
     let hash_err = check_beatmap_hash(map_bytes, &meta).err();
     let hash_match = hash_err.is_none();
@@ -567,8 +581,13 @@ fn build_replay_json_from_bytes(map_bytes: &[u8], replay_bytes: &[u8]) -> String
     }
     ts_json.push(']');
 
+    let trailer_i64_json = match trailer_i64_le {
+        Some(v) => v.to_string(),
+        None => "null".to_string(),
+    };
+
     let header_json = format!(
-        r#"{{"mode":{},"game_version":{},"beatmap_hash":"{}","player":"{}","replay_hash":"{}","mods":{},"perfect":{},"count_geki":{},"count_katu":{},"life_graph":"{}","timestamp_bytes":{},"seed":{},"trailer_size":{},"raw_record_count":{}}}"#,
+        r#"{{"mode":{},"game_version":{},"beatmap_hash":"{}","player":"{}","replay_hash":"{}","mods":{},"perfect":{},"count_geki":{},"count_katu":{},"life_graph":"{}","timestamp_bytes":{},"seed":{},"trailer_size":{},"trailer_offset":{},"trailer_hex":"{}","trailer_ascii":"{}","trailer_i64_le":{},"raw_record_count":{}}}"#,
         meta.mode,
         meta.game_version(),
         escape_json(meta.beatmap_hash()),
@@ -582,6 +601,10 @@ fn build_replay_json_from_bytes(map_bytes: &[u8], replay_bytes: &[u8]) -> String
         ts_json,
         opt_i32_json(seed),
         trailer_size,
+        trailer_offset,
+        escape_json(&trailer_hex),
+        escape_json(&trailer_ascii),
+        trailer_i64_json,
         raw_record_count
     );
 
@@ -605,7 +628,7 @@ fn build_replay_json_from_bytes(map_bytes: &[u8], replay_bytes: &[u8]) -> String
             let warnings_json = format_warnings_json(&combined_warnings, trailer_size);
             let frames_json = format_timeline_frames_json(&norm_parsed.value);
             format!(
-                r#"{{"status":"ok","error_code":null,"error":null,"hash_status":"{hash_status}","hash_match":true,"header":{header_json},"expected":{expected_json},"warnings":{warnings_json},"normalization":{norm_json},"record_count":{},"group_count":{},"frames":{frames_json}}}"#,
+                r#"{{"status":"ok","error_code":null,"error":null,"error_location":null,"hash_status":"{hash_status}","hash_match":true,"header":{header_json},"expected":{expected_json},"warnings":{warnings_json},"normalization":{norm_json},"record_count":{},"group_count":{},"frames":{frames_json}}}"#,
                 norm_parsed.value.record_count(),
                 norm_parsed.value.groups().len()
             )
@@ -615,25 +638,28 @@ fn build_replay_json_from_bytes(map_bytes: &[u8], replay_bytes: &[u8]) -> String
             let norm_json = format_normalization_summary(&combined_warnings);
             let warnings_json = format_warnings_json(&combined_warnings, trailer_size);
             format!(
-                r#"{{"status":"error","error_code":"{}","error":"{}","hash_status":"{hash_status}","hash_match":false,"header":{header_json},"expected":{expected_json},"warnings":{warnings_json},"normalization":{norm_json},"record_count":0,"group_count":0,"frames":[]}}"#,
+                r#"{{"status":"error","error_code":"{}","error":"{}","error_location":{},"hash_status":"{hash_status}","hash_match":false,"header":{header_json},"expected":{expected_json},"warnings":{warnings_json},"normalization":{norm_json},"record_count":0,"group_count":0,"frames":[]}}"#,
                 escape_json(error_code(h_err)),
                 escape_json(&h_err.to_string()),
+                format_error_location_json(h_err),
             )
         }
         (Some(h_err), Err(_)) => {
             let warnings_json = format_warnings_json(&combined_warnings, trailer_size);
             format!(
-                r#"{{"status":"error","error_code":"{}","error":"{}","hash_status":"{hash_status}","hash_match":false,"header":{header_json},"expected":{expected_json},"warnings":{warnings_json},"normalization":null,"record_count":0,"group_count":0,"frames":[]}}"#,
+                r#"{{"status":"error","error_code":"{}","error":"{}","error_location":{},"hash_status":"{hash_status}","hash_match":false,"header":{header_json},"expected":{expected_json},"warnings":{warnings_json},"normalization":null,"record_count":0,"group_count":0,"frames":[]}}"#,
                 escape_json(error_code(h_err)),
                 escape_json(&h_err.to_string()),
+                format_error_location_json(h_err),
             )
         }
         (None, Err(n_err)) => {
             let warnings_json = format_warnings_json(&combined_warnings, trailer_size);
             format!(
-                r#"{{"status":"error","error_code":"{}","error":"{}","hash_status":"{hash_status}","hash_match":true,"header":{header_json},"expected":{expected_json},"warnings":{warnings_json},"normalization":null,"record_count":0,"group_count":0,"frames":[]}}"#,
+                r#"{{"status":"error","error_code":"{}","error":"{}","error_location":{},"hash_status":"{hash_status}","hash_match":true,"header":{header_json},"expected":{expected_json},"warnings":{warnings_json},"normalization":null,"record_count":0,"group_count":0,"frames":[]}}"#,
                 escape_json(error_code(&n_err)),
                 escape_json(&n_err.to_string()),
+                format_error_location_json(&n_err),
             )
         }
     }
@@ -741,6 +767,222 @@ fn format_replay_changes_json(changes: &[ReplayChange]) -> String {
     }
     out.push(']');
     out
+}
+
+fn format_unknown_fields_json(bytes: &[u8]) -> String {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return "[]".to_string();
+    };
+    let mut section = "";
+    let mut out = String::from("[");
+    let mut count = 0usize;
+
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        let line_number = index + 1;
+        if line.starts_with('[') {
+            section = line;
+            if !matches!(
+                section,
+                "[General]"
+                    | "[Metadata]"
+                    | "[Difficulty]"
+                    | "[TimingPoints]"
+                    | "[Colours]"
+                    | "[HitObjects]"
+                    | "[Events]"
+            ) {
+                if count > 0 {
+                    out.push(',');
+                }
+                let snippet = truncate_chars(line, 160);
+                let _ = write!(
+                    out,
+                    r#"{{"line":{line_number},"section":"{}","kind":"section","key":"{}","text":"{}"}}"#,
+                    escape_json(section),
+                    escape_json(section),
+                    escape_json(&snippet)
+                );
+                count += 1;
+            }
+            continue;
+        }
+        let key = line.split_once(':').map_or(line, |(k, _)| k).trim();
+        let known = match section {
+            "[General]" => matches!(key, "Mode" | "StackLeniency"),
+            "[Metadata]" => matches!(
+                key,
+                "Title"
+                    | "TitleUnicode"
+                    | "Artist"
+                    | "ArtistUnicode"
+                    | "Creator"
+                    | "Version"
+                    | "Source"
+                    | "Tags"
+                    | "BeatmapID"
+                    | "BeatmapSetID"
+            ),
+            "[Difficulty]" => matches!(
+                key,
+                "CircleSize"
+                    | "OverallDifficulty"
+                    | "HPDrainRate"
+                    | "ApproachRate"
+                    | "SliderMultiplier"
+                    | "SliderTickRate"
+            ),
+            "[Colours]" => matches!(
+                key,
+                "Combo1"
+                    | "Combo2"
+                    | "Combo3"
+                    | "Combo4"
+                    | "Combo5"
+                    | "Combo6"
+                    | "Combo7"
+                    | "Combo8"
+                    | "SliderTrackOverride"
+                    | "SliderBorder"
+            ),
+            _ => true,
+        };
+        if !known {
+            if count > 0 {
+                out.push(',');
+            }
+            let sec_disp = if section.is_empty() {
+                "<header>"
+            } else {
+                section
+            };
+            let snippet = truncate_chars(line, 160);
+            let _ = write!(
+                out,
+                r#"{{"line":{line_number},"section":"{}","kind":"field","key":"{}","text":"{}"}}"#,
+                escape_json(sec_disp),
+                escape_json(key),
+                escape_json(&snippet)
+            );
+            count += 1;
+        }
+    }
+    out.push(']');
+    out
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}...")
+    } else {
+        head
+    }
+}
+
+fn format_trailer_preview(trailer: &[u8]) -> (String, String, Option<i64>) {
+    const MAX_TRAILER_PREVIEW_BYTES: usize = 256;
+    let slice = &trailer[..trailer.len().min(MAX_TRAILER_PREVIEW_BYTES)];
+    let mut hex = String::with_capacity(slice.len() * 3);
+    let mut ascii = String::with_capacity(slice.len());
+    for (i, &b) in slice.iter().enumerate() {
+        if i > 0 {
+            hex.push(' ');
+        }
+        let _ = write!(hex, "{b:02x}");
+        let ch = if (0x20..=0x7e).contains(&b) {
+            b as char
+        } else {
+            '.'
+        };
+        ascii.push(ch);
+    }
+    let i64_le = if trailer.len() >= 8 {
+        Some(i64::from_le_bytes([
+            trailer[0], trailer[1], trailer[2], trailer[3], trailer[4], trailer[5], trailer[6],
+            trailer[7],
+        ]))
+    } else {
+        None
+    };
+    (hex, ascii, i64_le)
+}
+
+fn format_error_location_json(err: &RoseaError) -> String {
+    match err {
+        RoseaError::InvalidHitObjectField {
+            field,
+            line,
+            object_id,
+        } => format!(
+            r#"{{"kind":"hit_object","line":{line},"object_id":{},"field":"{}"}}"#,
+            object_id.0,
+            escape_json(field)
+        ),
+        RoseaError::UnsupportedHitObject {
+            line,
+            object_id,
+            flags,
+        } => format!(
+            r#"{{"kind":"hit_object","line":{line},"object_id":{},"flags":{flags}}}"#,
+            object_id.0
+        ),
+        RoseaError::UnsupportedSliderSyntax { line, object_id }
+        | RoseaError::InvalidSliderLength { line, object_id }
+        | RoseaError::NumericalError { line, object_id }
+        | RoseaError::PreprocessError {
+            line, object_id, ..
+        } => format!(
+            r#"{{"kind":"hit_object","line":{line},"object_id":{}}}"#,
+            object_id.0
+        ),
+        RoseaError::InvalidTimingPointField { field, line } => format!(
+            r#"{{"kind":"timing_point","line":{line},"field":"{}"}}"#,
+            escape_json(field)
+        ),
+        RoseaError::InvalidBreakField { field, line } => format!(
+            r#"{{"kind":"break","line":{line},"field":"{}"}}"#,
+            escape_json(field)
+        ),
+        RoseaError::InvalidStackLeniency { line } => {
+            format!(r#"{{"kind":"beatmap_line","line":{line},"field":"StackLeniency"}}"#)
+        }
+        RoseaError::InvalidDifficultyField { field, line }
+        | RoseaError::InvalidMetadataField { field, line }
+        | RoseaError::InvalidColourField { field, line } => format!(
+            r#"{{"kind":"beatmap_line","line":{line},"field":"{}"}}"#,
+            escape_json(field)
+        ),
+        RoseaError::InvalidReplayRecord { index }
+        | RoseaError::UnsupportedReplayFeature { index }
+        | RoseaError::ReplayTimeOverflow { index } => {
+            format!(r#"{{"kind":"replay_record","index":{index}}}"#)
+        }
+        RoseaError::UnexpectedEof { offset }
+        | RoseaError::InvalidLength { offset }
+        | RoseaError::InvalidStringMarker { offset }
+        | RoseaError::InvalidReplayString { offset }
+        | RoseaError::UnsupportedReplayMode { offset, .. }
+        | RoseaError::UnsupportedMods { offset, .. }
+        | RoseaError::NoReplayData { offset }
+        | RoseaError::InvalidLzma { offset } => {
+            format!(r#"{{"kind":"replay_offset","offset":{offset}}}"#)
+        }
+        RoseaError::BeatmapHashMismatch
+        | RoseaError::InvalidEncoding
+        | RoseaError::InvalidHeader
+        | RoseaError::UnsupportedBeatmapVersion(_)
+        | RoseaError::InvalidMode
+        | RoseaError::UnsupportedMode(_)
+        | RoseaError::DuplicateField
+        | RoseaError::MissingDifficultyField(_)
+        | RoseaError::EmptyBeatmap
+        | RoseaError::ResourceLimit { .. } => "null".to_string(),
+    }
 }
 
 fn error_code(err: &RoseaError) -> &'static str {
@@ -856,7 +1098,8 @@ mod tests {
             [HitObjects]\n256,192,500,1,0\n";
         let parsed = osu(map_bytes).unwrap();
         let md5 = md5_hex(beatmap_md5(map_bytes));
-        let json = format_beatmap_json(&parsed.value, &md5, &parsed.warnings, "null");
+        let unk = format_unknown_fields_json(map_bytes);
+        let json = format_beatmap_json(&parsed.value, &md5, &parsed.warnings, &unk, "null");
 
         assert!(json.contains(&format!(r#""beatmap_md5":"{md5}""#)));
         assert!(json.contains(r#""stack_leniency":0.5"#));
@@ -867,6 +1110,34 @@ mod tests {
         assert!(json.contains(r#""slider_border":{"r":70,"g":80,"b":90}"#));
         assert!(json.contains(r#""breaks":[{"start_time":1000,"end_time":2500}]"#));
         assert!(json.contains(r#""code":"UnknownBeatmapFields","count":1"#));
+        assert!(json.contains(
+            r#""unknown_fields":[{"line":5,"section":"[General]","kind":"field","key":"AudioFilename","text":"AudioFilename: song.mp3"}]"#
+        ));
+    }
+
+    #[test]
+    fn formats_error_location_and_trailer_hex() {
+        let err = RoseaError::InvalidHitObjectField {
+            field: "hitSample",
+            line: 190,
+            object_id: rosea_core::model::ObjectId(4),
+        };
+        let loc = format_error_location_json(&err);
+        assert_eq!(
+            loc,
+            r#"{"kind":"hit_object","line":190,"object_id":4,"field":"hitSample"}"#
+        );
+
+        let r_err = RoseaError::UnsupportedReplayFeature { index: 12 };
+        assert_eq!(
+            format_error_location_json(&r_err),
+            r#"{"kind":"replay_record","index":12}"#
+        );
+
+        let (hex, ascii, i64_le) = format_trailer_preview(&[0x01, 0x00, 0x00, 0x00, 0, 0, 0, 0]);
+        assert_eq!(hex, "01 00 00 00 00 00 00 00");
+        assert_eq!(ascii, "........");
+        assert_eq!(i64_le, Some(1));
     }
 
     #[test]
