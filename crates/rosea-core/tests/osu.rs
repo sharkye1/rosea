@@ -112,6 +112,26 @@ fn reads_difficulty_fields_in_their_section() {
 }
 
 #[test]
+fn difficulty_uses_f32_and_slider_settings_keep_f64_precision() {
+    let text = b"osu file format v14\n[Difficulty]\nCircleSize:8.8\nOverallDifficulty:8.8\nHPDrainRate:8.8\nApproachRate:8.8\nSliderMultiplier:1.234567890123\nSliderTickRate:1.234567890123";
+    let difficulty = osu_difficulty(text).unwrap();
+    for value in [difficulty.cs, difficulty.od, difficulty.hp, difficulty.ar] {
+        assert_eq!(f64::from(value), 8.800000190734863);
+    }
+    assert_eq!(difficulty.slider_multiplier, Some(1.234567890123_f64));
+    assert_eq!(difficulty.slider_tick_rate, Some(1.234567890123_f64));
+}
+
+#[test]
+fn default_ar_preserves_fractional_od_as_f32() {
+    let text =
+        b"osu file format v14\n[Difficulty]\nCircleSize:4\nOverallDifficulty:8.8\nHPDrainRate:6";
+    let difficulty = osu_difficulty(text).unwrap();
+    assert_eq!(difficulty.ar.to_bits(), difficulty.od.to_bits());
+    assert_eq!(f64::from(difficulty.ar), 8.800000190734863);
+}
+
+#[test]
 fn accepts_difficulty_range_boundaries() {
     for value in [0.0, 10.0] {
         let text = format!(

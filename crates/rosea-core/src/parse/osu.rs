@@ -92,10 +92,10 @@ pub fn osu(bytes: &[u8]) -> Result<Parsed<Beatmap>, RoseaError> {
 
 #[derive(Debug, PartialEq)]
 pub struct Difficulty {
-    pub cs: f64,
-    pub od: f64,
-    pub hp: f64,
-    pub ar: f64,
+    pub cs: f32,
+    pub od: f32,
+    pub hp: f32,
+    pub ar: f32,
     // Без слайдеров отсутствие этих полей допустимо, поэтому сохраняем Option.
     pub slider_multiplier: Option<f64>,
     pub slider_tick_rate: Option<f64>,
@@ -273,34 +273,36 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
 
         // У поддерживаемого ключа без двоеточия пустое значение вызовет ошибку числа.
         let (key, value) = line.split_once(':').unwrap_or((line, ""));
-        let (field, slot) = match key.trim() {
-            "CircleSize" => ("CircleSize", &mut cs),
-            "OverallDifficulty" => ("OverallDifficulty", &mut od),
-            "HPDrainRate" => ("HPDrainRate", &mut hp),
-            "ApproachRate" => ("ApproachRate", &mut ar),
-            "SliderMultiplier" => ("SliderMultiplier", &mut slider_multiplier),
-            "SliderTickRate" => ("SliderTickRate", &mut slider_tick_rate),
+        let line_number = index + 1;
+        match key.trim() {
+            "CircleSize" => {
+                read_difficulty_value(&mut cs, value, "CircleSize", line_number, false)?
+            }
+            "OverallDifficulty" => {
+                read_difficulty_value(&mut od, value, "OverallDifficulty", line_number, false)?
+            }
+            "HPDrainRate" => {
+                read_difficulty_value(&mut hp, value, "HPDrainRate", line_number, false)?
+            }
+            "ApproachRate" => {
+                read_difficulty_value(&mut ar, value, "ApproachRate", line_number, false)?
+            }
+            "SliderMultiplier" => read_difficulty_value(
+                &mut slider_multiplier,
+                value,
+                "SliderMultiplier",
+                line_number,
+                true,
+            )?,
+            "SliderTickRate" => read_difficulty_value(
+                &mut slider_tick_rate,
+                value,
+                "SliderTickRate",
+                line_number,
+                true,
+            )?,
             _ => continue,
-        };
-        if slot.is_some() {
-            return Err(RoseaError::DuplicateField);
         }
-        let invalid = || RoseaError::InvalidDifficultyField {
-            field,
-            line: index + 1,
-        };
-        let value: f64 = value.trim().parse().map_err(|_| invalid())?;
-        // Параметры слайдеров имеют собственный диапазон: любое конечное число > 0.
-        let is_slider_setting = matches!(field, "SliderMultiplier" | "SliderTickRate");
-        let in_range = if is_slider_setting {
-            value > 0.0
-        } else {
-            (0.0..=10.0).contains(&value)
-        };
-        if !value.is_finite() || !in_range {
-            return Err(invalid());
-        }
-        *slot = Some(value);
     }
 
     // Проверяем наличие после всей секции: порядок полей в файле произвольный.
@@ -321,4 +323,29 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
         slider_multiplier,
         slider_tick_rate,
     })
+}
+
+fn read_difficulty_value<T: std::str::FromStr>(
+    slot: &mut Option<T>,
+    text: &str,
+    field: &'static str,
+    line: usize,
+    slider_setting: bool,
+) -> Result<(), RoseaError> {
+    if slot.is_some() {
+        return Err(RoseaError::DuplicateField);
+    }
+    let invalid = || RoseaError::InvalidDifficultyField { field, line };
+    let text = text.trim();
+    let raw: f64 = text.parse().map_err(|_| invalid())?;
+    let in_range = if slider_setting {
+        raw > 0.0
+    } else {
+        (0.0..=10.0).contains(&raw)
+    };
+    if !raw.is_finite() || !in_range {
+        return Err(invalid());
+    }
+    *slot = Some(text.parse().map_err(|_| invalid())?);
+    Ok(())
 }

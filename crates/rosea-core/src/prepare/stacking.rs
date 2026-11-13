@@ -97,7 +97,7 @@ pub fn stack_objects(
             "ApproachRate должен быть конечным числом от 0 до 10",
         ),
         (
-            f64::from(stack_leniency),
+            stack_leniency,
             (0.0..=1.0).contains(&stack_leniency),
             "StackLeniency должен быть конечным числом от 0 до 1",
         ),
@@ -135,8 +135,7 @@ pub fn stack_objects(
             }
         }
     }
-    let (threshold, scale) =
-        stack_parameters(difficulty.cs as f32, difficulty.ar as f32, stack_leniency);
+    let (threshold, scale) = stack_parameters(difficulty.cs, difficulty.ar, stack_leniency);
     let mut order: Vec<_> = objects.iter().collect();
     order.sort_by(|a, b| {
         // Оба написания нуля задают одно время; при равенстве сравниваем исходные ID.

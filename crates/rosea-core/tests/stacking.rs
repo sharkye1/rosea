@@ -316,7 +316,7 @@ fn validates_manual_inputs_and_nonfinite_position_queries() {
         ));
     }
     for field in ["cs", "ar"] {
-        for value in [-1.0, 11.0, f64::NAN, f64::INFINITY] {
+        for value in [-1.0, 11.0, f32::NAN, f32::INFINITY] {
             let mut settings = difficulty();
             if field == "cs" {
                 settings.cs = value;
