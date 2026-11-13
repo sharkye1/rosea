@@ -432,6 +432,19 @@ fn rejects_bad_inputs_and_numerical_overflow_or_underflow() {
 }
 
 #[test]
+fn rejects_nonfinite_start_with_object_context() {
+    for time in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            linear_sliders(&[slider(time, 100.0, 1, 2)], &difficulty(1.0, 1.0), &[]).unwrap_err(),
+            RoseaError::NumericalError {
+                line: 12,
+                object_id: ObjectId(2),
+            }
+        );
+    }
+}
+
+#[test]
 fn bounds_end_time_and_pass_count() {
     let points = [point(0.0, 100.0, true, 1)];
     for (start, length) in [(86_400_000.25, 0.0), (86_399_990.0, 100.0)] {

@@ -92,6 +92,7 @@ pub enum RoseaError {
         line: usize,
         object_id: ObjectId,
     },
+    InvalidTime,
     NumericalError {
         line: usize,
         object_id: ObjectId,
@@ -225,6 +226,7 @@ impl fmt::Display for RoseaError {
                     object_id.0
                 )
             }
+            Self::InvalidTime => write!(f, "Время должно быть конечным числом"),
             Self::NumericalError { line, object_id } => {
                 write!(
                     f,

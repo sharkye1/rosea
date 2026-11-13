@@ -1,5 +1,24 @@
 //! Разобранные данные карты с исходными позициями для диагностики.
 
+use crate::error::RoseaError;
+
+/// Конечное время в миллисекундах с нормализованным нулём.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct TimeMs(f64);
+
+impl TimeMs {
+    pub fn new(ms: f64) -> Result<Self, RoseaError> {
+        if !ms.is_finite() {
+            return Err(RoseaError::InvalidTime);
+        }
+        Ok(Self(if ms == 0.0 { 0.0 } else { ms }))
+    }
+
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
 /// Индекс записи HitObjects до сортировки; начинается с нуля.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ObjectId(pub u32);

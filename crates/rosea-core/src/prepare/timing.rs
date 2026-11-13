@@ -1,7 +1,7 @@
 //! Скорость слайдеров и времена вложенных частей. Арифметика сохраняет дробные миллисекунды.
 
 use crate::error::RoseaError;
-use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point, TimingPoint};
+use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point, TimeMs, TimingPoint};
 use crate::parse::Difficulty;
 
 use super::PreparedPath;
@@ -441,9 +441,7 @@ fn push_event(
 }
 
 fn checked_time(time: f64, object: &HitObject) -> Result<f64, RoseaError> {
-    if !time.is_finite() {
-        return Err(numerical(object));
-    }
+    let time = TimeMs::new(time).map_err(|_| numerical(object))?.get();
     if time.abs() > MAX_TIME {
         // В диагностике целого лимита округляем вверх; само время события не изменяем.
         return Err(RoseaError::ResourceLimit {
@@ -452,7 +450,7 @@ fn checked_time(time: f64, object: &HitObject) -> Result<f64, RoseaError> {
             observed: time.abs().ceil() as u64,
         });
     }
-    Ok(canonical_zero(time))
+    Ok(time)
 }
 
 fn numerical(object: &HitObject) -> RoseaError {
