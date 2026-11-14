@@ -7,7 +7,7 @@ mod timing;
 mod visibility;
 
 pub use curve::{PreparedPath, linear_path, slider_path};
-pub use map::{PreparedMap, prepare_map};
+pub use map::{HitWindows, ObjectTimes, PreparedMap, prepare_map};
 pub use stacking::{StackedObject, StackedObjectKind, stack_objects};
 pub use timing::{
     PreparedSlider, SliderEvent, SliderEventKind, SliderTiming, linear_sliders, sliders,

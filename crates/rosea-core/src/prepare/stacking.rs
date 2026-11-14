@@ -42,6 +42,9 @@ impl StackedObject {
     pub fn kind(&self) -> StackedObjectKind {
         self.kind
     }
+    pub(super) fn source_line(&self) -> usize {
+        self.line
+    }
     pub fn height(&self) -> i32 {
         self.height
     }

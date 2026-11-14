@@ -53,6 +53,17 @@ impl ReplayTimeline {
         &self.groups
     }
 
+    /// Состояние действий после всех записей в данный момент, включая конец реплея.
+    pub fn buttons_at(&self, time: TimeMs) -> ButtonState {
+        let time = time.get();
+        let index = self.records.partition_point(|r| (r.time_ms as f64) <= time);
+        if index == 0 || index == self.records.len() {
+            ButtonState::default()
+        } else {
+            ButtonState::from_keys(self.records[index - 1].keys)
+        }
+    }
+
     /// Позиция после обработки записей в данный момент.
     pub fn cursor_at(&self, time: TimeMs) -> Point {
         let time = time.get();
@@ -436,6 +447,43 @@ mod tests {
         assert_eq!(ButtonState::from_keys(15).pressed_since(left), right);
         assert_eq!(ButtonState::from_keys(16 | 0x8000_0000), none);
         assert_eq!(none.pressed_since(left), none);
+    }
+
+    #[test]
+    fn releases_buttons_at_end_after_the_final_group() {
+        let mut value = input(&[10, 20, 20], &[]);
+        value.records[0].keys = 5;
+        value.records[1].keys = 0;
+        value.records[2].keys = 10;
+        let timeline = normalize(value).unwrap().value;
+        let at = |time| timeline.buttons_at(TimeMs::new(time).unwrap());
+        let released = ButtonState::default();
+        let left = ButtonState::from_keys(5);
+        assert_eq!(at(9.0), released);
+        assert_eq!(at(10.0), left);
+        assert_eq!(at(19.5), left);
+        assert_eq!(at(20.0), released);
+        assert_eq!(at(21.0), released);
+        assert_eq!(at(20.0).pressed_since(ButtonState::from_keys(10)), released);
+        assert_eq!(timeline.records()[2].keys, 10);
+    }
+
+    #[test]
+    fn single_record_is_released_at_its_time() {
+        let mut value = input(&[10], &[]);
+        value.records[0].keys = 15;
+        let timeline = normalize(value).unwrap().value;
+        for time in [9.0, 10.0, 11.0] {
+            assert_eq!(
+                timeline.buttons_at(TimeMs::new(time).unwrap()),
+                ButtonState::default()
+            );
+        }
+        assert_eq!(
+            ButtonState::from_keys(timeline.records()[0].keys)
+                .pressed_since(ButtonState::default()),
+            ButtonState::from_keys(15)
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ use rosea_core::{
     error::RoseaError,
     model::{CurveKind, ObjectId, Point},
     parse::osu,
-    prepare::{StackedObjectKind, prepare_map},
+    prepare::{HitWindows, StackedObjectKind, prepare_map},
 };
 
 #[test]
@@ -35,6 +35,11 @@ fn prepares_mixed_map_with_owned_paths_and_original_ids() {
         assert_eq!(slider.path().length(), 100.0);
     }
     let slider = objects[2].slider().unwrap();
+    let original_path = slider.path() as *const _;
+    assert_eq!(
+        original_path,
+        prepared.objects()[2].slider().unwrap().path() as *const _
+    );
     assert_eq!(slider.timing().start_time, 2000.0);
     assert_eq!(slider.timing().end_time, 2500.0);
     assert_eq!(
@@ -57,6 +62,76 @@ fn reports_missing_bpm_from_preparation_with_object_context() {
         Err(RoseaError::PreprocessError {
             object_id: ObjectId(0),
             ..
+        })
+    ));
+}
+
+#[test]
+fn prepares_windows_and_deadlines_for_fractional_and_zero_duration_objects() {
+    let input = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8.8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000.25,1,0\n0,100,2000.25,2,0,L|100:100,1,0\n0,200,3000,2,0,L|100:200,1,100\n256,192,4000,8,0,4500";
+    let prepared = prepare_map(&osu(input).unwrap().value).unwrap();
+    assert_eq!(
+        prepared.hit_windows(),
+        HitWindows {
+            great: 27,
+            ok: 69,
+            meh: 111
+        }
+    );
+    let times = prepared.object_times();
+    assert_eq!(times[0].start.get(), 1000.25);
+    assert_eq!(times[0].end.get(), 1000.25);
+    assert_eq!(times[0].head_deadline.unwrap().get(), 1111.25);
+    assert_eq!(times[1].end.get(), 2000.25);
+    assert_eq!(times[1].latest_resolution.get(), 2111.25);
+    assert_eq!(times[2].end.get(), 3500.0);
+    assert_eq!(times[2].head_deadline.unwrap().get(), 3111.0);
+    assert_eq!(times[2].latest_resolution.get(), 3500.0);
+    assert_eq!(times[3].end.get(), 4500.0);
+    assert_eq!(times[3].head_deadline, None);
+    assert_eq!(times[3].latest_resolution.get(), 4500.0);
+
+    let input = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n0,0,1000,1,0";
+    assert_eq!(
+        prepare_map(&osu(input).unwrap().value)
+            .unwrap()
+            .hit_windows(),
+        HitWindows {
+            great: 32,
+            ok: 76,
+            meh: 120
+        }
+    );
+}
+
+#[test]
+fn rejects_deadlines_beyond_time_limit() {
+    let input = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n0,0,86399900,1,0";
+    assert!(matches!(
+        prepare_map(&osu(input).unwrap().value),
+        Err(RoseaError::ResourceLimit {
+            resource: "absolute_time_ms",
+            limit: 86_400_000,
+            observed: 86_400_020
+        })
+    ));
+}
+
+#[test]
+fn enforces_shared_slider_event_budget_across_the_map() {
+    let mut input = String::from(
+        "osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:5\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n",
+    );
+    for _ in 0..201 {
+        input.push_str("0,0,1000,2,0,L|100:0,10000,0\n");
+    }
+    let beatmap = osu(input.as_bytes()).unwrap().value;
+    assert!(matches!(
+        prepare_map(&beatmap),
+        Err(RoseaError::ResourceLimit {
+            resource: "slider_events",
+            limit: 2_000_000,
+            observed: 2_000_001
         })
     ));
 }
