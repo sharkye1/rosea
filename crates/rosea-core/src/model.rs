@@ -23,12 +23,29 @@ impl TimeMs {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ObjectId(pub u32);
 
-/// Оценка успешного попадания.
+/// Итоговая оценка объекта.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Judgement {
     Great,
     Ok,
     Meh,
+    Miss,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct HitCounts {
+    pub count_300: u32,
+    pub count_100: u32,
+    pub count_50: u32,
+    pub count_miss: u32,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub score: u64,
+    pub current_combo: u32,
+    pub max_combo: u32,
+    pub counts: HitCounts,
 }
 
 /// Координаты в osu!pixels; положение за границами поля допустимо.
