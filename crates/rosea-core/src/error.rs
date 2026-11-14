@@ -93,6 +93,7 @@ pub enum RoseaError {
         object_id: ObjectId,
     },
     InvalidTime,
+    TimeWentBackwards,
     NumericalError {
         line: usize,
         object_id: ObjectId,
@@ -227,6 +228,7 @@ impl fmt::Display for RoseaError {
                 )
             }
             Self::InvalidTime => write!(f, "Время должно быть конечным числом"),
+            Self::TimeWentBackwards => write!(f, "Время не может идти назад"),
             Self::NumericalError { line, object_id } => {
                 write!(
                     f,
