@@ -104,6 +104,10 @@ pub struct Parsed<T> {
 #[derive(Debug, PartialEq)]
 pub enum Warning {
     ReplayTrailerNotInterpreted,
+    UnknownReplayKeys {
+        bits: u32,
+        records: u32,
+    },
     UnknownBeatmapFields {
         count: u32,
     },

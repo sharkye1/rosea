@@ -1,8 +1,32 @@
 //! Нормализация времён и порядка записей реплея.
 
 use crate::error::RoseaError;
-use crate::model::{Parsed, Point, ReplayChange, ReplayInput, Warning};
+use crate::model::{Parsed, Point, ReplayChange, ReplayInput, TimeMs, Warning};
 use std::ops::Range;
+
+/// Состояние двух игровых действий.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ButtonState {
+    pub left: bool,
+    pub right: bool,
+}
+
+impl ButtonState {
+    pub fn from_keys(keys: u32) -> Self {
+        Self {
+            left: keys & 5 != 0,
+            right: keys & 10 != 0,
+        }
+    }
+
+    /// Новые нажатия относительно предыдущей записи.
+    pub fn pressed_since(self, previous: Self) -> Self {
+        Self {
+            left: self.left && !previous.left,
+            right: self.right && !previous.right,
+        }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub struct TimedRecord {
@@ -28,6 +52,43 @@ impl ReplayTimeline {
     pub fn groups(&self) -> &[Range<usize>] {
         &self.groups
     }
+
+    /// Позиция после обработки записей в данный момент.
+    pub fn cursor_at(&self, time: TimeMs) -> Point {
+        let time = time.get();
+        let index = self.records.partition_point(|r| (r.time_ms as f64) <= time);
+        if index == 0 {
+            return Point { x: 256.0, y: 192.0 };
+        }
+        let left = &self.records[index - 1];
+        if index == self.records.len() || left.time_ms as f64 == time {
+            return left.cursor;
+        }
+        let right = &self.records[index];
+        let progress = (time - left.time_ms as f64) / (right.time_ms - left.time_ms) as f64;
+        let axis =
+            |a: f32, b: f32| (f64::from(a) + (f64::from(b) - f64::from(a)) * progress) as f32;
+        Point {
+            x: axis(left.cursor.x, right.cursor.x),
+            y: axis(left.cursor.y, right.cursor.y),
+        }
+    }
+
+    /// Входящая позиция перед обработкой группы записей в данный момент.
+    pub fn cursor_before(&self, time: TimeMs) -> Point {
+        let index = self
+            .records
+            .partition_point(|r| (r.time_ms as f64) < time.get());
+        if index == 0 {
+            return Point { x: 256.0, y: 192.0 };
+        }
+        if let Some(record) = self.records.get(index)
+            && record.time_ms as f64 == time.get()
+        {
+            return record.cursor;
+        }
+        self.cursor_at(time)
+    }
 }
 
 fn change_time(record: &mut TimedRecord, new_ms: i64, changes: &mut Vec<ReplayChange>) {
@@ -45,7 +106,14 @@ pub fn normalize(input: ReplayInput) -> Result<Parsed<ReplayTimeline>, RoseaErro
     let mut time = 0_i64;
     let mut records = Vec::with_capacity(input.records.len());
     let mut changes = Vec::new();
+    let mut unknown_bits = 0_u32;
+    let mut unknown_records = 0_u32;
     for record in input.records {
+        let unknown = record.keys & !31;
+        if unknown != 0 {
+            unknown_bits |= unknown;
+            unknown_records += 1;
+        }
         time = time
             .checked_add(record.delta_ms)
             .ok_or(RoseaError::ReplayTimeOverflow {
@@ -112,7 +180,7 @@ pub fn normalize(input: ReplayInput) -> Result<Parsed<ReplayTimeline>, RoseaErro
             groups.push(index..index + 1);
         }
     }
-    let warnings = if changes.is_empty() {
+    let mut warnings = if changes.is_empty() {
         Vec::new()
     } else {
         let changed_times = changes
@@ -134,6 +202,12 @@ pub fn normalize(input: ReplayInput) -> Result<Parsed<ReplayTimeline>, RoseaErro
             changes,
         }]
     };
+    if unknown_bits != 0 {
+        warnings.push(Warning::UnknownReplayKeys {
+            bits: unknown_bits,
+            records: unknown_records,
+        });
+    }
     Ok(Parsed {
         value: ReplayTimeline {
             records: kept,
@@ -287,6 +361,119 @@ mod tests {
         assert!(matches!(
             normalize(value),
             Err(RoseaError::ReplayTimeOverflow { index: 1 })
+        ));
+    }
+
+    #[test]
+    fn interpolates_between_groups_and_keeps_boundary_positions() {
+        let mut value = input(&[10, 10, 20, 20], &[]);
+        for (record, cursor) in value.records.iter_mut().zip([
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 10.0, y: 20.0 },
+            Point { x: 30.0, y: 40.0 },
+            Point { x: 90.0, y: 80.0 },
+        ]) {
+            record.cursor = cursor;
+        }
+        let timeline = normalize(value).unwrap().value;
+        let at = |time| timeline.cursor_at(TimeMs::new(time).unwrap());
+        let before = |time| timeline.cursor_before(TimeMs::new(time).unwrap());
+        assert_eq!(at(9.0), Point { x: 256.0, y: 192.0 });
+        assert_eq!(before(10.0), Point { x: 256.0, y: 192.0 });
+        assert_eq!(at(10.0), Point { x: 10.0, y: 20.0 });
+        assert_eq!(at(15.0), Point { x: 20.0, y: 30.0 });
+        assert_eq!(at(19.5), Point { x: 29.0, y: 39.0 });
+        assert_eq!(before(20.0), Point { x: 30.0, y: 40.0 });
+        assert_eq!(at(20.0), Point { x: 90.0, y: 80.0 });
+        assert_eq!(at(100.0), Point { x: 90.0, y: 80.0 });
+    }
+
+    #[test]
+    fn interpolation_uses_f64_for_large_coordinates_and_single_record() {
+        let mut value = input(&[0, 10], &[]);
+        value.records[0].cursor.x = -f32::MAX;
+        value.records[1].cursor.x = f32::MAX;
+        let timeline = normalize(value).unwrap().value;
+        assert_eq!(timeline.cursor_at(TimeMs::new(5.0).unwrap()).x, 0.0);
+
+        let timeline = normalize(input(&[10], &[])).unwrap().value;
+        assert_eq!(
+            timeline.cursor_at(TimeMs::new(9.0).unwrap()),
+            Point { x: 256.0, y: 192.0 }
+        );
+        assert_eq!(
+            timeline.cursor_at(TimeMs::new(10.0).unwrap()),
+            Point { x: 1.0, y: 2.0 }
+        );
+        assert_eq!(
+            timeline.cursor_at(TimeMs::new(11.0).unwrap()),
+            Point { x: 1.0, y: 2.0 }
+        );
+    }
+
+    #[test]
+    fn maps_buttons_and_detects_only_new_presses() {
+        let none = ButtonState::default();
+        let left = ButtonState::from_keys(5);
+        let right = ButtonState::from_keys(10);
+        assert_eq!(
+            left,
+            ButtonState {
+                left: true,
+                right: false
+            }
+        );
+        assert_eq!(
+            right,
+            ButtonState {
+                left: false,
+                right: true
+            }
+        );
+        assert_eq!(left.pressed_since(none), left);
+        assert_eq!(left.pressed_since(ButtonState::from_keys(1)), none);
+        assert_eq!(ButtonState::from_keys(4).pressed_since(left), none);
+        assert_eq!(ButtonState::from_keys(15).pressed_since(left), right);
+        assert_eq!(ButtonState::from_keys(16 | 0x8000_0000), none);
+        assert_eq!(none.pressed_since(left), none);
+    }
+
+    #[test]
+    fn reports_unknown_key_bits_once_and_preserves_the_masks() {
+        let mut value = input(&[0, 10, 20], &[]);
+        value.records[0].keys = 1 | 32;
+        value.records[1].keys = 16;
+        value.records[2].keys = 4 | 64 | 32;
+        let result = normalize(value).unwrap();
+        assert_eq!(
+            result
+                .value
+                .records()
+                .iter()
+                .map(|r| r.keys)
+                .collect::<Vec<_>>(),
+            [33, 16, 100]
+        );
+        assert_eq!(
+            result.warnings,
+            vec![Warning::UnknownReplayKeys {
+                bits: 96,
+                records: 2
+            }]
+        );
+
+        let mut value = input(&[0, 20, 10], &[]);
+        value.records[2].keys = 32;
+        let result = normalize(value).unwrap();
+        assert!(matches!(
+            result.warnings.as_slice(),
+            [
+                Warning::ReplayInputNormalized { .. },
+                Warning::UnknownReplayKeys {
+                    bits: 32,
+                    records: 1
+                }
+            ]
         ));
     }
 }
