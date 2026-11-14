@@ -4,6 +4,7 @@ use crate::error::RoseaError;
 use crate::model::{HitObject, HitObjectKind, ObjectId, Point, TimingPoint};
 use crate::parse::Difficulty;
 
+use super::visibility::scale_and_preempt;
 use super::{PreparedSlider, sliders};
 
 const MAX_OBJECTS: usize = 100_000;
@@ -260,16 +261,7 @@ pub fn stack_objects(
 }
 
 fn stack_parameters(cs: f32, ar: f32, leniency: f32) -> (f32, f32) {
-    // Стадии f64/f32 и целый preempt существенны для граничных расстояний и времён.
-    let u = (f64::from(cs) - 5.0) / 5.0;
-    let q = (1.0 - f64::from(0.7_f32) * u) as f32;
-    let scale = (q / 2.0_f32) * 1.00041_f32;
-    let ar = f64::from(ar);
-    let preempt = if ar < 5.0 {
-        (1200.0 + 120.0 * (5.0 - ar)).floor()
-    } else {
-        (1200.0 - 150.0 * (ar - 5.0)).floor()
-    };
+    let (scale, preempt) = scale_and_preempt(cs, ar);
     ((preempt as f32) * leniency, scale)
 }
 
