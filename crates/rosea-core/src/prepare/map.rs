@@ -3,9 +3,51 @@
 use crate::error::RoseaError;
 use crate::model::{Beatmap, ObjectId, TimeMs};
 
-use super::{StackedObject, StackedObjectKind, Visibility, stack_objects, visibility};
+use super::{
+    SliderEventKind, StackedObject, StackedObjectKind, Visibility, stack_objects, visibility,
+};
 
 const MAX_TIME: f64 = 86_400_000.0;
+const MAX_SCHEDULE_EVENTS: usize = 2_300_000;
+
+/// Виды событий, подготовленных для временной шкалы карты.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MapEventKind {
+    SpinnerStart,
+    SliderStart,
+    SliderTick,
+    SliderRepeat,
+    SliderTailCheck,
+    CircleDeadline,
+    SliderHeadDeadline,
+    SliderEnd,
+    SpinnerEnd,
+}
+
+/// Событие карты; индекс части слайдера ссылается на его подготовленную шкалу.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct MapEvent {
+    pub time: TimeMs,
+    pub object_id: ObjectId,
+    pub kind: MapEventKind,
+    pub part_index: Option<u32>,
+}
+
+impl MapEvent {
+    fn order_key(self) -> (u8, u32, u32, u32) {
+        let id = self.object_id.0;
+        let part = self.part_index.unwrap_or(0);
+        match self.kind {
+            MapEventKind::SpinnerStart => (1, id, 0, 0),
+            MapEventKind::SliderStart => (3, 0, id, part),
+            MapEventKind::SliderTick => (3, 1, id, part),
+            MapEventKind::SliderRepeat => (3, 2, id, part),
+            MapEventKind::SliderTailCheck => (3, 3, id, part),
+            MapEventKind::CircleDeadline | MapEventKind::SliderHeadDeadline => (4, id, 0, 0),
+            MapEventKind::SliderEnd | MapEventKind::SpinnerEnd => (4, id, 1, 0),
+        }
+    }
+}
 
 /// Полуокна попаданий в миллисекундах.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -33,6 +75,7 @@ pub struct PreparedMap {
     visibility: Visibility,
     hit_windows: HitWindows,
     object_times: Vec<ObjectTimes>,
+    events: Vec<MapEvent>,
 }
 
 impl PreparedMap {
@@ -54,6 +97,10 @@ impl PreparedMap {
 
     pub fn object_times(&self) -> &[ObjectTimes] {
         &self.object_times
+    }
+
+    pub fn events(&self) -> &[MapEvent] {
+        &self.events
     }
 }
 
@@ -116,10 +163,85 @@ pub fn prepare_map(map: &Beatmap) -> Result<PreparedMap, RoseaError> {
             latest_resolution,
         });
     }
+    let mut event_count = 0_usize;
+    for object in &objects {
+        let count = match object.kind() {
+            StackedObjectKind::Circle => 1,
+            StackedObjectKind::Spinner { .. } => 2,
+            StackedObjectKind::Slider(_) => {
+                3 + object.slider().map_or(0, |s| s.timing().events.len())
+            }
+        };
+        event_count = event_count
+            .checked_add(count)
+            .ok_or(RoseaError::ResourceLimit {
+                resource: "map_events",
+                limit: MAX_SCHEDULE_EVENTS as u64,
+                observed: u64::MAX,
+            })?;
+        if event_count > MAX_SCHEDULE_EVENTS {
+            return Err(RoseaError::ResourceLimit {
+                resource: "map_events",
+                limit: MAX_SCHEDULE_EVENTS as u64,
+                observed: event_count as u64,
+            });
+        }
+    }
+    let mut events = Vec::with_capacity(event_count);
+    for (object, times) in objects.iter().zip(&object_times) {
+        let mut add = |time, kind, part_index| {
+            events.push(MapEvent {
+                time,
+                object_id: object.object_id(),
+                kind,
+                part_index,
+            });
+        };
+        match object.kind() {
+            StackedObjectKind::Circle => {
+                if let Some(deadline) = times.head_deadline {
+                    add(deadline, MapEventKind::CircleDeadline, None);
+                }
+            }
+            StackedObjectKind::Slider(_) => {
+                add(times.start, MapEventKind::SliderStart, None);
+                if let Some(slider) = object.slider() {
+                    for (index, part) in slider.timing().events.iter().enumerate() {
+                        let time =
+                            TimeMs::new(part.time).map_err(|_| RoseaError::NumericalError {
+                                line: object.source_line(),
+                                object_id: object.object_id(),
+                            })?;
+                        let kind = match part.kind {
+                            SliderEventKind::Tick => MapEventKind::SliderTick,
+                            SliderEventKind::Repeat => MapEventKind::SliderRepeat,
+                            SliderEventKind::TailCheck => MapEventKind::SliderTailCheck,
+                        };
+                        add(time, kind, Some(index as u32));
+                    }
+                }
+                if let Some(deadline) = times.head_deadline {
+                    add(deadline, MapEventKind::SliderHeadDeadline, None);
+                }
+                add(times.end, MapEventKind::SliderEnd, None);
+            }
+            StackedObjectKind::Spinner { .. } => {
+                add(times.start, MapEventKind::SpinnerStart, None);
+                add(times.end, MapEventKind::SpinnerEnd, None);
+            }
+        }
+    }
+    events.sort_by(|a, b| {
+        a.time
+            .get()
+            .total_cmp(&b.time.get())
+            .then_with(|| a.order_key().cmp(&b.order_key()))
+    });
     Ok(PreparedMap {
         objects,
         visibility: visibility(map)?,
         hit_windows,
         object_times,
+        events,
     })
 }

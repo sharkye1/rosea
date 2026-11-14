@@ -23,6 +23,14 @@ impl TimeMs {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ObjectId(pub u32);
 
+/// Оценка успешного попадания.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Judgement {
+    Great,
+    Ok,
+    Meh,
+}
+
 /// Координаты в osu!pixels; положение за границами поля допустимо.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Point {

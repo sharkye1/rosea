@@ -7,6 +7,7 @@ pub mod model;
 pub mod parse;
 pub mod prepare;
 pub mod replay;
+pub mod sim;
 
 pub const PROFILE_ID: &str = "rosea-mvp-v1";
 
