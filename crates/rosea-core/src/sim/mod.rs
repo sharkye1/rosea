@@ -7,4 +7,4 @@ pub mod score;
 mod simulator;
 pub mod timeline;
 
-pub use simulator::Simulator;
+pub use simulator::{EventKind, SimEvent, Simulator};

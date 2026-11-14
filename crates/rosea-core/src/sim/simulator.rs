@@ -1,7 +1,7 @@
 //! Прогон кругов по объединённой временной шкале.
 
 use crate::error::RoseaError;
-use crate::model::{Judgement, Stats, TimeMs};
+use crate::model::{Judgement, ObjectId, Stats, TimeMs};
 use crate::prepare::{MapEventKind, PreparedMap, StackedObjectKind};
 use crate::replay::ReplayTimeline;
 
@@ -9,6 +9,24 @@ use super::hit::{inside_radius, judge_click};
 use super::input::InputEvent;
 use super::score::apply_circle;
 use super::timeline::{Timeline, TimelineEvent};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    Circle,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SimEvent {
+    pub time: TimeMs,
+    pub object_id: ObjectId,
+    pub kind: EventKind,
+    pub part_index: Option<u32>,
+    pub part_hit: Option<bool>,
+    pub judgement: Option<Judgement>,
+    pub score_delta: u64,
+    pub combo_before: u32,
+    pub combo_after: u32,
+}
 
 /// Частичный игровой прогон: пока поддерживаются только карты из кругов.
 pub struct Simulator<'a> {
@@ -44,6 +62,14 @@ impl<'a> Simulator<'a> {
     }
 
     pub fn advance_to(&mut self, time: TimeMs) -> Result<(), RoseaError> {
+        self.advance_with(time, &mut |_| {})
+    }
+
+    pub fn advance_with(
+        &mut self,
+        time: TimeMs,
+        emit: &mut dyn FnMut(&SimEvent),
+    ) -> Result<(), RoseaError> {
         if self.failed {
             return Err(RoseaError::ScoreOverflow);
         }
@@ -91,10 +117,23 @@ impl<'a> Simulator<'a> {
                 _ => None,
             };
             if let Some((id, judgement)) = result {
-                if apply_circle(stats, judgement, map.difficulty_multiplier()).is_ok() {
-                    resolved[id.0 as usize] = true;
-                } else {
-                    failed = true;
+                let combo_before = stats.current_combo;
+                match apply_circle(stats, judgement, map.difficulty_multiplier()) {
+                    Ok(score_delta) => {
+                        resolved[id.0 as usize] = true;
+                        emit(&SimEvent {
+                            time,
+                            object_id: id,
+                            kind: EventKind::Circle,
+                            part_index: None,
+                            part_hit: None,
+                            judgement: Some(judgement),
+                            score_delta,
+                            combo_before,
+                            combo_after: stats.current_combo,
+                        });
+                    }
+                    Err(_) => failed = true,
                 }
             }
         })?;
@@ -110,11 +149,11 @@ impl<'a> Simulator<'a> {
 mod tests {
     use crate::{
         error::RoseaError,
-        model::{Point, ReplayInput, ReplayRecord, TimeMs},
+        model::{Judgement, ObjectId, Point, ReplayInput, ReplayRecord, TimeMs},
         parse::osu,
         prepare::prepare_map,
         replay::normalize,
-        sim::Simulator,
+        sim::{EventKind, SimEvent, Simulator},
     };
 
     fn replay(records: &[(i64, f32, u32)]) -> crate::replay::ReplayTimeline {
@@ -133,6 +172,69 @@ mod tests {
         })
         .unwrap()
         .value
+    }
+
+    #[test]
+    fn journal_records_circle_results_without_changing_stats() {
+        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n0,0,1000,1,0\n100,0,1000,1,0\n200,0,1000,1,0\n300,0,1100,1,0";
+        let map = prepare_map(&osu(map).unwrap().value).unwrap();
+        let replay = replay(&[(1000, 0.0, 1), (0, 100.0, 3), (0, 200.0, 0), (0, 200.0, 1)]);
+        let mut sim = Simulator::new(&map, &replay).unwrap();
+        let mut plain = Simulator::new(&map, &replay).unwrap();
+        let mut events = Vec::new();
+        for time in [1000.0, 1000.0, 1220.0] {
+            sim.advance_with(TimeMs::new(time).unwrap(), &mut |event| events.push(*event))
+                .unwrap();
+            plain.advance_to(TimeMs::new(time).unwrap()).unwrap();
+            assert_eq!(sim.stats(), plain.stats());
+        }
+        let event = |time, id, judgement, score_delta, combo_before, combo_after| SimEvent {
+            time: TimeMs::new(time).unwrap(),
+            object_id: ObjectId(id),
+            kind: EventKind::Circle,
+            part_index: None,
+            part_hit: None,
+            judgement: Some(judgement),
+            score_delta,
+            combo_before,
+            combo_after,
+        };
+        assert_eq!(
+            events,
+            [
+                event(1000.0, 0, Judgement::Great, 300, 0, 1),
+                event(1000.0, 1, Judgement::Great, 300, 1, 2),
+                event(
+                    1000.0,
+                    2,
+                    Judgement::Great,
+                    300 + 12 * u64::from(map.difficulty_multiplier()),
+                    2,
+                    3
+                ),
+                event(1220.0, 3, Judgement::Miss, 0, 3, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_score_does_not_emit_result() {
+        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n0,0,1000,1,0";
+        let map = prepare_map(&osu(map).unwrap().value).unwrap();
+        let replay = replay(&[(1000, 0.0, 1)]);
+        let mut sim = Simulator::new(&map, &replay).unwrap();
+        sim.stats.score = u64::MAX;
+        let mut events = Vec::new();
+        assert_eq!(
+            sim.advance_with(TimeMs::new(1000.0).unwrap(), &mut |event| events
+                .push(*event)),
+            Err(RoseaError::ScoreOverflow)
+        );
+        assert!(events.is_empty());
+        assert_eq!(
+            sim.advance_to(TimeMs::new(1001.0).unwrap()),
+            Err(RoseaError::ScoreOverflow)
+        );
     }
 
     #[test]
