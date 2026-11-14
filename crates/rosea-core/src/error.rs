@@ -95,6 +95,9 @@ pub enum RoseaError {
     InvalidTime,
     TimeWentBackwards,
     ScoreOverflow,
+    UnsupportedSimulationObject {
+        object_id: ObjectId,
+    },
     NumericalError {
         line: usize,
         object_id: ObjectId,
@@ -230,6 +233,11 @@ impl fmt::Display for RoseaError {
             }
             Self::InvalidTime => write!(f, "Время должно быть конечным числом"),
             Self::TimeWentBackwards => write!(f, "Время не может идти назад"),
+            Self::UnsupportedSimulationObject { object_id } => write!(
+                f,
+                "Объект {} пока не поддерживается симуляцией",
+                object_id.0
+            ),
             Self::ScoreOverflow => write!(f, "Переполнение счёта или статистики"),
             Self::NumericalError { line, object_id } => {
                 write!(
