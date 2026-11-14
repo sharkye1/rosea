@@ -1,7 +1,7 @@
 //! Stacking v14 по несмещённым началам и концам; геометрия путей остаётся относительной.
 
 use crate::error::RoseaError;
-use crate::model::{HitObject, HitObjectKind, ObjectId, Point, TimingPoint};
+use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point, TimingPoint};
 use crate::parse::Difficulty;
 
 use super::visibility::scale_and_preempt;
@@ -11,11 +11,21 @@ const MAX_OBJECTS: usize = 100_000;
 const MAX_CHECKS: usize = 20_000_000;
 const MAX_TIME: f64 = 86_400_000.0;
 
+/// Тип подготовленного объекта и время окончания спиннера.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum StackedObjectKind {
+    Circle,
+    Slider(CurveKind),
+    Spinner { end: f64 },
+}
+
 /// Объект после stacking. Позиции мировые, вершины пути и позиции его частей — относительные.
 #[derive(Debug)]
 pub struct StackedObject {
     object_id: ObjectId,
     line: usize,
+    start_time: f64,
+    kind: StackedObjectKind,
     height: i32,
     offset: Point,
     position: Point,
@@ -25,6 +35,12 @@ pub struct StackedObject {
 impl StackedObject {
     pub fn object_id(&self) -> ObjectId {
         self.object_id
+    }
+    pub fn start_time(&self) -> f64 {
+        self.start_time
+    }
+    pub fn kind(&self) -> StackedObjectKind {
+        self.kind
     }
     pub fn height(&self) -> i32 {
         self.height
@@ -168,6 +184,12 @@ pub fn stack_objects(
         let prepared = StackedObject {
             object_id: object.id,
             line: object.line,
+            start_time: object.start_time,
+            kind: match object.kind {
+                HitObjectKind::Circle => StackedObjectKind::Circle,
+                HitObjectKind::Slider { kind, .. } => StackedObjectKind::Slider(kind),
+                HitObjectKind::Spinner { end } => StackedObjectKind::Spinner { end },
+            },
             height: 0,
             offset: Point { x: 0.0, y: 0.0 },
             position,
@@ -320,6 +342,8 @@ mod tests {
         let object = StackedObject {
             object_id: ObjectId(2),
             line: 9,
+            start_time: 0.0,
+            kind: StackedObjectKind::Circle,
             height: 0,
             position: Point { x: 0.0, y: 0.0 },
             offset: Point { x: 0.0, y: 0.0 },
