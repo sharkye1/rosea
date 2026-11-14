@@ -2,6 +2,7 @@
 
 mod curve;
 mod map;
+mod score;
 mod stacking;
 mod timing;
 mod visibility;

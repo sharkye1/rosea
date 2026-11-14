@@ -76,6 +76,8 @@ pub struct PreparedMap {
     hit_windows: HitWindows,
     object_times: Vec<ObjectTimes>,
     events: Vec<MapEvent>,
+    drain_seconds: i64,
+    difficulty_multiplier: u32,
 }
 
 impl PreparedMap {
@@ -101,6 +103,14 @@ impl PreparedMap {
 
     pub fn events(&self) -> &[MapEvent] {
         &self.events
+    }
+
+    pub fn drain_seconds(&self) -> i64 {
+        self.drain_seconds
+    }
+
+    pub fn difficulty_multiplier(&self) -> u32 {
+        self.difficulty_multiplier
     }
 }
 
@@ -237,11 +247,14 @@ pub fn prepare_map(map: &Beatmap) -> Result<PreparedMap, RoseaError> {
             .total_cmp(&b.time.get())
             .then_with(|| a.order_key().cmp(&b.order_key()))
     });
+    let (drain_seconds, difficulty_multiplier) = super::score::score_parameters(map)?;
     Ok(PreparedMap {
         objects,
         visibility: visibility(map)?,
         hit_windows,
         object_times,
         events,
+        drain_seconds,
+        difficulty_multiplier,
     })
 }
