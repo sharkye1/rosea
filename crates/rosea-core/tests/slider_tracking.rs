@@ -185,3 +185,73 @@ fn early_head_does_not_track_and_failed_score_does_not_change_state() {
             .unwrap()
     );
 }
+
+#[test]
+fn head_timeout_is_once_at_fractional_deadline_and_body_can_be_captured() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000.25,2,0,L|100:0,1,100";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let object = &map.objects()[0];
+    let mut state = SliderState::new(object).unwrap();
+    let mut stats = Stats {
+        score: 800,
+        current_combo: 3,
+        max_combo: 5,
+        ..Stats::default()
+    };
+    let original = stats;
+    let windows = map.hit_windows();
+    assert!(!state.timeout_head(TimeMs::new(1120.0).unwrap(), windows, &mut stats));
+    assert_eq!(stats, original);
+    assert!(state.timeout_head(TimeMs::new(1120.25).unwrap(), windows, &mut stats));
+    assert_eq!(stats.score, 800);
+    assert_eq!(stats.current_combo, 0);
+    assert_eq!(stats.max_combo, 5);
+    assert_eq!(stats.counts, original.counts);
+    stats.current_combo = 2;
+    assert!(!state.timeout_head(TimeMs::new(1121.0).unwrap(), windows, &mut stats));
+    assert_eq!(stats.current_combo, 2);
+    let buttons = ButtonState {
+        left: true,
+        right: false,
+    };
+    let cursor = object.position_at_time(1121.0).unwrap();
+    assert!(
+        state
+            .sample(TimeMs::new(1121.0).unwrap(), cursor, buttons, 10.0)
+            .unwrap()
+    );
+    assert!(
+        !state
+            .hit_head(1120, object.position(), buttons, windows, 10.0, &mut stats)
+            .unwrap()
+    );
+    assert_eq!(stats.score, 800);
+    assert_eq!(stats.current_combo, 2);
+}
+
+#[test]
+fn hit_head_is_not_missed_at_deadline() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|100:0,1,100";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let mut state = SliderState::new(&map.objects()[0]).unwrap();
+    let buttons = ButtonState {
+        left: true,
+        right: false,
+    };
+    let mut stats = Stats::default();
+    assert!(
+        state
+            .hit_head(
+                1000,
+                Point { x: 0.0, y: 0.0 },
+                buttons,
+                map.hit_windows(),
+                10.0,
+                &mut stats
+            )
+            .unwrap()
+    );
+    assert!(!state.timeout_head(TimeMs::new(1120.0).unwrap(), map.hit_windows(), &mut stats));
+    assert_eq!(stats.current_combo, 1);
+    assert_eq!(stats.score, 30);
+}

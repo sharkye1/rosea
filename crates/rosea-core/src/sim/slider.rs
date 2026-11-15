@@ -12,7 +12,7 @@ use super::score::apply_slider_head;
 pub struct SliderState<'a> {
     object: &'a StackedObject,
     slider: &'a PreparedSlider,
-    head_hit: bool,
+    head_result: Option<bool>,
     tracking: bool,
 }
 
@@ -21,7 +21,7 @@ impl<'a> SliderState<'a> {
         Some(Self {
             object,
             slider: object.slider()?,
-            head_hit: false,
+            head_result: None,
             tracking: false,
         })
     }
@@ -31,7 +31,7 @@ impl<'a> SliderState<'a> {
     }
 
     pub fn head_hit(&self) -> bool {
-        self.head_hit
+        self.head_result == Some(true)
     }
 
     pub fn tracking(&self) -> bool {
@@ -48,7 +48,7 @@ impl<'a> SliderState<'a> {
         radius: f32,
         stats: &mut Stats,
     ) -> Result<bool, RoseaError> {
-        if self.head_hit
+        if self.head_result.is_some()
             || !inside_radius(cursor, self.object.position(), radius)
             || judge_click(windows, TimeMs::new(self.object.start_time())?, click_ms).is_none()
         {
@@ -63,9 +63,21 @@ impl<'a> SliderState<'a> {
                 false
             };
         apply_slider_head(stats)?;
-        self.head_hit = true;
+        self.head_result = Some(true);
         self.tracking = tracking;
         Ok(true)
+    }
+
+    /// Закрывает нерешённую голову после обработки ввода в момент срока.
+    pub fn timeout_head(&mut self, time: TimeMs, windows: HitWindows, stats: &mut Stats) -> bool {
+        if self.head_result.is_some()
+            || time.get() < self.slider.timing().start_time + windows.meh as f64
+        {
+            return false;
+        }
+        self.head_result = Some(false);
+        stats.current_combo = 0;
+        true
     }
 
     /// Обновляет удержание на заданной выборке, используя подготовленный путь.
