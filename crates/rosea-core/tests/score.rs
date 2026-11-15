@@ -1,7 +1,7 @@
 use rosea_core::{
     error::RoseaError,
     model::{HitCounts, Judgement, Stats},
-    sim::score::{apply_circle, award},
+    sim::score::{apply_circle, apply_slider_head, award},
 };
 
 #[test]
@@ -16,6 +16,55 @@ fn calculates_points_from_combo_before_the_result() {
         award(Judgement::Great, u32::MAX, u32::MAX),
         Err(RoseaError::ScoreOverflow)
     );
+}
+
+#[test]
+fn successful_slider_head_adds_points_and_combo_without_final_counts() {
+    let mut stats = Stats {
+        score: 100,
+        current_combo: 2,
+        max_combo: 5,
+        counts: HitCounts {
+            count_100: 1,
+            ..HitCounts::default()
+        },
+    };
+    assert_eq!(apply_slider_head(&mut stats), Ok(30));
+    assert_eq!(stats.score, 130);
+    assert_eq!(stats.current_combo, 3);
+    assert_eq!(stats.max_combo, 5);
+    assert_eq!(
+        stats.counts,
+        HitCounts {
+            count_100: 1,
+            ..HitCounts::default()
+        }
+    );
+    stats.current_combo = 5;
+    assert_eq!(apply_slider_head(&mut stats), Ok(30));
+    assert_eq!(stats.max_combo, 6);
+}
+
+#[test]
+fn slider_head_overflow_does_not_partially_update_stats() {
+    for mut stats in [
+        Stats {
+            score: u64::MAX - 29,
+            ..Stats::default()
+        },
+        Stats {
+            current_combo: u32::MAX,
+            max_combo: u32::MAX,
+            ..Stats::default()
+        },
+    ] {
+        let original = stats;
+        assert_eq!(
+            apply_slider_head(&mut stats),
+            Err(RoseaError::ScoreOverflow)
+        );
+        assert_eq!(stats, original);
+    }
 }
 
 #[test]

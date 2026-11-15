@@ -1,4 +1,4 @@
-//! Начисление очков и статистика для результатов кругов.
+//! Начисление очков и изменение статистики игровых событий.
 
 use crate::error::RoseaError;
 use crate::model::{Judgement, Stats};
@@ -48,4 +48,20 @@ pub fn apply_circle(
     updated.max_combo = updated.max_combo.max(updated.current_combo);
     *stats = updated;
     Ok(points)
+}
+
+/// Начисляет очки и combo за успешную голову слайдера.
+pub fn apply_slider_head(stats: &mut Stats) -> Result<u64, RoseaError> {
+    let mut updated = *stats;
+    updated.score = updated
+        .score
+        .checked_add(30)
+        .ok_or(RoseaError::ScoreOverflow)?;
+    updated.current_combo = updated
+        .current_combo
+        .checked_add(1)
+        .ok_or(RoseaError::ScoreOverflow)?;
+    updated.max_combo = updated.max_combo.max(updated.current_combo);
+    *stats = updated;
+    Ok(30)
 }
