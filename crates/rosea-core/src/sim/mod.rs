@@ -5,6 +5,7 @@ pub mod input;
 pub mod schedule;
 pub mod score;
 mod simulator;
+pub mod slider;
 pub mod timeline;
 
 pub use simulator::{EventKind, SimEvent, Simulator};
