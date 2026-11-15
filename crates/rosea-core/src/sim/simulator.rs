@@ -35,6 +35,8 @@ pub struct Simulator<'a> {
     resolved: Vec<bool>,
     stats: Stats,
     failed: bool,
+    end_time: TimeMs,
+    current_time: Option<TimeMs>,
 }
 
 impl<'a> Simulator<'a> {
@@ -48,13 +50,29 @@ impl<'a> Simulator<'a> {
                 object_id: object.object_id(),
             });
         }
+        let last_input = input
+            .records()
+            .last()
+            .ok_or(RoseaError::NoReplayData { offset: 0 })?;
+        let mut end_time = TimeMs::new(last_input.time_ms as f64)?;
+        for object in map.object_times() {
+            if object.latest_resolution.get() > end_time.get() {
+                end_time = object.latest_resolution;
+            }
+        }
         Ok(Self {
             map,
             timeline: Timeline::new(map, input),
             resolved: vec![false; map.objects().len()],
             stats: Stats::default(),
             failed: false,
+            end_time,
+            current_time: None,
         })
+    }
+
+    pub fn end_time(&self) -> TimeMs {
+        self.end_time
     }
 
     pub fn stats(&self) -> Stats {
@@ -141,7 +159,30 @@ impl<'a> Simulator<'a> {
             self.failed = true;
             return Err(RoseaError::ScoreOverflow);
         }
+        self.current_time = Some(time);
         Ok(())
+    }
+
+    pub fn finish(self) -> Result<Stats, RoseaError> {
+        self.finish_with(&mut |_| {})
+    }
+
+    pub fn finish_with(mut self, emit: &mut dyn FnMut(&SimEvent)) -> Result<Stats, RoseaError> {
+        let time = self
+            .current_time
+            .filter(|time| time.get() > self.end_time.get())
+            .unwrap_or(self.end_time);
+        self.advance_with(time, emit)?;
+        let counts = self.stats.counts;
+        let actual = u64::from(counts.count_300)
+            + u64::from(counts.count_100)
+            + u64::from(counts.count_50)
+            + u64::from(counts.count_miss);
+        let expected = self.map.objects().len() as u32;
+        if actual != u64::from(expected) || self.resolved.iter().any(|resolved| !resolved) {
+            return Err(RoseaError::IncompleteSimulation { expected, actual });
+        }
+        Ok(self.stats)
     }
 }
 
@@ -172,6 +213,63 @@ mod tests {
         })
         .unwrap()
         .value
+    }
+
+    #[test]
+    fn finish_processes_deadlines_after_replay_and_emits_remaining_results() {
+        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n0,0,1000,1,0\n100,0,1200.25,1,0";
+        let map = prepare_map(&osu(map).unwrap().value).unwrap();
+        let replay = replay(&[(1000, 0.0, 1)]);
+        let mut sim = Simulator::new(&map, &replay).unwrap();
+        assert_eq!(sim.end_time().get(), 1320.25);
+        sim.advance_to(TimeMs::new(1000.0).unwrap()).unwrap();
+        let mut events = Vec::new();
+        let stats = sim.finish_with(&mut |event| events.push(*event)).unwrap();
+        assert_eq!(stats.counts.count_300, 1);
+        assert_eq!(stats.counts.count_miss, 1);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].time.get(), 1320.25);
+        assert_eq!(events[0].object_id, ObjectId(1));
+        assert_eq!(events[0].judgement, Some(Judgement::Miss));
+        assert_eq!(
+            Simulator::new(&map, &replay).unwrap().finish().unwrap(),
+            stats
+        );
+    }
+
+    #[test]
+    fn end_time_includes_late_replay_and_finish_accepts_later_advance() {
+        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n0,0,1000,1,0";
+        let map = prepare_map(&osu(map).unwrap().value).unwrap();
+        let replay = replay(&[(2000, 0.0, 1)]);
+        let mut sim = Simulator::new(&map, &replay).unwrap();
+        assert_eq!(sim.end_time().get(), 2000.0);
+        sim.advance_to(TimeMs::new(3000.0).unwrap()).unwrap();
+        assert_eq!(sim.finish().unwrap().counts.count_miss, 1);
+    }
+
+    #[test]
+    fn finish_rejects_missing_results_and_prior_score_error() {
+        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n0,0,1000,1,0";
+        let map = prepare_map(&osu(map).unwrap().value).unwrap();
+        let replay = replay(&[(1000, 0.0, 1)]);
+        let mut sim = Simulator::new(&map, &replay).unwrap();
+        sim.advance_to(TimeMs::new(2000.0).unwrap()).unwrap();
+        sim.stats.counts.count_300 = 0;
+        assert_eq!(
+            sim.finish(),
+            Err(RoseaError::IncompleteSimulation {
+                expected: 1,
+                actual: 0
+            })
+        );
+        let mut sim = Simulator::new(&map, &replay).unwrap();
+        sim.stats.score = u64::MAX;
+        assert_eq!(
+            sim.advance_to(TimeMs::new(1000.0).unwrap()),
+            Err(RoseaError::ScoreOverflow)
+        );
+        assert_eq!(sim.finish(), Err(RoseaError::ScoreOverflow));
     }
 
     #[test]

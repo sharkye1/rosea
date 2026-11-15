@@ -92,3 +92,20 @@ fn merges_parsed_map_and_replay_without_repeating_events() {
     assert_eq!(timeline.input().cursor(), Point { x: 40.0, y: 40.0 });
     assert_eq!(timeline.input().buttons(), ButtonState::default());
 }
+
+#[test]
+fn parsed_inputs_can_finish_circle_simulation_after_replay_ends() {
+    let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n10,10,10,1,0\n100,0,100,1,0";
+    let map = prepare_map(&osu(map).unwrap().value).unwrap();
+    let replay = normalize(osr(&replay_bytes()).unwrap().value.input)
+        .unwrap()
+        .value;
+    let sim = rosea_core::sim::Simulator::new(&map, &replay).unwrap();
+    assert_eq!(sim.end_time().get(), 220.0);
+    let mut events = Vec::new();
+    let stats = sim.finish_with(&mut |event| events.push(*event)).unwrap();
+    assert_eq!(stats.counts.count_300, 1);
+    assert_eq!(stats.counts.count_miss, 1);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].time.get(), 220.0);
+}

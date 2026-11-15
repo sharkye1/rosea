@@ -98,6 +98,10 @@ pub enum RoseaError {
     UnsupportedSimulationObject {
         object_id: ObjectId,
     },
+    IncompleteSimulation {
+        expected: u32,
+        actual: u64,
+    },
     NumericalError {
         line: usize,
         object_id: ObjectId,
@@ -237,6 +241,10 @@ impl fmt::Display for RoseaError {
                 f,
                 "Объект {} пока не поддерживается симуляцией",
                 object_id.0
+            ),
+            Self::IncompleteSimulation { expected, actual } => write!(
+                f,
+                "Симуляция завершена не полностью: объектов {expected}, итоговых оценок {actual}"
             ),
             Self::ScoreOverflow => write!(f, "Переполнение счёта или статистики"),
             Self::NumericalError { line, object_id } => {
