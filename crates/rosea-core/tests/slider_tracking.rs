@@ -255,3 +255,88 @@ fn hit_head_is_not_missed_at_deadline() {
     assert_eq!(stats.current_combo, 1);
     assert_eq!(stats.score, 30);
 }
+
+#[test]
+fn ticks_follow_tracking_and_are_applied_once() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|300:0,1,300";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let object = &map.objects()[0];
+    let mut state = SliderState::new(object).unwrap();
+    let buttons = ButtonState {
+        left: true,
+        right: false,
+    };
+    let mut stats = Stats::default();
+    assert_eq!(state.total_parts(), 4);
+    assert!(
+        state
+            .hit_head(
+                1000,
+                object.position(),
+                buttons,
+                map.hit_windows(),
+                10.0,
+                &mut stats
+            )
+            .unwrap()
+    );
+    let first = object.position_at_time(1500.0).unwrap();
+    assert!(
+        state
+            .sample(TimeMs::new(1500.0).unwrap(), first, buttons, 10.0)
+            .unwrap()
+    );
+    assert_eq!(state.tick(0, &mut stats), Ok(Some(true)));
+    assert_eq!(state.successful_parts(), 2);
+    assert_eq!(stats.score, 40);
+    assert_eq!(stats.current_combo, 2);
+    assert!(
+        !state
+            .sample(TimeMs::new(2000.0).unwrap(), first, buttons, 10.0)
+            .unwrap()
+    );
+    assert_eq!(state.tick(1, &mut stats), Ok(Some(false)));
+    assert_eq!(stats.score, 40);
+    assert_eq!(stats.current_combo, 0);
+    assert_eq!(stats.max_combo, 2);
+    assert_eq!(stats.counts, Default::default());
+    assert_eq!(state.successful_parts(), 2);
+    assert_eq!(state.tick(0, &mut stats), Ok(None));
+    assert_eq!(state.tick(2, &mut stats), Ok(None));
+    assert_eq!(state.tick(100, &mut stats), Ok(None));
+    assert_eq!(stats.score, 40);
+}
+
+#[test]
+fn failed_tick_can_be_retried_without_partial_updates() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|200:0,1,200";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let object = &map.objects()[0];
+    let mut state = SliderState::new(object).unwrap();
+    let buttons = ButtonState {
+        left: false,
+        right: true,
+    };
+    assert!(
+        state
+            .sample(
+                TimeMs::new(1500.0).unwrap(),
+                object.position_at_time(1500.0).unwrap(),
+                buttons,
+                10.0
+            )
+            .unwrap()
+    );
+    let mut stats = Stats {
+        score: u64::MAX,
+        ..Stats::default()
+    };
+    let original = stats;
+    assert_eq!(state.tick(0, &mut stats), Err(RoseaError::ScoreOverflow));
+    assert_eq!(stats, original);
+    assert_eq!(state.successful_parts(), 0);
+    stats.score = 0;
+    assert_eq!(state.tick(0, &mut stats), Ok(Some(true)));
+    assert_eq!(stats.score, 10);
+    assert_eq!(state.successful_parts(), 1);
+}

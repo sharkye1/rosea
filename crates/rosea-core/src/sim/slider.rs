@@ -2,11 +2,11 @@
 
 use crate::error::RoseaError;
 use crate::model::{ObjectId, Point, Stats, TimeMs};
-use crate::prepare::{HitWindows, PreparedSlider, StackedObject};
+use crate::prepare::{HitWindows, PreparedSlider, SliderEventKind, StackedObject};
 use crate::replay::ButtonState;
 
 use super::hit::{inside_radius, judge_click};
-use super::score::apply_slider_head;
+use super::score::{apply_slider_head, apply_slider_tick};
 
 /// Состояние головы и удержания одного подготовленного слайдера.
 pub struct SliderState<'a> {
@@ -14,15 +14,20 @@ pub struct SliderState<'a> {
     slider: &'a PreparedSlider,
     head_result: Option<bool>,
     tracking: bool,
+    processed_parts: Vec<bool>,
+    successful_parts: u32,
 }
 
 impl<'a> SliderState<'a> {
     pub fn new(object: &'a StackedObject) -> Option<Self> {
+        let slider = object.slider()?;
         Some(Self {
             object,
-            slider: object.slider()?,
+            slider,
             head_result: None,
             tracking: false,
+            processed_parts: vec![false; slider.timing().events.len()],
+            successful_parts: 0,
         })
     }
 
@@ -36,6 +41,14 @@ impl<'a> SliderState<'a> {
 
     pub fn tracking(&self) -> bool {
         self.tracking
+    }
+
+    pub fn successful_parts(&self) -> u32 {
+        self.successful_parts
+    }
+
+    pub fn total_parts(&self) -> u32 {
+        self.processed_parts.len() as u32 + 1
     }
 
     /// Обрабатывает один фронт нажатия по ещё не поражённой голове.
@@ -64,6 +77,7 @@ impl<'a> SliderState<'a> {
             };
         apply_slider_head(stats)?;
         self.head_result = Some(true);
+        self.successful_parts += 1;
         self.tracking = tracking;
         Ok(true)
     }
@@ -78,6 +92,24 @@ impl<'a> SliderState<'a> {
         self.head_result = Some(false);
         stats.current_combo = 0;
         true
+    }
+
+    /// Применяет тик после выборки tracking; повторный индекс игнорируется.
+    pub fn tick(&mut self, index: u32, stats: &mut Stats) -> Result<Option<bool>, RoseaError> {
+        let index = index as usize;
+        let Some(event) = self.slider.timing().events.get(index) else {
+            return Ok(None);
+        };
+        if event.kind != SliderEventKind::Tick || self.processed_parts[index] {
+            return Ok(None);
+        }
+        let hit = self.tracking;
+        apply_slider_tick(stats, hit)?;
+        self.processed_parts[index] = true;
+        if hit {
+            self.successful_parts += 1;
+        }
+        Ok(Some(hit))
     }
 
     /// Обновляет удержание на заданной выборке, используя подготовленный путь.
