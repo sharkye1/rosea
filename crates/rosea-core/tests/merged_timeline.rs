@@ -1,9 +1,11 @@
 use rosea_core::{
-    model::{Point, TimeMs},
+    error::RoseaError,
+    model::{HitCounts, Judgement, ObjectId, Point, Stats, TimeMs},
     parse::{osr, osu},
     prepare::{MapEventKind, prepare_map},
     replay::{ButtonState, normalize},
     sim::{
+        EventKind, SimEvent, Simulator,
         input::{InputAction, InputEvent},
         timeline::{Timeline, TimelineEvent},
     },
@@ -100,12 +102,71 @@ fn parsed_inputs_can_finish_circle_simulation_after_replay_ends() {
     let replay = normalize(osr(&replay_bytes()).unwrap().value.input)
         .unwrap()
         .value;
-    let sim = rosea_core::sim::Simulator::new(&map, &replay).unwrap();
+    let sim = Simulator::new(&map, &replay).unwrap();
     assert_eq!(sim.end_time().get(), 220.0);
     let mut events = Vec::new();
     let stats = sim.finish_with(&mut |event| events.push(*event)).unwrap();
-    assert_eq!(stats.counts.count_300, 1);
-    assert_eq!(stats.counts.count_miss, 1);
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[1].time.get(), 220.0);
+    assert_eq!(
+        stats,
+        Stats {
+            score: 300,
+            current_combo: 0,
+            max_combo: 1,
+            counts: HitCounts {
+                count_300: 1,
+                count_100: 0,
+                count_50: 0,
+                count_miss: 1
+            },
+        }
+    );
+    assert_eq!(
+        events,
+        [
+            SimEvent {
+                time: TimeMs::new(10.0).unwrap(),
+                object_id: ObjectId(0),
+                kind: EventKind::Circle,
+                part_index: None,
+                part_hit: None,
+                judgement: Some(Judgement::Great),
+                score_delta: 300,
+                combo_before: 0,
+                combo_after: 1,
+            },
+            SimEvent {
+                time: TimeMs::new(220.0).unwrap(),
+                object_id: ObjectId(1),
+                kind: EventKind::Circle,
+                part_index: None,
+                part_hit: None,
+                judgement: Some(Judgement::Miss),
+                score_delta: 0,
+                combo_before: 1,
+                combo_after: 0,
+            },
+        ]
+    );
+    assert_eq!(
+        Simulator::new(&map, &replay).unwrap().finish().unwrap(),
+        stats
+    );
+}
+
+#[test]
+fn circle_simulation_rejects_other_object_types() {
+    let replay = normalize(osr(&replay_bytes()).unwrap().value.input)
+        .unwrap()
+        .value;
+    let prefix = "osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,0,1,0\n";
+    for object in ["100,0,100,2,0,L|200:0,1,100", "256,192,100,8,0,200"] {
+        let input = format!("{prefix}{object}");
+        let map = prepare_map(&osu(input.as_bytes()).unwrap().value).unwrap();
+        assert!(matches!(
+            Simulator::new(&map, &replay),
+            Err(RoseaError::UnsupportedSimulationObject {
+                object_id: ObjectId(1)
+            })
+        ));
+    }
 }
