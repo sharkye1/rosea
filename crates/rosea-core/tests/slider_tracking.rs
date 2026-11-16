@@ -2,7 +2,7 @@ use rosea_core::{
     error::RoseaError,
     model::{ObjectId, Point, Stats, TimeMs},
     parse::osu,
-    prepare::prepare_map,
+    prepare::{SliderEventKind, prepare_map},
     replay::ButtonState,
     sim::slider::{SliderState, tracking_at_sample},
 };
@@ -443,4 +443,104 @@ fn missed_repeat_resets_combo_and_overflow_can_be_retried() {
     assert_eq!(stats.max_combo, 3);
     assert_eq!(stats.counts.count_miss, 0);
     assert_eq!(missed.successful_parts(), 0);
+}
+
+#[test]
+fn tail_check_uses_prepared_time_and_current_ball_once() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:0.01\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|300:0,3,300";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let object = &map.objects()[0];
+    let slider = object.slider().unwrap();
+    let tail_index = slider
+        .timing()
+        .events
+        .iter()
+        .position(|event| event.kind == SliderEventKind::TailCheck)
+        .unwrap() as u32;
+    let tail = &slider.timing().events[tail_index as usize];
+    assert_eq!(tail.time, slider.timing().tail_check_time);
+    assert!(tail.position.x < slider.timing().end_position.x - 1.0);
+
+    let mut state = SliderState::new(object).unwrap();
+    let buttons = ButtonState {
+        left: true,
+        right: false,
+    };
+    let time = TimeMs::new(tail.time).unwrap();
+    assert!(state.sample(time, tail.position, buttons, 1.0).unwrap());
+    let mut stats = Stats {
+        current_combo: 1,
+        max_combo: 1,
+        ..Stats::default()
+    };
+    assert_eq!(state.tail_check(tail_index, &mut stats), Ok(Some(true)));
+    assert_eq!(state.tail_check(tail_index, &mut stats), Ok(None));
+    assert_eq!(state.successful_parts(), 1);
+    assert_eq!(stats.score, 30);
+    assert_eq!(stats.current_combo, 2);
+
+    let other_part = slider
+        .timing()
+        .events
+        .iter()
+        .position(|event| event.kind != SliderEventKind::TailCheck)
+        .unwrap() as u32;
+    assert_eq!(state.tail_check(other_part, &mut stats), Ok(None));
+    assert_eq!(stats.score, 30);
+}
+
+#[test]
+fn missed_tail_keeps_combo_and_overflow_can_be_retried() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:0.01\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|100:0,1,100";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let object = &map.objects()[0];
+    let mut state = SliderState::new(object).unwrap();
+    let tail_index = object
+        .slider()
+        .unwrap()
+        .timing()
+        .events
+        .iter()
+        .position(|event| event.kind == SliderEventKind::TailCheck)
+        .unwrap() as u32;
+    let mut stats = Stats {
+        score: u64::MAX,
+        current_combo: 3,
+        max_combo: 3,
+        ..Stats::default()
+    };
+    assert_eq!(state.tail_check(tail_index, &mut stats), Ok(Some(false)));
+    assert_eq!(state.tail_check(tail_index, &mut stats), Ok(None));
+    assert_eq!(stats.score, u64::MAX);
+    assert_eq!(stats.current_combo, 3);
+    assert_eq!(stats.counts.count_miss, 0);
+
+    let mut successful = SliderState::new(object).unwrap();
+    let tail = &object.slider().unwrap().timing().events[tail_index as usize];
+    let buttons = ButtonState {
+        left: true,
+        right: false,
+    };
+    assert!(
+        successful
+            .sample(TimeMs::new(tail.time).unwrap(), tail.position, buttons, 1.0)
+            .unwrap()
+    );
+    let mut stats = Stats {
+        score: u64::MAX,
+        current_combo: 2,
+        max_combo: 2,
+        ..Stats::default()
+    };
+    assert_eq!(
+        successful.tail_check(tail_index, &mut stats),
+        Err(RoseaError::ScoreOverflow)
+    );
+    assert_eq!(successful.successful_parts(), 0);
+    stats.score = 0;
+    assert_eq!(
+        successful.tail_check(tail_index, &mut stats),
+        Ok(Some(true))
+    );
+    assert_eq!(stats.score, 30);
 }

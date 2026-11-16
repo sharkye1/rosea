@@ -6,7 +6,7 @@ use crate::prepare::{HitWindows, PreparedSlider, SliderEventKind, StackedObject}
 use crate::replay::ButtonState;
 
 use super::hit::{inside_radius, judge_click};
-use super::score::{apply_slider_head, apply_slider_repeat, apply_slider_tick};
+use super::score::{apply_slider_head, apply_slider_repeat, apply_slider_tail, apply_slider_tick};
 
 /// Состояние головы и удержания одного подготовленного слайдера.
 pub struct SliderState<'a> {
@@ -123,6 +123,28 @@ impl<'a> SliderState<'a> {
         }
         let hit = self.tracking;
         apply_slider_repeat(stats, hit)?;
+        self.processed_parts[index] = true;
+        if hit {
+            self.successful_parts += 1;
+        }
+        Ok(Some(hit))
+    }
+
+    /// Применяет единственную проверку хвоста после выборки tracking.
+    pub fn tail_check(
+        &mut self,
+        index: u32,
+        stats: &mut Stats,
+    ) -> Result<Option<bool>, RoseaError> {
+        let index = index as usize;
+        let Some(event) = self.slider.timing().events.get(index) else {
+            return Ok(None);
+        };
+        if event.kind != SliderEventKind::TailCheck || self.processed_parts[index] {
+            return Ok(None);
+        }
+        let hit = self.tracking;
+        apply_slider_tail(stats, hit)?;
         self.processed_parts[index] = true;
         if hit {
             self.successful_parts += 1;
