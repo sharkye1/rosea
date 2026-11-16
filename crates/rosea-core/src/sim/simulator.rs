@@ -1,18 +1,20 @@
 //! Прогон кругов по объединённой временной шкале.
 
 use crate::error::RoseaError;
-use crate::model::{Judgement, ObjectId, Stats, TimeMs};
+use crate::model::{Judgement, ObjectId, Point, Stats, TimeMs};
 use crate::prepare::{MapEventKind, PreparedMap, StackedObjectKind};
-use crate::replay::ReplayTimeline;
+use crate::replay::{ButtonState, ReplayTimeline};
 
 use super::hit::{inside_radius, judge_click};
 use super::input::InputEvent;
 use super::score::apply_circle;
+use super::slider::SliderState;
 use super::timeline::{Timeline, TimelineEvent};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EventKind {
     Circle,
+    SliderTick,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -28,24 +30,38 @@ pub struct SimEvent {
     pub combo_after: u32,
 }
 
-/// Частичный игровой прогон: пока поддерживаются только карты из кругов.
+/// Частичный прогон кругов и тиков слайдера.
 pub struct Simulator<'a> {
     map: &'a PreparedMap,
     timeline: Timeline<'a>,
     resolved: Vec<bool>,
+    sliders: Vec<Option<SliderState<'a>>>,
+    cursor: Point,
+    buttons: ButtonState,
     stats: Stats,
     failed: bool,
     end_time: TimeMs,
     current_time: Option<TimeMs>,
 }
 
+struct EventProcessor<'map, 'state, 'sim> {
+    map: &'map PreparedMap,
+    resolved: &'state mut [bool],
+    sliders: &'state mut [Option<SliderState<'sim>>],
+    cursor: &'state mut Point,
+    buttons: &'state mut ButtonState,
+    stats: &'state mut Stats,
+    emit: &'state mut dyn FnMut(&SimEvent),
+}
+
 impl<'a> Simulator<'a> {
     pub fn new(map: &'a PreparedMap, input: &'a ReplayTimeline) -> Result<Self, RoseaError> {
-        if let Some(object) = map
-            .objects()
-            .iter()
-            .find(|object| object.kind() != StackedObjectKind::Circle)
-        {
+        if let Some(object) = map.objects().iter().find(|object| {
+            !matches!(
+                object.kind(),
+                StackedObjectKind::Circle | StackedObjectKind::Slider(_)
+            )
+        }) {
             return Err(RoseaError::UnsupportedSimulationObject {
                 object_id: object.object_id(),
             });
@@ -64,6 +80,9 @@ impl<'a> Simulator<'a> {
             map,
             timeline: Timeline::new(map, input),
             resolved: vec![false; map.objects().len()],
+            sliders: map.objects().iter().map(SliderState::new).collect(),
+            cursor: Point { x: 256.0, y: 192.0 },
+            buttons: ButtonState::default(),
             stats: Stats::default(),
             failed: false,
             end_time,
@@ -92,72 +111,32 @@ impl<'a> Simulator<'a> {
             return Err(RoseaError::ScoreOverflow);
         }
         let map = self.map;
+        let timeline = &mut self.timeline;
         let resolved = &mut self.resolved;
+        let sliders = &mut self.sliders;
+        let cursor = &mut self.cursor;
+        let buttons = &mut self.buttons;
         let stats = &mut self.stats;
-        let mut failed = false;
-        self.timeline.advance_to(time, |time, event| {
-            if failed {
-                return;
-            }
-            let result = match event {
-                TimelineEvent::Input(InputEvent::Press { cursor, .. }) => {
-                    let candidate = map
-                        .objects()
-                        .iter()
-                        .filter_map(|object| {
-                            if resolved[object.object_id().0 as usize]
-                                || !inside_radius(
-                                    cursor,
-                                    object.position(),
-                                    map.visibility().radius,
-                                )
-                            {
-                                return None;
-                            }
-                            let start = TimeMs::new(object.start_time()).ok()?;
-                            let judgement =
-                                judge_click(map.hit_windows(), start, time.get() as i64)?;
-                            Some((object, judgement))
-                        })
-                        .min_by(|(a, _), (b, _)| {
-                            a.start_time()
-                                .total_cmp(&b.start_time())
-                                .then(a.object_id().0.cmp(&b.object_id().0))
-                        });
-                    candidate.map(|(object, judgement)| (object.object_id(), judgement))
-                }
-                TimelineEvent::Map(event)
-                    if event.kind == MapEventKind::CircleDeadline
-                        && !resolved[event.object_id.0 as usize] =>
-                {
-                    Some((event.object_id, Judgement::Miss))
-                }
-                _ => None,
-            };
-            if let Some((id, judgement)) = result {
-                let combo_before = stats.current_combo;
-                match apply_circle(stats, judgement, map.difficulty_multiplier()) {
-                    Ok(score_delta) => {
-                        resolved[id.0 as usize] = true;
-                        emit(&SimEvent {
-                            time,
-                            object_id: id,
-                            kind: EventKind::Circle,
-                            part_index: None,
-                            part_hit: None,
-                            judgement: Some(judgement),
-                            score_delta,
-                            combo_before,
-                            combo_after: stats.current_combo,
-                        });
-                    }
-                    Err(_) => failed = true,
-                }
+        let mut processor = EventProcessor {
+            map,
+            resolved,
+            sliders,
+            cursor,
+            buttons,
+            stats,
+            emit,
+        };
+        let mut failure = None;
+        timeline.advance_to(time, |time, event| {
+            if failure.is_none()
+                && let Err(error) = processor.process(time, event)
+            {
+                failure = Some(error);
             }
         })?;
-        if failed {
+        if let Some(error) = failure {
             self.failed = true;
-            return Err(RoseaError::ScoreOverflow);
+            return Err(error);
         }
         self.current_time = Some(time);
         Ok(())
@@ -183,6 +162,152 @@ impl<'a> Simulator<'a> {
             return Err(RoseaError::IncompleteSimulation { expected, actual });
         }
         Ok(self.stats)
+    }
+}
+
+impl EventProcessor<'_, '_, '_> {
+    fn process(&mut self, time: TimeMs, event: TimelineEvent) -> Result<(), RoseaError> {
+        match event {
+            TimelineEvent::Input(InputEvent::Record {
+                cursor: record_cursor,
+                buttons: record_buttons,
+                ..
+            }) => {
+                *self.cursor = record_cursor;
+                *self.buttons = record_buttons;
+            }
+            TimelineEvent::Input(
+                input @ InputEvent::RecordEnd {
+                    cursor: record_cursor,
+                    buttons: record_buttons,
+                    ..
+                },
+            ) => {
+                *self.cursor = record_cursor;
+                *self.buttons = record_buttons;
+                for slider in self.sliders.iter_mut().flatten() {
+                    slider.observe_input_event(time, input, self.map.visibility().radius)?;
+                }
+            }
+            TimelineEvent::Input(input @ InputEvent::End { cursor: end_cursor }) => {
+                *self.cursor = end_cursor;
+                *self.buttons = ButtonState::default();
+                for slider in self.sliders.iter_mut().flatten() {
+                    slider.observe_input_event(time, input, self.map.visibility().radius)?;
+                }
+            }
+            TimelineEvent::Input(InputEvent::Press {
+                cursor: click_cursor,
+                ..
+            }) => {
+                *self.cursor = click_cursor;
+                let candidate = self
+                    .map
+                    .objects()
+                    .iter()
+                    .filter_map(|object| {
+                        if object.kind() != StackedObjectKind::Circle
+                            || self.resolved[object.object_id().0 as usize]
+                            || !inside_radius(
+                                click_cursor,
+                                object.position(),
+                                self.map.visibility().radius,
+                            )
+                        {
+                            return None;
+                        }
+                        let start = TimeMs::new(object.start_time()).ok()?;
+                        let judgement =
+                            judge_click(self.map.hit_windows(), start, time.get() as i64)?;
+                        Some((object, judgement))
+                    })
+                    .min_by(|(a, _), (b, _)| {
+                        a.start_time()
+                            .total_cmp(&b.start_time())
+                            .then(a.object_id().0.cmp(&b.object_id().0))
+                    });
+                if let Some((object, judgement)) = candidate {
+                    let id = object.object_id();
+                    let combo_before = self.stats.current_combo;
+                    let score_delta =
+                        apply_circle(self.stats, judgement, self.map.difficulty_multiplier())?;
+                    self.resolved[id.0 as usize] = true;
+                    (self.emit)(&SimEvent {
+                        time,
+                        object_id: id,
+                        kind: EventKind::Circle,
+                        part_index: None,
+                        part_hit: None,
+                        judgement: Some(judgement),
+                        score_delta,
+                        combo_before,
+                        combo_after: self.stats.current_combo,
+                    });
+                }
+            }
+            TimelineEvent::Map(event) => match event.kind {
+                MapEventKind::CircleDeadline if !self.resolved[event.object_id.0 as usize] => {
+                    let combo_before = self.stats.current_combo;
+                    let score_delta = apply_circle(
+                        self.stats,
+                        Judgement::Miss,
+                        self.map.difficulty_multiplier(),
+                    )?;
+                    self.resolved[event.object_id.0 as usize] = true;
+                    (self.emit)(&SimEvent {
+                        time,
+                        object_id: event.object_id,
+                        kind: EventKind::Circle,
+                        part_index: None,
+                        part_hit: None,
+                        judgement: Some(Judgement::Miss),
+                        score_delta,
+                        combo_before,
+                        combo_after: self.stats.current_combo,
+                    });
+                }
+                MapEventKind::SliderStart
+                | MapEventKind::SliderTick
+                | MapEventKind::SliderRepeat
+                | MapEventKind::SliderTailCheck => {
+                    if let Some(Some(slider)) = self.sliders.get_mut(event.object_id.0 as usize) {
+                        slider.sample_for_map_events(
+                            time,
+                            *self.cursor,
+                            *self.buttons,
+                            self.map.visibility().radius,
+                            std::slice::from_ref(&event),
+                        )?;
+                        if event.kind == MapEventKind::SliderTick
+                            && let Some(index) = event.part_index
+                        {
+                            let combo_before = self.stats.current_combo;
+                            let score_before = self.stats.score;
+                            if let Some(hit) = slider.tick(index, self.stats)? {
+                                (self.emit)(&SimEvent {
+                                    time,
+                                    object_id: event.object_id,
+                                    kind: EventKind::SliderTick,
+                                    part_index: Some(index),
+                                    part_hit: Some(hit),
+                                    judgement: None,
+                                    score_delta: self.stats.score - score_before,
+                                    combo_before,
+                                    combo_after: self.stats.current_combo,
+                                });
+                            }
+                            debug_assert!(self.stats.score >= score_before);
+                            debug_assert!(
+                                self.stats.current_combo >= combo_before
+                                    || self.stats.current_combo == 0
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            },
+        }
+        Ok(())
     }
 }
 
@@ -408,5 +533,50 @@ mod tests {
             Simulator::new(&map, &replay),
             Err(RoseaError::UnsupportedSimulationObject { .. })
         ));
+    }
+
+    #[test]
+    fn slider_ticks_run_in_timeline_after_input_and_emit_part_results() {
+        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|300:0,1,300";
+        let map = prepare_map(&osu(map).unwrap().value).unwrap();
+        let replay = replay(&[(1000, 0.0, 1), (500, 100.0, 1), (500, 300.0, 0)]);
+        let mut sim = Simulator::new(&map, &replay).unwrap();
+        let mut events = Vec::new();
+        sim.advance_with(TimeMs::new(2000.0).unwrap(), &mut |event| {
+            events.push(*event)
+        })
+        .unwrap();
+
+        assert_eq!(sim.stats().score, 10);
+        assert_eq!(sim.stats().current_combo, 0);
+        assert_eq!(sim.stats().max_combo, 1);
+        assert_eq!(sim.stats().counts.count_miss, 0);
+        assert_eq!(
+            events,
+            [
+                SimEvent {
+                    time: TimeMs::new(1500.0).unwrap(),
+                    object_id: ObjectId(0),
+                    kind: EventKind::SliderTick,
+                    part_index: Some(0),
+                    part_hit: Some(true),
+                    judgement: None,
+                    score_delta: 10,
+                    combo_before: 0,
+                    combo_after: 1,
+                },
+                SimEvent {
+                    time: TimeMs::new(2000.0).unwrap(),
+                    object_id: ObjectId(0),
+                    kind: EventKind::SliderTick,
+                    part_index: Some(1),
+                    part_hit: Some(false),
+                    judgement: None,
+                    score_delta: 0,
+                    combo_before: 1,
+                    combo_after: 0,
+                },
+            ]
+        );
     }
 }

@@ -154,19 +154,21 @@ fn parsed_inputs_can_finish_circle_simulation_after_replay_ends() {
 }
 
 #[test]
-fn circle_simulation_rejects_other_object_types() {
+fn simulator_accepts_slider_ticks_but_rejects_spinners() {
     let replay = normalize(osr(&replay_bytes()).unwrap().value.input)
         .unwrap()
         .value;
     let prefix = "osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,0,1,0\n";
-    for object in ["100,0,100,2,0,L|200:0,1,100", "256,192,100,8,0,200"] {
-        let input = format!("{prefix}{object}");
-        let map = prepare_map(&osu(input.as_bytes()).unwrap().value).unwrap();
-        assert!(matches!(
-            Simulator::new(&map, &replay),
-            Err(RoseaError::UnsupportedSimulationObject {
-                object_id: ObjectId(1)
-            })
-        ));
-    }
+    let slider_map = format!("{prefix}100,0,100,2,0,L|200:0,1,100");
+    let slider_map = prepare_map(&osu(slider_map.as_bytes()).unwrap().value).unwrap();
+    assert!(Simulator::new(&slider_map, &replay).is_ok());
+
+    let spinner_map = format!("{prefix}256,192,100,8,0,200");
+    let spinner_map = prepare_map(&osu(spinner_map.as_bytes()).unwrap().value).unwrap();
+    assert!(matches!(
+        Simulator::new(&spinner_map, &replay),
+        Err(RoseaError::UnsupportedSimulationObject {
+            object_id: ObjectId(1)
+        })
+    ));
 }

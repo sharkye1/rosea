@@ -17,6 +17,8 @@ pub struct SliderState<'a> {
     slider: &'a PreparedSlider,
     head_result: Option<bool>,
     tracking: bool,
+    last_input_sample_time: Option<TimeMs>,
+    last_map_sample_time: Option<TimeMs>,
     processed_parts: Vec<bool>,
     successful_parts: u32,
 }
@@ -29,6 +31,8 @@ impl<'a> SliderState<'a> {
             slider,
             head_result: None,
             tracking: false,
+            last_input_sample_time: None,
+            last_map_sample_time: None,
             processed_parts: vec![false; slider.timing().events.len()],
             successful_parts: 0,
         })
@@ -184,10 +188,16 @@ impl<'a> SliderState<'a> {
         match event {
             InputEvent::RecordEnd {
                 cursor, buttons, ..
-            } => self.sample(time, cursor, buttons, radius).map(Some),
-            InputEvent::End { cursor } => self
-                .sample(time, cursor, ButtonState::default(), radius)
-                .map(Some),
+            } => {
+                let tracking = self.sample(time, cursor, buttons, radius)?;
+                self.last_input_sample_time = Some(time);
+                Ok(Some(tracking))
+            }
+            InputEvent::End { cursor } => {
+                let tracking = self.sample(time, cursor, ButtonState::default(), radius)?;
+                self.last_input_sample_time = Some(time);
+                Ok(Some(tracking))
+            }
             InputEvent::Record { .. } | InputEvent::Press { .. } => Ok(None),
         }
     }
@@ -215,7 +225,15 @@ impl<'a> SliderState<'a> {
         if !has_slider_event {
             return Ok(None);
         }
-        self.sample(time, cursor, buttons, radius).map(Some)
+        if self.last_input_sample_time == Some(time) {
+            return Ok(Some(self.tracking));
+        }
+        if self.last_map_sample_time == Some(time) {
+            return Ok(Some(self.tracking));
+        }
+        let tracking = self.sample(time, cursor, buttons, radius)?;
+        self.last_map_sample_time = Some(time);
+        Ok(Some(tracking))
     }
 }
 
