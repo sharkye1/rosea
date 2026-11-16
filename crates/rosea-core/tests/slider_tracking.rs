@@ -4,7 +4,10 @@ use rosea_core::{
     parse::osu,
     prepare::{SliderEventKind, prepare_map},
     replay::ButtonState,
-    sim::slider::{SliderState, tracking_at_sample},
+    sim::{
+        input::{InputAction, InputEvent},
+        slider::{SliderState, tracking_at_sample},
+    },
 };
 
 #[test]
@@ -543,4 +546,140 @@ fn missed_tail_keeps_combo_and_overflow_can_be_retried() {
         Ok(Some(true))
     );
     assert_eq!(stats.score, 30);
+}
+
+#[test]
+fn record_end_events_refresh_tracking_after_each_record_and_eof_releases_it() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:0.01\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|100:0,1,100";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let object = &map.objects()[0];
+    let mut state = SliderState::new(object).unwrap();
+    let mut stats = Stats {
+        current_combo: 2,
+        max_combo: 2,
+        ..Stats::default()
+    };
+    assert!(state.timeout_head(TimeMs::new(1120.0).unwrap(), map.hit_windows(), &mut stats));
+    assert!(!state.head_hit());
+
+    let cursor = object.position_at_time(1121.0).unwrap();
+    let held = ButtonState {
+        left: true,
+        right: false,
+    };
+    assert_eq!(
+        state.observe_input_event(
+            TimeMs::new(1121.0).unwrap(),
+            InputEvent::Record {
+                index: 0,
+                cursor,
+                buttons: held,
+            },
+            10.0,
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        state.observe_input_event(
+            TimeMs::new(1121.0).unwrap(),
+            InputEvent::Press {
+                index: 0,
+                cursor,
+                action: InputAction::Left,
+            },
+            10.0,
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        state.observe_input_event(
+            TimeMs::new(1121.0).unwrap(),
+            InputEvent::RecordEnd {
+                index: 0,
+                cursor,
+                buttons: held,
+            },
+            10.0,
+        ),
+        Ok(Some(true))
+    );
+
+    let held_cursor = Point {
+        x: cursor.x + 20.0,
+        y: cursor.y,
+    };
+    assert_eq!(
+        state.observe_input_event(
+            TimeMs::new(1122.0).unwrap(),
+            InputEvent::RecordEnd {
+                index: 1,
+                cursor: held_cursor,
+                buttons: held,
+            },
+            10.0,
+        ),
+        Ok(Some(true))
+    );
+    let outside = Point {
+        x: cursor.x + 25.0,
+        y: cursor.y,
+    };
+    assert_eq!(
+        state.observe_input_event(
+            TimeMs::new(1123.0).unwrap(),
+            InputEvent::RecordEnd {
+                index: 2,
+                cursor: outside,
+                buttons: held,
+            },
+            10.0,
+        ),
+        Ok(Some(false))
+    );
+    assert_eq!(
+        state.observe_input_event(
+            TimeMs::new(1124.0).unwrap(),
+            InputEvent::RecordEnd {
+                index: 3,
+                cursor,
+                buttons: held,
+            },
+            10.0,
+        ),
+        Ok(Some(true))
+    );
+    assert_eq!(
+        state.observe_input_event(
+            TimeMs::new(1124.0).unwrap(),
+            InputEvent::End { cursor },
+            10.0,
+        ),
+        Ok(Some(false))
+    );
+    assert!(!state.tracking());
+}
+
+#[test]
+fn successful_head_immediately_uses_the_expanded_tracking_radius() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:0.01\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|100:0,1,100";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let object = &map.objects()[0];
+    let mut state = SliderState::new(object).unwrap();
+    let buttons = ButtonState {
+        left: true,
+        right: false,
+    };
+    let click = Point { x: 10.0, y: 0.0 };
+    let ball = object.position_at_time(1110.0).unwrap();
+    assert_eq!(ball, Point { x: 22.0, y: 0.0 });
+    assert!(!tracking_at_sample(false, buttons, click, ball, 10.0));
+    assert!(tracking_at_sample(true, buttons, click, ball, 10.0));
+
+    let mut stats = Stats::default();
+    assert!(
+        state
+            .hit_head(1110, click, buttons, map.hit_windows(), 10.0, &mut stats)
+            .unwrap()
+    );
+    assert!(state.tracking());
 }

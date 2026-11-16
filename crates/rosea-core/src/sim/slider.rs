@@ -6,6 +6,7 @@ use crate::prepare::{HitWindows, PreparedSlider, SliderEventKind, StackedObject}
 use crate::replay::ButtonState;
 
 use super::hit::{inside_radius, judge_click};
+use super::input::InputEvent;
 use super::score::{apply_slider_head, apply_slider_repeat, apply_slider_tail, apply_slider_tick};
 
 /// Состояние головы и удержания одного подготовленного слайдера.
@@ -169,6 +170,24 @@ impl<'a> SliderState<'a> {
                 tracking_at_sample(self.tracking, buttons, cursor, ball, radius)
             };
         Ok(self.tracking)
+    }
+
+    /// Обновляет tracking после завершённой записи ввода или отпускания EOF.
+    pub fn observe_input_event(
+        &mut self,
+        time: TimeMs,
+        event: InputEvent,
+        radius: f32,
+    ) -> Result<Option<bool>, RoseaError> {
+        match event {
+            InputEvent::RecordEnd {
+                cursor, buttons, ..
+            } => self.sample(time, cursor, buttons, radius).map(Some),
+            InputEvent::End { cursor } => self
+                .sample(time, cursor, ButtonState::default(), radius)
+                .map(Some),
+            InputEvent::Record { .. } | InputEvent::Press { .. } => Ok(None),
+        }
     }
 }
 
