@@ -2,7 +2,9 @@
 
 use crate::error::RoseaError;
 use crate::model::{ObjectId, Point, Stats, TimeMs};
-use crate::prepare::{HitWindows, PreparedSlider, SliderEventKind, StackedObject};
+use crate::prepare::{
+    HitWindows, MapEvent, MapEventKind, PreparedSlider, SliderEventKind, StackedObject,
+};
 use crate::replay::ButtonState;
 
 use super::hit::{inside_radius, judge_click};
@@ -188,6 +190,32 @@ impl<'a> SliderState<'a> {
                 .map(Some),
             InputEvent::Record { .. } | InputEvent::Press { .. } => Ok(None),
         }
+    }
+
+    /// Делает одну выборку для группы, если она содержит событие этого слайдера.
+    pub fn sample_for_map_events(
+        &mut self,
+        time: TimeMs,
+        cursor: Point,
+        buttons: ButtonState,
+        radius: f32,
+        events: &[MapEvent],
+    ) -> Result<Option<bool>, RoseaError> {
+        let has_slider_event = events.iter().any(|event| {
+            event.object_id == self.object_id()
+                && event.time == time
+                && matches!(
+                    event.kind,
+                    MapEventKind::SliderStart
+                        | MapEventKind::SliderTick
+                        | MapEventKind::SliderRepeat
+                        | MapEventKind::SliderTailCheck
+                )
+        });
+        if !has_slider_event {
+            return Ok(None);
+        }
+        self.sample(time, cursor, buttons, radius).map(Some)
     }
 }
 

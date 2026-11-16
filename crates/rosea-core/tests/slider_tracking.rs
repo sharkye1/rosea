@@ -683,3 +683,66 @@ fn successful_head_immediately_uses_the_expanded_tracking_radius() {
     );
     assert!(state.tracking());
 }
+
+#[test]
+fn map_event_group_samples_only_its_slider_once_for_start_and_parts() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|0:0,2,0\n100,0,1000,2,0,L|100:0,2,0";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let time = TimeMs::new(1000.0).unwrap();
+    let events: Vec<_> = map
+        .events()
+        .iter()
+        .filter(|event| event.time == time)
+        .copied()
+        .collect();
+    let target_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.object_id == ObjectId(0))
+        .copied()
+        .collect();
+    assert!(target_events.len() > 1);
+
+    let mut state = SliderState::new(&map.objects()[0]).unwrap();
+    let buttons = ButtonState {
+        left: true,
+        right: false,
+    };
+    let cursor = Point { x: 0.0, y: 0.0 };
+    assert_eq!(
+        state.sample_for_map_events(time, cursor, buttons, 10.0, &events),
+        Ok(Some(true))
+    );
+    assert!(state.tracking());
+
+    let other_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.object_id == ObjectId(1))
+        .copied()
+        .collect();
+    let mut other_state = SliderState::new(&map.objects()[1]).unwrap();
+    assert_eq!(
+        other_state.sample_for_map_events(time, cursor, buttons, 10.0, &target_events),
+        Ok(None)
+    );
+    assert!(!other_state.tracking());
+    assert_eq!(
+        other_state.sample_for_map_events(time, cursor, buttons, 10.0, &other_events),
+        Ok(Some(false))
+    );
+    assert!(!other_state.tracking());
+
+    let end_only: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event.object_id == ObjectId(0)
+                && event.kind == rosea_core::prepare::MapEventKind::SliderEnd
+        })
+        .copied()
+        .collect();
+    let mut untouched = SliderState::new(&map.objects()[0]).unwrap();
+    assert_eq!(
+        untouched.sample_for_map_events(time, cursor, buttons, 10.0, &end_only),
+        Ok(None)
+    );
+    assert!(!untouched.tracking());
+}
