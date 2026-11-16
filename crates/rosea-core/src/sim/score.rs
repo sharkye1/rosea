@@ -85,3 +85,23 @@ pub fn apply_slider_tick(stats: &mut Stats, hit: bool) -> Result<u64, RoseaError
     *stats = updated;
     Ok(10)
 }
+
+/// Применяет результат повтора слайдера без итоговой оценки объекта.
+pub fn apply_slider_repeat(stats: &mut Stats, hit: bool) -> Result<u64, RoseaError> {
+    if !hit {
+        stats.current_combo = 0;
+        return Ok(0);
+    }
+    let mut updated = *stats;
+    updated.score = updated
+        .score
+        .checked_add(30)
+        .ok_or(RoseaError::ScoreOverflow)?;
+    updated.current_combo = updated
+        .current_combo
+        .checked_add(1)
+        .ok_or(RoseaError::ScoreOverflow)?;
+    updated.max_combo = updated.max_combo.max(updated.current_combo);
+    *stats = updated;
+    Ok(30)
+}

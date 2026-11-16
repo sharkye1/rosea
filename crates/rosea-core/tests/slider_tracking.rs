@@ -340,3 +340,107 @@ fn failed_tick_can_be_retried_without_partial_updates() {
     assert_eq!(stats.score, 10);
     assert_eq!(state.successful_parts(), 1);
 }
+
+#[test]
+fn repeat_uses_alternating_path_and_is_applied_once() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:0.01\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|100:0,3,100";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let object = &map.objects()[0];
+    let mut state = SliderState::new(object).unwrap();
+    let buttons = ButtonState {
+        left: true,
+        right: false,
+    };
+    let mut stats = Stats::default();
+    assert!(
+        state
+            .hit_head(
+                1000,
+                object.position(),
+                buttons,
+                map.hit_windows(),
+                10.0,
+                &mut stats
+            )
+            .unwrap()
+    );
+
+    let repeat_position = object.position_at_time(1500.0).unwrap();
+    assert_eq!(repeat_position, Point { x: 100.0, y: 0.0 });
+    assert!(
+        state
+            .sample(TimeMs::new(1500.0).unwrap(), repeat_position, buttons, 10.0)
+            .unwrap()
+    );
+    assert_eq!(state.repeat(0, &mut stats), Ok(Some(true)));
+    assert_eq!(state.repeat(0, &mut stats), Ok(None));
+    let second_repeat_position = object.position_at_time(2000.0).unwrap();
+    assert_eq!(second_repeat_position, Point { x: 0.0, y: 0.0 });
+    assert!(
+        state
+            .sample(
+                TimeMs::new(2000.0).unwrap(),
+                second_repeat_position,
+                buttons,
+                10.0
+            )
+            .unwrap()
+    );
+    assert_eq!(state.repeat(1, &mut stats), Ok(Some(true)));
+    assert_eq!(state.repeat(1, &mut stats), Ok(None));
+    assert_eq!(state.successful_parts(), 3);
+    assert_eq!(stats.score, 90);
+    assert_eq!(stats.current_combo, 3);
+
+    assert_eq!(state.repeat(2, &mut stats), Ok(None));
+    let last_event = object.slider().unwrap().timing().events.len() as u32;
+    assert_eq!(state.repeat(last_event, &mut stats), Ok(None));
+    assert_eq!(stats.score, 90);
+}
+
+#[test]
+fn missed_repeat_resets_combo_and_overflow_can_be_retried() {
+    let bytes = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:0.01\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|100:0,2,100";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let object = &map.objects()[0];
+    let mut state = SliderState::new(object).unwrap();
+    let mut stats = Stats {
+        score: u64::MAX,
+        current_combo: 4,
+        max_combo: 4,
+        ..Stats::default()
+    };
+    let buttons = ButtonState {
+        left: true,
+        right: false,
+    };
+    assert!(
+        state
+            .sample(
+                TimeMs::new(1500.0).unwrap(),
+                object.position_at_time(1500.0).unwrap(),
+                buttons,
+                10.0
+            )
+            .unwrap()
+    );
+    assert_eq!(state.repeat(0, &mut stats), Err(RoseaError::ScoreOverflow));
+    assert_eq!(state.successful_parts(), 0);
+    stats.score = 0;
+    assert_eq!(state.repeat(0, &mut stats), Ok(Some(true)));
+    assert_eq!(stats.score, 30);
+
+    let mut missed = SliderState::new(object).unwrap();
+    let mut stats = Stats {
+        current_combo: 3,
+        max_combo: 3,
+        ..Stats::default()
+    };
+    assert_eq!(missed.repeat(0, &mut stats), Ok(Some(false)));
+    assert_eq!(missed.repeat(0, &mut stats), Ok(None));
+    assert_eq!(stats.score, 0);
+    assert_eq!(stats.current_combo, 0);
+    assert_eq!(stats.max_combo, 3);
+    assert_eq!(stats.counts.count_miss, 0);
+    assert_eq!(missed.successful_parts(), 0);
+}

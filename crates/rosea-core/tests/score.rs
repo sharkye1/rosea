@@ -1,7 +1,7 @@
 use rosea_core::{
     error::RoseaError,
     model::{HitCounts, Judgement, Stats},
-    sim::score::{apply_circle, apply_slider_head, award},
+    sim::score::{apply_circle, apply_slider_head, apply_slider_repeat, award},
 };
 
 #[test]
@@ -61,6 +61,52 @@ fn slider_head_overflow_does_not_partially_update_stats() {
         let original = stats;
         assert_eq!(
             apply_slider_head(&mut stats),
+            Err(RoseaError::ScoreOverflow)
+        );
+        assert_eq!(stats, original);
+    }
+}
+
+#[test]
+fn slider_repeat_awards_thirty_or_resets_combo_without_counting_miss() {
+    let mut stats = Stats {
+        score: 100,
+        current_combo: 2,
+        max_combo: 5,
+        counts: HitCounts {
+            count_100: 1,
+            ..HitCounts::default()
+        },
+    };
+    assert_eq!(apply_slider_repeat(&mut stats, true), Ok(30));
+    assert_eq!(stats.score, 130);
+    assert_eq!(stats.current_combo, 3);
+    assert_eq!(stats.max_combo, 5);
+    assert_eq!(stats.counts.count_miss, 0);
+
+    assert_eq!(apply_slider_repeat(&mut stats, false), Ok(0));
+    assert_eq!(stats.score, 130);
+    assert_eq!(stats.current_combo, 0);
+    assert_eq!(stats.max_combo, 5);
+    assert_eq!(stats.counts.count_miss, 0);
+}
+
+#[test]
+fn slider_repeat_overflow_does_not_partially_update_stats() {
+    for mut stats in [
+        Stats {
+            score: u64::MAX - 29,
+            ..Stats::default()
+        },
+        Stats {
+            current_combo: u32::MAX,
+            max_combo: u32::MAX,
+            ..Stats::default()
+        },
+    ] {
+        let original = stats;
+        assert_eq!(
+            apply_slider_repeat(&mut stats, true),
             Err(RoseaError::ScoreOverflow)
         );
         assert_eq!(stats, original);
