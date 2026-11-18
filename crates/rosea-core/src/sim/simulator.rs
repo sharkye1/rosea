@@ -1,9 +1,9 @@
 //! Прогон кругов по объединённой временной шкале.
 
 use crate::error::RoseaError;
-use crate::model::{Judgement, ObjectId, Point, Stats, TimeMs};
+use crate::model::{Judgement, ObjectId, Stats, TimeMs};
 use crate::prepare::{MapEventKind, PreparedMap, StackedObjectKind};
-use crate::replay::{ButtonState, ReplayTimeline};
+use crate::replay::ReplayTimeline;
 
 use super::hit::{inside_radius, judge_click};
 use super::input::InputEvent;
@@ -33,11 +33,10 @@ pub struct SimEvent {
 /// Частичный прогон кругов и тиков слайдера.
 pub struct Simulator<'a> {
     map: &'a PreparedMap,
+    replay: &'a ReplayTimeline,
     timeline: Timeline<'a>,
     resolved: Vec<bool>,
     sliders: Vec<Option<SliderState<'a>>>,
-    cursor: Point,
-    buttons: ButtonState,
     stats: Stats,
     failed: bool,
     end_time: TimeMs,
@@ -46,10 +45,9 @@ pub struct Simulator<'a> {
 
 struct EventProcessor<'map, 'state, 'sim> {
     map: &'map PreparedMap,
+    replay: &'map ReplayTimeline,
     resolved: &'state mut [bool],
     sliders: &'state mut [Option<SliderState<'sim>>],
-    cursor: &'state mut Point,
-    buttons: &'state mut ButtonState,
     stats: &'state mut Stats,
     emit: &'state mut dyn FnMut(&SimEvent),
 }
@@ -76,13 +74,18 @@ impl<'a> Simulator<'a> {
                 end_time = object.latest_resolution;
             }
         }
+        // ObjectId — плотный индекс исходной записи до сортировки карты.
+        let mut sliders = Vec::new();
+        sliders.resize_with(map.objects().len(), || None);
+        for object in map.objects() {
+            sliders[object.object_id().0 as usize] = SliderState::new(object);
+        }
         Ok(Self {
             map,
+            replay: input,
             timeline: Timeline::new(map, input),
             resolved: vec![false; map.objects().len()],
-            sliders: map.objects().iter().map(SliderState::new).collect(),
-            cursor: Point { x: 256.0, y: 192.0 },
-            buttons: ButtonState::default(),
+            sliders,
             stats: Stats::default(),
             failed: false,
             end_time,
@@ -114,15 +117,12 @@ impl<'a> Simulator<'a> {
         let timeline = &mut self.timeline;
         let resolved = &mut self.resolved;
         let sliders = &mut self.sliders;
-        let cursor = &mut self.cursor;
-        let buttons = &mut self.buttons;
         let stats = &mut self.stats;
         let mut processor = EventProcessor {
             map,
+            replay: self.replay,
             resolved,
             sliders,
-            cursor,
-            buttons,
             stats,
             emit,
         };
@@ -168,30 +168,10 @@ impl<'a> Simulator<'a> {
 impl EventProcessor<'_, '_, '_> {
     fn process(&mut self, time: TimeMs, event: TimelineEvent) -> Result<(), RoseaError> {
         match event {
-            TimelineEvent::Input(InputEvent::Record {
-                cursor: record_cursor,
-                buttons: record_buttons,
-                ..
-            }) => {
-                *self.cursor = record_cursor;
-                *self.buttons = record_buttons;
-            }
+            TimelineEvent::Input(InputEvent::Record { .. }) => {}
             TimelineEvent::Input(
-                input @ InputEvent::RecordEnd {
-                    cursor: record_cursor,
-                    buttons: record_buttons,
-                    ..
-                },
+                input @ (InputEvent::RecordEnd { .. } | InputEvent::End { .. }),
             ) => {
-                *self.cursor = record_cursor;
-                *self.buttons = record_buttons;
-                for slider in self.sliders.iter_mut().flatten() {
-                    slider.observe_input_event(time, input, self.map.visibility().radius)?;
-                }
-            }
-            TimelineEvent::Input(input @ InputEvent::End { cursor: end_cursor }) => {
-                *self.cursor = end_cursor;
-                *self.buttons = ButtonState::default();
                 for slider in self.sliders.iter_mut().flatten() {
                     slider.observe_input_event(time, input, self.map.visibility().radius)?;
                 }
@@ -200,7 +180,6 @@ impl EventProcessor<'_, '_, '_> {
                 cursor: click_cursor,
                 ..
             }) => {
-                *self.cursor = click_cursor;
                 let candidate = self
                     .map
                     .objects()
@@ -273,8 +252,8 @@ impl EventProcessor<'_, '_, '_> {
                     if let Some(Some(slider)) = self.sliders.get_mut(event.object_id.0 as usize) {
                         slider.sample_for_map_events(
                             time,
-                            *self.cursor,
-                            *self.buttons,
+                            self.replay.cursor_at(time),
+                            self.replay.buttons_at(time),
                             self.map.visibility().radius,
                             std::slice::from_ref(&event),
                         )?;
@@ -315,14 +294,16 @@ impl EventProcessor<'_, '_, '_> {
 mod tests {
     use crate::{
         error::RoseaError,
-        model::{Judgement, ObjectId, Point, ReplayInput, ReplayRecord, TimeMs},
+        model::{Judgement, ObjectId, Point, ReplayInput, ReplayRecord, Stats, TimeMs},
         parse::osu,
-        prepare::prepare_map,
-        replay::normalize,
+        prepare::{PreparedMap, prepare_map},
+        replay::{ReplayTimeline, normalize},
         sim::{EventKind, SimEvent, Simulator},
     };
 
-    fn replay(records: &[(i64, f32, u32)]) -> crate::replay::ReplayTimeline {
+    const ONE_TICK_SLIDER: &str = "0,0,1000,2,0,L|200:0,1,200";
+
+    fn replay(records: &[(i64, f32, u32)]) -> ReplayTimeline {
         normalize(ReplayInput {
             records: records
                 .iter()
@@ -338,6 +319,179 @@ mod tests {
         })
         .unwrap()
         .value
+    }
+
+    fn slider_map(objects: &str) -> PreparedMap {
+        let map = format!(
+            "osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n{objects}"
+        );
+        prepare_map(&osu(map.as_bytes()).unwrap().value).unwrap()
+    }
+
+    fn run_with_journal(
+        map: &PreparedMap,
+        replay: &ReplayTimeline,
+        times: impl IntoIterator<Item = f64>,
+    ) -> (Stats, Vec<SimEvent>) {
+        let mut sim = Simulator::new(map, replay).unwrap();
+        let mut events = Vec::new();
+        for time in times {
+            sim.advance_with(TimeMs::new(time).unwrap(), &mut |event| events.push(*event))
+                .unwrap();
+        }
+        (sim.stats(), events)
+    }
+
+    fn tick_event(
+        time: f64,
+        object_id: u32,
+        index: u32,
+        hit: bool,
+        score_delta: u64,
+        combo: (u32, u32),
+    ) -> SimEvent {
+        SimEvent {
+            time: TimeMs::new(time).unwrap(),
+            object_id: ObjectId(object_id),
+            kind: EventKind::SliderTick,
+            part_index: Some(index),
+            part_hit: Some(hit),
+            judgement: None,
+            score_delta,
+            combo_before: combo.0,
+            combo_after: combo.1,
+        }
+    }
+
+    #[test]
+    fn slider_state_uses_source_id_on_unsorted_maps() {
+        let circle = "300,0,4000,1,0";
+        let input = replay(&[
+            (1000, 0.0, 1),
+            (500, 100.0, 1),
+            (500, 200.0, 0),
+            (2000, 300.0, 1),
+        ]);
+        let ordered = slider_map(&format!("{ONE_TICK_SLIDER}\n{circle}"));
+        let reversed = slider_map(&format!("{circle}\n{ONE_TICK_SLIDER}"));
+        let (ordered_stats, ordered_events) = run_with_journal(&ordered, &input, [4120.0]);
+        let (reversed_stats, reversed_events) = run_with_journal(&reversed, &input, [4120.0]);
+        assert_eq!(
+            ordered_events,
+            [
+                tick_event(1500.0, 0, 0, true, 10, (0, 1)),
+                SimEvent {
+                    time: TimeMs::new(4000.0).unwrap(),
+                    object_id: ObjectId(1),
+                    kind: EventKind::Circle,
+                    part_index: None,
+                    part_hit: None,
+                    judgement: Some(Judgement::Great),
+                    score_delta: 300,
+                    combo_before: 1,
+                    combo_after: 2,
+                },
+            ]
+        );
+        assert_eq!(ordered_stats.score, 310);
+        let expected_reversed = [
+            SimEvent {
+                object_id: ObjectId(1),
+                ..ordered_events[0]
+            },
+            SimEvent {
+                object_id: ObjectId(0),
+                ..ordered_events[1]
+            },
+        ];
+        assert_eq!(reversed_events, expected_reversed);
+        assert_eq!(reversed_stats, ordered_stats);
+    }
+
+    #[test]
+    fn slider_tick_matches_with_or_without_a_record_at_tick_time() {
+        let map = slider_map(ONE_TICK_SLIDER);
+        let sparse = replay(&[(1000, 0.0, 1), (1000, 200.0, 1)]);
+        let dense = replay(&[(1000, 0.0, 1), (500, 100.0, 1), (500, 200.0, 1)]);
+        let expected = run_with_journal(&map, &dense, [2000.0]);
+        assert_eq!(expected.1, [tick_event(1500.0, 0, 0, true, 10, (0, 1))]);
+        assert_eq!(expected.0.score, 10);
+        assert_eq!(run_with_journal(&map, &sparse, [2000.0]), expected);
+    }
+
+    #[test]
+    fn slider_ticks_use_the_correct_endpoints_of_equal_time_input_groups() {
+        let map = slider_map("0,0,1000,2,0,L|300:0,1,300");
+        let input = replay(&[
+            (1000, 300.0, 1),
+            (0, 0.0, 1),
+            (1000, 200.0, 1),
+            (0, 400.0, 1),
+            (500, 300.0, 1),
+        ]);
+        let (stats, events) = run_with_journal(&map, &input, [2500.0]);
+        assert_eq!(
+            events,
+            [
+                tick_event(1500.0, 0, 0, true, 10, (0, 1)),
+                tick_event(2000.0, 0, 1, false, 0, (1, 0)),
+            ]
+        );
+        assert_eq!(stats.score, 10);
+    }
+
+    #[test]
+    fn eof_releases_buttons_after_last_press_and_before_map_parts() {
+        let map = slider_map("0,0,1000,2,0,L|300:0,2,300\n200,0,2000,1,0");
+        let input = replay(&[(1000, 0.0, 1), (1000, 200.0, 3)]);
+        let (stats, events) = run_with_journal(&map, &input, [4000.0]);
+        assert_eq!(
+            events,
+            [
+                tick_event(1500.0, 0, 0, true, 10, (0, 1)),
+                SimEvent {
+                    time: TimeMs::new(2000.0).unwrap(),
+                    object_id: ObjectId(1),
+                    kind: EventKind::Circle,
+                    part_index: None,
+                    part_hit: None,
+                    judgement: Some(Judgement::Great),
+                    score_delta: 300,
+                    combo_before: 1,
+                    combo_after: 2,
+                },
+                tick_event(2000.0, 0, 1, false, 0, (2, 0)),
+                tick_event(3000.0, 0, 3, false, 0, (0, 0)),
+                tick_event(3500.0, 0, 4, false, 0, (0, 0)),
+            ]
+        );
+        assert_eq!(stats.score, 310);
+        assert_eq!(stats.max_combo, 2);
+    }
+
+    #[test]
+    fn slider_tracking_is_independent_of_advance_frequency() {
+        let map = slider_map(ONE_TICK_SLIDER);
+        // Курсор проходит через шарик между событиями. К моменту тика он
+        // находится в радиусе удержания, но уже вне радиуса захвата.
+        let input = replay(&[(1000, -100.0, 1), (1000, 400.0, 1)]);
+        let expected = run_with_journal(&map, &input, [2000.0]);
+        assert_eq!(expected.1, [tick_event(1500.0, 0, 0, false, 0, (0, 0))]);
+        for fps in [30.0, 60.0, 144.0] {
+            let times = (0..)
+                .map(|frame| f64::from(frame) * 1000.0 / fps)
+                .take_while(|&time| time < 2000.0)
+                .chain([2000.0]);
+            assert_eq!(run_with_journal(&map, &input, times), expected, "{fps} FPS");
+        }
+        assert_eq!(
+            run_with_journal(
+                &map,
+                &input,
+                [1000.0, 1333.25, 1499.5, 1500.0, 1500.0, 2000.0]
+            ),
+            expected
+        );
     }
 
     #[test]
