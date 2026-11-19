@@ -46,6 +46,10 @@ impl<'a> SliderState<'a> {
         self.head_result == Some(true)
     }
 
+    pub(super) fn head_is_pending(&self) -> bool {
+        self.head_result.is_none()
+    }
+
     pub fn tracking(&self) -> bool {
         self.tracking
     }
@@ -76,7 +80,7 @@ impl<'a> SliderState<'a> {
         radius: f32,
         stats: &mut Stats,
     ) -> Result<bool, RoseaError> {
-        if self.head_result.is_some()
+        if !self.head_is_pending()
             || !inside_radius(cursor, self.object.position(), radius)
             || judge_click(windows, TimeMs::new(self.object.start_time())?, click_ms).is_none()
         {
