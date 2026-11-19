@@ -50,6 +50,14 @@ impl<'a> SliderState<'a> {
         self.tracking
     }
 
+    pub(super) fn end_time(&self) -> f64 {
+        self.slider.timing().end_time
+    }
+
+    pub(super) fn clear_tracking(&mut self) {
+        self.tracking = false;
+    }
+
     pub fn successful_parts(&self) -> u32 {
         self.successful_parts
     }

@@ -39,6 +39,8 @@ pub struct Simulator<'a> {
     timeline: Timeline<'a>,
     resolved: Vec<bool>,
     sliders: Vec<Option<SliderState<'a>>>,
+    active_sliders: Vec<ObjectId>,
+    next_slider_index: usize,
     stats: Stats,
     failed: bool,
     end_time: TimeMs,
@@ -50,6 +52,8 @@ struct EventProcessor<'map, 'state, 'sim> {
     replay: &'map ReplayTimeline,
     resolved: &'state mut [bool],
     sliders: &'state mut [Option<SliderState<'sim>>],
+    active_sliders: &'state mut Vec<ObjectId>,
+    next_slider_index: &'state mut usize,
     stats: &'state mut Stats,
     emit: &'state mut dyn FnMut(&SimEvent),
 }
@@ -88,6 +92,8 @@ impl<'a> Simulator<'a> {
             timeline: Timeline::new(map, input),
             resolved: vec![false; map.objects().len()],
             sliders,
+            active_sliders: Vec::new(),
+            next_slider_index: 0,
             stats: Stats::default(),
             failed: false,
             end_time,
@@ -119,19 +125,28 @@ impl<'a> Simulator<'a> {
         let timeline = &mut self.timeline;
         let resolved = &mut self.resolved;
         let sliders = &mut self.sliders;
+        let active_sliders = &mut self.active_sliders;
+        let next_slider_index = &mut self.next_slider_index;
         let stats = &mut self.stats;
         let mut processor = EventProcessor {
             map,
             replay: self.replay,
             resolved,
             sliders,
+            active_sliders,
+            next_slider_index,
             stats,
             emit,
         };
+        let mut last_synced_time = None;
         let mut failure = None;
         timeline.advance_grouped(time, |time, step| {
             if failure.is_some() {
                 return;
+            }
+            if last_synced_time != Some(time) {
+                processor.sync_active_sliders(time);
+                last_synced_time = Some(time);
             }
             failure = match step {
                 TimelineStep::Input(event) => processor.process(time, TimelineEvent::Input(event)),
@@ -171,6 +186,45 @@ impl<'a> Simulator<'a> {
 }
 
 impl EventProcessor<'_, '_, '_> {
+    /// Поддерживает упорядоченный список слайдеров, активных в момент `time`.
+    ///
+    /// В момент начала слайдер уже доступен фазе ввода той же временной группы.
+    fn sync_active_sliders(&mut self, time: TimeMs) {
+        let current = time.get();
+        self.active_sliders.retain(|&id| {
+            let Some(Some(slider)) = self.sliders.get_mut(id.0 as usize) else {
+                return false;
+            };
+            if slider.end_time() < current {
+                slider.clear_tracking();
+                false
+            } else {
+                true
+            }
+        });
+        let objects = self.map.objects();
+        while *self.next_slider_index < objects.len() {
+            let object = &objects[*self.next_slider_index];
+            if object.start_time() > current {
+                break;
+            }
+            *self.next_slider_index += 1;
+            let Some(slider) = object.slider() else {
+                continue;
+            };
+            if slider.timing().end_time < current {
+                continue;
+            }
+            let id = object.object_id();
+            if let Err(pos) = self
+                .active_sliders
+                .binary_search_by_key(&id.0, |item| item.0)
+            {
+                self.active_sliders.insert(pos, id);
+            }
+        }
+    }
+
     fn process_map_group(&mut self, time: TimeMs, events: &[MapEvent]) -> Result<(), RoseaError> {
         // Все части группы используют ввод после завершения его фазы.
         let mut slider_events = events
@@ -200,8 +254,11 @@ impl EventProcessor<'_, '_, '_> {
             TimelineEvent::Input(
                 input @ (InputEvent::RecordEnd { .. } | InputEvent::End { .. }),
             ) => {
-                for slider in self.sliders.iter_mut().flatten() {
-                    slider.observe_input_event(time, input, self.map.visibility().radius)?;
+                let radius = self.map.visibility().radius;
+                for &id in self.active_sliders.iter() {
+                    if let Some(Some(slider)) = self.sliders.get_mut(id.0 as usize) {
+                        slider.observe_input_event(time, input, radius)?;
+                    }
                 }
             }
             TimelineEvent::Input(InputEvent::Press {
@@ -311,6 +368,17 @@ impl EventProcessor<'_, '_, '_> {
                             self.stats.current_combo >= combo_before
                                 || self.stats.current_combo == 0
                         );
+                    }
+                }
+                MapEventKind::SliderEnd => {
+                    if let Ok(pos) = self
+                        .active_sliders
+                        .binary_search_by_key(&event.object_id.0, |item| item.0)
+                    {
+                        self.active_sliders.remove(pos);
+                    }
+                    if let Some(Some(slider)) = self.sliders.get_mut(event.object_id.0 as usize) {
+                        slider.clear_tracking();
                     }
                 }
                 _ => {}
@@ -1009,5 +1077,215 @@ mod tests {
             &later_events[5..],
             [tick_event(1600.0, 3, 0, false, 0, (1, 0))]
         );
+    }
+
+    #[test]
+    fn slider_tracking_updates_on_release_and_recapture_between_parts() {
+        let map = slider_map("0,0,1000,2,0,L|300:0,1,300");
+        // CS=5 даёт радиус захвата 32 и удержания 76.8.
+        // Отпускание в 1250 мс срывает удержание, поэтому нажатие на расстоянии 50 не захватывает.
+        // Возврат на шарик в 1750 мс заново захватывает его и позволяет пройти тик и хвост на 50 px.
+        let input = replay(&[
+            (1000, 0.0, 1),
+            (250, 50.0, 0),
+            (100, 120.0, 1),
+            (150, 150.0, 1),
+            (250, 150.0, 1),
+            (250, 250.0, 1),
+            (500, 350.0, 1),
+        ]);
+        let expected = run_with_journal(&map, &input, [2500.0]);
+        assert_eq!(
+            expected.1,
+            [
+                tick_event(1500.0, 0, 0, false, 0, (0, 0)),
+                tick_event(2000.0, 0, 1, true, 10, (0, 1)),
+                tail_event(2464.0, 0, 2, true, 30, (1, 2)),
+            ]
+        );
+        assert_eq!(expected.0.score, 40);
+        assert_eq!(expected.0.current_combo, 2);
+        assert_eq!(expected.0.max_combo, 2);
+        assert_eq!(expected.0.counts, Stats::default().counts);
+
+        let mut plain = Simulator::new(&map, &input).unwrap();
+        plain.advance_to(TimeMs::new(2500.0).unwrap()).unwrap();
+        assert_eq!(plain.stats(), expected.0);
+
+        for fps in [30.0, 60.0, 144.0] {
+            let times = (0..)
+                .map(|frame| f64::from(frame) * 1000.0 / fps)
+                .take_while(|&time| time < 2500.0)
+                .chain([2500.0]);
+            assert_eq!(run_with_journal(&map, &input, times), expected, "{fps} FPS");
+        }
+    }
+
+    #[test]
+    fn slider_tracking_updates_after_each_equal_time_record_between_and_on_parts() {
+        let map = slider_map("0,0,1000,2,0,L|300:0,1,300");
+
+        // Несколько записей в одно время между частями:
+        // 1250: отпускание + нажатие в зоне удержания -> срыв;
+        // 1750: захват + выход в зону удержания -> сохранение;
+        // 2250: выход за 2.4*r + возврат в зону удержания -> срыв.
+        let between_parts = replay(&[
+            (1000, 0.0, 1),
+            (250, 50.0, 0),
+            (0, 100.0, 1),
+            (250, 150.0, 1),
+            (250, 150.0, 1),
+            (0, 200.0, 1),
+            (250, 250.0, 1),
+            (250, 350.0, 1),
+            (0, 300.0, 1),
+            (250, 350.0, 1),
+        ]);
+        let (stats, events) = run_with_journal(&map, &between_parts, [2500.0]);
+        assert_eq!(
+            events,
+            [
+                tick_event(1500.0, 0, 0, false, 0, (0, 0)),
+                tick_event(2000.0, 0, 1, true, 10, (0, 1)),
+                tail_event(2464.0, 0, 2, false, 0, (1, 1)),
+            ]
+        );
+        assert_eq!(stats.score, 10);
+        assert_eq!(stats.current_combo, 1);
+        assert_eq!(stats.max_combo, 1);
+
+        // Несколько записей в момент старта и в моменты тиков; до старта и после конца tracking = false.
+        let on_parts = replay(&[
+            (900, 0.0, 1),
+            (100, 0.0, 1),
+            (0, 50.0, 1),
+            (500, 100.0, 0),
+            (0, 150.0, 1),
+            (500, 200.0, 1),
+            (0, 250.0, 1),
+            (500, 350.0, 1),
+        ]);
+        let mut sim = Simulator::new(&map, &on_parts).unwrap();
+        let mut on_part_events = Vec::new();
+        sim.advance_with(TimeMs::new(900.0).unwrap(), &mut |event| {
+            on_part_events.push(*event)
+        })
+        .unwrap();
+        assert!(sim.active_sliders.is_empty());
+        assert!(!sim.sliders[0].as_ref().unwrap().tracking());
+
+        sim.advance_with(TimeMs::new(1000.0).unwrap(), &mut |event| {
+            on_part_events.push(*event)
+        })
+        .unwrap();
+        assert_eq!(sim.active_sliders, [ObjectId(0)]);
+        assert!(sim.sliders[0].as_ref().unwrap().tracking());
+
+        sim.advance_with(TimeMs::new(2500.0).unwrap(), &mut |event| {
+            on_part_events.push(*event)
+        })
+        .unwrap();
+        assert!(sim.active_sliders.is_empty());
+        assert!(!sim.sliders[0].as_ref().unwrap().tracking());
+        assert_eq!(
+            on_part_events,
+            [
+                tick_event(1500.0, 0, 0, false, 0, (0, 0)),
+                tick_event(2000.0, 0, 1, true, 10, (0, 1)),
+                tail_event(2464.0, 0, 2, true, 30, (1, 2)),
+            ]
+        );
+        assert_eq!(sim.stats().score, 40);
+    }
+
+    #[test]
+    fn eof_with_equal_time_records_releases_tracking_and_generates_no_extra_click() {
+        // EOF между частями в группе с несколькими записями в одно время сбрасывает tracking сразу.
+        let slider_only = slider_map(ONE_TICK_SLIDER);
+        let early_eof = replay(&[(1000, 0.0, 1), (250, 50.0, 0), (0, 50.0, 1)]);
+        let mut sim = Simulator::new(&slider_only, &early_eof).unwrap();
+        let mut events = Vec::new();
+        sim.advance_with(TimeMs::new(1250.0).unwrap(), &mut |event| {
+            events.push(*event)
+        })
+        .unwrap();
+        assert_eq!(sim.active_sliders, [ObjectId(0)]);
+        assert!(!sim.sliders[0].as_ref().unwrap().tracking());
+
+        sim.advance_with(TimeMs::new(2000.0).unwrap(), &mut |event| {
+            events.push(*event)
+        })
+        .unwrap();
+        assert!(sim.active_sliders.is_empty());
+        assert!(!sim.sliders[0].as_ref().unwrap().tracking());
+        assert_eq!(
+            events,
+            [
+                tick_event(1500.0, 0, 0, false, 0, (0, 0)),
+                tail_event(1964.0, 0, 1, false, 0, (0, 0)),
+            ]
+        );
+        assert_eq!(sim.stats().score, 0);
+
+        // EOF в момент тика после двух нажатий в одной группе: круги поражаются,
+        // лишний клик не создаётся, а тик и хвост пропускаются из-за отпускания EOF.
+        let mixed = slider_map(concat!(
+            "0,0,1000,2,0,L|200:0,1,200\n",
+            "100,0,1500,1,0\n",
+            "100,0,1500,1,0\n",
+            "100,0,1500,1,0",
+        ));
+        let eof_on_tick = replay(&[
+            (1000, 0.0, 1),
+            (500, 100.0, 0),
+            (0, 100.0, 1),
+            (0, 100.0, 3),
+        ]);
+        let (stats, events) = run_with_journal(&mixed, &eof_on_tick, [2000.0]);
+        assert_eq!(
+            events,
+            [
+                SimEvent {
+                    time: TimeMs::new(1500.0).unwrap(),
+                    object_id: ObjectId(1),
+                    kind: EventKind::Circle,
+                    part_index: None,
+                    part_hit: None,
+                    judgement: Some(Judgement::Great),
+                    score_delta: 300,
+                    combo_before: 0,
+                    combo_after: 1,
+                },
+                SimEvent {
+                    time: TimeMs::new(1500.0).unwrap(),
+                    object_id: ObjectId(2),
+                    kind: EventKind::Circle,
+                    part_index: None,
+                    part_hit: None,
+                    judgement: Some(Judgement::Great),
+                    score_delta: 300,
+                    combo_before: 1,
+                    combo_after: 2,
+                },
+                tick_event(1500.0, 0, 0, false, 0, (2, 0)),
+                SimEvent {
+                    time: TimeMs::new(1620.0).unwrap(),
+                    object_id: ObjectId(3),
+                    kind: EventKind::Circle,
+                    part_index: None,
+                    part_hit: None,
+                    judgement: Some(Judgement::Miss),
+                    score_delta: 0,
+                    combo_before: 0,
+                    combo_after: 0,
+                },
+                tail_event(1964.0, 0, 1, false, 0, (0, 0)),
+            ]
+        );
+        assert_eq!(stats.score, 600);
+        assert_eq!(stats.max_combo, 2);
+        assert_eq!(stats.current_combo, 0);
+        assert_eq!(stats.counts.count_300, 2);
+        assert_eq!(stats.counts.count_miss, 1);
     }
 }
