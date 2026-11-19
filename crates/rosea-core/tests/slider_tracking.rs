@@ -713,6 +713,10 @@ fn map_event_group_samples_only_its_slider_once_for_start_and_parts() {
         Ok(Some(true))
     );
     assert!(state.tracking());
+    assert_eq!(
+        state.sample_for_map_events(time, cursor, ButtonState::default(), 10.0, &events),
+        Ok(Some(true))
+    );
 
     let other_events: Vec<_> = events
         .iter()

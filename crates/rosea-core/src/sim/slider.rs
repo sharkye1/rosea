@@ -214,27 +214,40 @@ impl<'a> SliderState<'a> {
         let has_slider_event = events.iter().any(|event| {
             event.object_id == self.object_id()
                 && event.time == time
-                && matches!(
-                    event.kind,
-                    MapEventKind::SliderStart
-                        | MapEventKind::SliderTick
-                        | MapEventKind::SliderRepeat
-                        | MapEventKind::SliderTailCheck
-                )
+                && map_event_needs_tracking(event.kind)
         });
         if !has_slider_event {
             return Ok(None);
         }
-        if self.last_input_sample_time == Some(time) {
-            return Ok(Some(self.tracking));
-        }
-        if self.last_map_sample_time == Some(time) {
-            return Ok(Some(self.tracking));
+        self.sample_at_map_time(time, cursor, buttons, radius)
+            .map(Some)
+    }
+
+    /// Переиспользует выборку последней записи ввода или первой части того же времени.
+    pub(super) fn sample_at_map_time(
+        &mut self,
+        time: TimeMs,
+        cursor: Point,
+        buttons: ButtonState,
+        radius: f32,
+    ) -> Result<bool, RoseaError> {
+        if self.last_input_sample_time == Some(time) || self.last_map_sample_time == Some(time) {
+            return Ok(self.tracking);
         }
         let tracking = self.sample(time, cursor, buttons, radius)?;
         self.last_map_sample_time = Some(time);
-        Ok(Some(tracking))
+        Ok(tracking)
     }
+}
+
+pub(super) fn map_event_needs_tracking(kind: MapEventKind) -> bool {
+    matches!(
+        kind,
+        MapEventKind::SliderStart
+            | MapEventKind::SliderTick
+            | MapEventKind::SliderRepeat
+            | MapEventKind::SliderTailCheck
+    )
 }
 
 /// Возвращает tracking после одной выборки курсора и кнопок.

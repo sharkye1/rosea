@@ -2,14 +2,14 @@
 
 use crate::error::RoseaError;
 use crate::model::{Judgement, ObjectId, Stats, TimeMs};
-use crate::prepare::{MapEventKind, PreparedMap, StackedObjectKind};
+use crate::prepare::{MapEvent, MapEventKind, PreparedMap, StackedObjectKind};
 use crate::replay::ReplayTimeline;
 
 use super::hit::{inside_radius, judge_click};
 use super::input::InputEvent;
 use super::score::apply_circle;
-use super::slider::SliderState;
-use super::timeline::{Timeline, TimelineEvent};
+use super::slider::{SliderState, map_event_needs_tracking};
+use super::timeline::{Timeline, TimelineEvent, TimelineStep};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum EventKind {
@@ -129,12 +129,15 @@ impl<'a> Simulator<'a> {
             emit,
         };
         let mut failure = None;
-        timeline.advance_to(time, |time, event| {
-            if failure.is_none()
-                && let Err(error) = processor.process(time, event)
-            {
-                failure = Some(error);
+        timeline.advance_grouped(time, |time, step| {
+            if failure.is_some() {
+                return;
             }
+            failure = match step {
+                TimelineStep::Input(event) => processor.process(time, TimelineEvent::Input(event)),
+                TimelineStep::Map(events) => processor.process_map_group(time, events),
+            }
+            .err();
         })?;
         if let Some(error) = failure {
             self.failed = true;
@@ -168,6 +171,29 @@ impl<'a> Simulator<'a> {
 }
 
 impl EventProcessor<'_, '_, '_> {
+    fn process_map_group(&mut self, time: TimeMs, events: &[MapEvent]) -> Result<(), RoseaError> {
+        // Все части группы используют ввод после завершения его фазы.
+        let mut slider_events = events
+            .iter()
+            .filter(|event| map_event_needs_tracking(event.kind))
+            .peekable();
+        if slider_events.peek().is_some() {
+            let cursor = self.replay.cursor_at(time);
+            let buttons = self.replay.buttons_at(time);
+            let radius = self.map.visibility().radius;
+            for event in slider_events {
+                if let Some(Some(slider)) = self.sliders.get_mut(event.object_id.0 as usize) {
+                    slider.sample_at_map_time(time, cursor, buttons, radius)?;
+                }
+            }
+        }
+
+        for &event in events {
+            self.process(time, TimelineEvent::Map(event))?;
+        }
+        Ok(())
+    }
+
     fn process(&mut self, time: TimeMs, event: TimelineEvent) -> Result<(), RoseaError> {
         match event {
             TimelineEvent::Input(InputEvent::Record { .. }) => {}
@@ -247,52 +273,44 @@ impl EventProcessor<'_, '_, '_> {
                         combo_after: self.stats.current_combo,
                     });
                 }
-                MapEventKind::SliderStart
-                | MapEventKind::SliderTick
+                MapEventKind::SliderTick
                 | MapEventKind::SliderRepeat
                 | MapEventKind::SliderTailCheck => {
-                    if let Some(Some(slider)) = self.sliders.get_mut(event.object_id.0 as usize) {
-                        slider.sample_for_map_events(
-                            time,
-                            self.replay.cursor_at(time),
-                            self.replay.buttons_at(time),
-                            self.map.visibility().radius,
-                            std::slice::from_ref(&event),
-                        )?;
-                        if let Some(index) = event.part_index {
-                            let combo_before = self.stats.current_combo;
-                            let score_before = self.stats.score;
-                            let (kind, result) = match event.kind {
-                                MapEventKind::SliderTick => {
-                                    (EventKind::SliderTick, slider.tick(index, self.stats)?)
-                                }
-                                MapEventKind::SliderRepeat => {
-                                    (EventKind::SliderRepeat, slider.repeat(index, self.stats)?)
-                                }
-                                MapEventKind::SliderTailCheck => {
-                                    (EventKind::SliderTail, slider.tail_check(index, self.stats)?)
-                                }
-                                _ => return Ok(()),
-                            };
-                            if let Some(hit) = result {
-                                (self.emit)(&SimEvent {
-                                    time,
-                                    object_id: event.object_id,
-                                    kind,
-                                    part_index: Some(index),
-                                    part_hit: Some(hit),
-                                    judgement: None,
-                                    score_delta: self.stats.score - score_before,
-                                    combo_before,
-                                    combo_after: self.stats.current_combo,
-                                });
+                    if let Some(Some(slider)) = self.sliders.get_mut(event.object_id.0 as usize)
+                        && let Some(index) = event.part_index
+                    {
+                        let combo_before = self.stats.current_combo;
+                        let score_before = self.stats.score;
+                        let (kind, result) = match event.kind {
+                            MapEventKind::SliderTick => {
+                                (EventKind::SliderTick, slider.tick(index, self.stats)?)
                             }
-                            debug_assert!(self.stats.score >= score_before);
-                            debug_assert!(
-                                self.stats.current_combo >= combo_before
-                                    || self.stats.current_combo == 0
-                            );
+                            MapEventKind::SliderRepeat => {
+                                (EventKind::SliderRepeat, slider.repeat(index, self.stats)?)
+                            }
+                            MapEventKind::SliderTailCheck => {
+                                (EventKind::SliderTail, slider.tail_check(index, self.stats)?)
+                            }
+                            _ => return Ok(()),
+                        };
+                        if let Some(hit) = result {
+                            (self.emit)(&SimEvent {
+                                time,
+                                object_id: event.object_id,
+                                kind,
+                                part_index: Some(index),
+                                part_hit: Some(hit),
+                                judgement: None,
+                                score_delta: self.stats.score - score_before,
+                                combo_before,
+                                combo_after: self.stats.current_combo,
+                            });
                         }
+                        debug_assert!(self.stats.score >= score_before);
+                        debug_assert!(
+                            self.stats.current_combo >= combo_before
+                                || self.stats.current_combo == 0
+                        );
                     }
                 }
                 _ => {}
@@ -934,5 +952,62 @@ mod tests {
         assert_eq!(stats.current_combo, 1);
         assert_eq!(stats.max_combo, 1);
         assert_eq!(stats.counts, Stats::default().counts);
+    }
+
+    #[test]
+    fn simultaneous_slider_parts_use_each_objects_tracking_in_phase_order() {
+        use EventKind::{SliderRepeat, SliderTail, SliderTick};
+
+        let map = slider_map(concat!(
+            "100,0,1500,2,0,L|100:0,2,0\n",
+            "200,0,1000,2,0,L|400:0,1,200\n",
+            "400,0,1500,2,0,L|400:0,2,0\n",
+            "45,0,1100,2,0,L|245:0,1,200",
+        ));
+        let sparse = replay(&[(1000, 100.0, 1), (1000, 100.0, 0)]);
+        let dense = replay(&[
+            (1000, 100.0, 1),
+            (500, 300.0, 1),
+            (0, 100.0, 0),
+            (0, 100.0, 1),
+            (500, 100.0, 0),
+        ]);
+        let (stats, events) = run_with_journal(&map, &sparse, [1500.0]);
+        assert!(events.iter().all(|event| event.time.get() == 1500.0));
+        let parts: Vec<_> = events
+            .iter()
+            .map(|event| {
+                (
+                    event.kind,
+                    event.object_id.0,
+                    event.part_index,
+                    event.part_hit,
+                    event.combo_after,
+                )
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                (SliderTick, 1, Some(0), Some(false), 0),
+                (SliderRepeat, 0, Some(0), Some(true), 1),
+                (SliderRepeat, 2, Some(0), Some(false), 0),
+                (SliderTail, 0, Some(1), Some(true), 1),
+                (SliderTail, 2, Some(1), Some(false), 1),
+            ]
+        );
+        assert_eq!(stats.score, 60);
+        assert_eq!(
+            run_with_journal(&map, &dense, [1499.5, 1500.0, 1500.0]),
+            (stats, events)
+        );
+
+        // Слайдер 3 был в радиусе захвата в 1500 мс, но своего события не имел.
+        // К его тику курсор остался только в расширенном радиусе удержания.
+        let (_, later_events) = run_with_journal(&map, &sparse, [1500.0, 1600.0]);
+        assert_eq!(
+            &later_events[5..],
+            [tick_event(1600.0, 3, 0, false, 0, (1, 0))]
+        );
     }
 }

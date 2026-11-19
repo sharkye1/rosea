@@ -15,6 +15,11 @@ pub enum TimelineEvent {
     Map(MapEvent),
 }
 
+pub(super) enum TimelineStep<'a> {
+    Input(InputEvent),
+    Map(&'a [MapEvent]),
+}
+
 /// Продвигает временные группы и состояние ввода.
 pub struct Timeline<'a> {
     schedule: Schedule<'a>,
@@ -39,24 +44,35 @@ impl<'a> Timeline<'a> {
         time: TimeMs,
         mut emit: impl FnMut(TimeMs, TimelineEvent),
     ) -> Result<(), RoseaError> {
+        self.advance_grouped(time, |time, step| match step {
+            TimelineStep::Input(event) => emit(time, TimelineEvent::Input(event)),
+            TimelineStep::Map(events) => {
+                for &event in events {
+                    emit(time, TimelineEvent::Map(event));
+                }
+            }
+        })
+    }
+
+    /// Передаёт события карты срезами до и после фазы ввода.
+    pub(super) fn advance_grouped(
+        &mut self,
+        time: TimeMs,
+        mut emit: impl FnMut(TimeMs, TimelineStep<'a>),
+    ) -> Result<(), RoseaError> {
         let input = &mut self.input;
         self.schedule.advance_to(time, |group| {
-            for event in group
+            // В подготовленной группе начала спиннеров стоят перед остальными событиями.
+            let spinner_count = group
                 .map_events
-                .iter()
-                .filter(|event| event.kind == MapEventKind::SpinnerStart)
-            {
-                emit(group.time, TimelineEvent::Map(*event));
+                .partition_point(|event| event.kind == MapEventKind::SpinnerStart);
+            let (spinner_starts, map_events) = group.map_events.split_at(spinner_count);
+            if !spinner_starts.is_empty() {
+                emit(group.time, TimelineStep::Map(spinner_starts));
             }
-            input.apply_group(&group, |event| {
-                emit(group.time, TimelineEvent::Input(event))
-            });
-            for event in group
-                .map_events
-                .iter()
-                .filter(|event| event.kind != MapEventKind::SpinnerStart)
-            {
-                emit(group.time, TimelineEvent::Map(*event));
+            input.apply_group(&group, |event| emit(group.time, TimelineStep::Input(event)));
+            if !map_events.is_empty() {
+                emit(group.time, TimelineStep::Map(map_events));
             }
         })
     }
