@@ -1,4 +1,4 @@
-//! Прогон кругов, тиков и повторов слайдеров по объединённой временной шкале.
+//! Прогон кругов и частей слайдеров по объединённой временной шкале.
 
 use crate::error::RoseaError;
 use crate::model::{Judgement, ObjectId, Stats, TimeMs};
@@ -16,6 +16,7 @@ pub enum EventKind {
     Circle,
     SliderTick,
     SliderRepeat,
+    SliderTail,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -31,7 +32,7 @@ pub struct SimEvent {
     pub combo_after: u32,
 }
 
-/// Частичный прогон кругов, тиков и повторов слайдеров.
+/// Частичный прогон кругов, тиков, повторов и проверок хвоста слайдеров.
 pub struct Simulator<'a> {
     map: &'a PreparedMap,
     replay: &'a ReplayTimeline,
@@ -268,6 +269,9 @@ impl EventProcessor<'_, '_, '_> {
                                 MapEventKind::SliderRepeat => {
                                     (EventKind::SliderRepeat, slider.repeat(index, self.stats)?)
                                 }
+                                MapEventKind::SliderTailCheck => {
+                                    (EventKind::SliderTail, slider.tail_check(index, self.stats)?)
+                                }
                                 _ => return Ok(()),
                             };
                             if let Some(hit) = result {
@@ -372,6 +376,27 @@ mod tests {
         }
     }
 
+    fn tail_event(
+        time: f64,
+        object_id: u32,
+        index: u32,
+        hit: bool,
+        score_delta: u64,
+        combo: (u32, u32),
+    ) -> SimEvent {
+        SimEvent {
+            time: TimeMs::new(time).unwrap(),
+            object_id: ObjectId(object_id),
+            kind: EventKind::SliderTail,
+            part_index: Some(index),
+            part_hit: Some(hit),
+            judgement: None,
+            score_delta,
+            combo_before: combo.0,
+            combo_after: combo.1,
+        }
+    }
+
     #[test]
     fn slider_state_uses_source_id_on_unsorted_maps() {
         let circle = "300,0,4000,1,0";
@@ -385,10 +410,12 @@ mod tests {
         let reversed = slider_map(&format!("{circle}\n{ONE_TICK_SLIDER}"));
         let (ordered_stats, ordered_events) = run_with_journal(&ordered, &input, [4120.0]);
         let (reversed_stats, reversed_events) = run_with_journal(&reversed, &input, [4120.0]);
+        let circle_score = 300 + 12 * u64::from(ordered.difficulty_multiplier());
         assert_eq!(
             ordered_events,
             [
                 tick_event(1500.0, 0, 0, true, 10, (0, 1)),
+                tail_event(1964.0, 0, 1, true, 30, (1, 2)),
                 SimEvent {
                     time: TimeMs::new(4000.0).unwrap(),
                     object_id: ObjectId(1),
@@ -396,21 +423,25 @@ mod tests {
                     part_index: None,
                     part_hit: None,
                     judgement: Some(Judgement::Great),
-                    score_delta: 300,
-                    combo_before: 1,
-                    combo_after: 2,
+                    score_delta: circle_score,
+                    combo_before: 2,
+                    combo_after: 3,
                 },
             ]
         );
-        assert_eq!(ordered_stats.score, 310);
+        assert_eq!(ordered_stats.score, 40 + circle_score);
         let expected_reversed = [
             SimEvent {
                 object_id: ObjectId(1),
                 ..ordered_events[0]
             },
             SimEvent {
-                object_id: ObjectId(0),
+                object_id: ObjectId(1),
                 ..ordered_events[1]
+            },
+            SimEvent {
+                object_id: ObjectId(0),
+                ..ordered_events[2]
             },
         ];
         assert_eq!(reversed_events, expected_reversed);
@@ -423,8 +454,14 @@ mod tests {
         let sparse = replay(&[(1000, 0.0, 1), (1000, 200.0, 1)]);
         let dense = replay(&[(1000, 0.0, 1), (500, 100.0, 1), (500, 200.0, 1)]);
         let expected = run_with_journal(&map, &dense, [2000.0]);
-        assert_eq!(expected.1, [tick_event(1500.0, 0, 0, true, 10, (0, 1))]);
-        assert_eq!(expected.0.score, 10);
+        assert_eq!(
+            expected.1,
+            [
+                tick_event(1500.0, 0, 0, true, 10, (0, 1)),
+                tail_event(1964.0, 0, 1, true, 30, (1, 2)),
+            ]
+        );
+        assert_eq!(expected.0.score, 40);
         assert_eq!(run_with_journal(&map, &sparse, [2000.0]), expected);
     }
 
@@ -444,9 +481,10 @@ mod tests {
             [
                 tick_event(1500.0, 0, 0, true, 10, (0, 1)),
                 tick_event(2000.0, 0, 1, false, 0, (1, 0)),
+                tail_event(2464.0, 0, 2, true, 30, (0, 1)),
             ]
         );
-        assert_eq!(stats.score, 10);
+        assert_eq!(stats.score, 40);
     }
 
     #[test]
@@ -483,6 +521,7 @@ mod tests {
                 },
                 tick_event(3000.0, 0, 3, false, 0, (0, 0)),
                 tick_event(3500.0, 0, 4, false, 0, (0, 0)),
+                tail_event(3964.0, 0, 5, false, 0, (0, 0)),
             ]
         );
         assert_eq!(stats.score, 310);
@@ -496,7 +535,13 @@ mod tests {
         // находится в радиусе удержания, но уже вне радиуса захвата.
         let input = replay(&[(1000, -100.0, 1), (1000, 400.0, 1)]);
         let expected = run_with_journal(&map, &input, [2000.0]);
-        assert_eq!(expected.1, [tick_event(1500.0, 0, 0, false, 0, (0, 0))]);
+        assert_eq!(
+            expected.1,
+            [
+                tick_event(1500.0, 0, 0, false, 0, (0, 0)),
+                tail_event(1964.0, 0, 1, false, 0, (0, 0)),
+            ]
+        );
         for fps in [30.0, 60.0, 144.0] {
             let times = (0..)
                 .map(|frame| f64::from(frame) * 1000.0 / fps)
@@ -825,5 +870,69 @@ mod tests {
         assert_eq!(stats.current_combo, 0);
         assert_eq!(stats.max_combo, 1);
         assert_eq!(stats.counts.count_miss, 0);
+    }
+
+    #[test]
+    fn slider_tail_hit_uses_exact_prepared_time_and_follows_the_last_tick() {
+        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,20,4,0,0,100,1,0\n[HitObjects]\n0,0,1000.25,2,0,L|200:0,2,200";
+        let map = prepare_map(&osu(map).unwrap().value).unwrap();
+        let input = replay(&[(1000, 0.0, 1), (40, 200.0, 1), (40, 0.0, 0)]);
+        let mut sim = Simulator::new(&map, &input).unwrap();
+        let mut events = Vec::new();
+
+        sim.advance_with(TimeMs::new(1060.0).unwrap(), &mut |event| {
+            events.push(*event)
+        })
+        .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(sim.stats().score, 40);
+        assert_eq!(sim.stats().current_combo, 2);
+
+        // В 1060.25 мс шарик около x=100, а конец обратного прохода в x=0.
+        let tail_time = TimeMs::new(1060.25).unwrap();
+        sim.advance_with(tail_time, &mut |event| events.push(*event))
+            .unwrap();
+        assert_eq!(
+            &events[2..],
+            [
+                tick_event(1060.25, 0, 2, true, 10, (2, 3)),
+                tail_event(1060.25, 0, 3, true, 30, (3, 4)),
+            ]
+        );
+        let stats = sim.stats();
+        assert_eq!(stats.score, 80);
+        assert_eq!(stats.current_combo, 4);
+        assert_eq!(stats.max_combo, 4);
+        assert_eq!(stats.counts, Stats::default().counts);
+
+        let after_end = TimeMs::new(1081.0).unwrap();
+        for time in [tail_time, after_end] {
+            sim.advance_with(time, &mut |event| events.push(*event))
+                .unwrap();
+            assert_eq!(events.len(), 4);
+            assert_eq!(sim.stats(), stats);
+        }
+
+        let mut plain = Simulator::new(&map, &input).unwrap();
+        plain.advance_to(after_end).unwrap();
+        assert_eq!(plain.stats(), stats);
+    }
+
+    #[test]
+    fn slider_tail_missed_at_release_preserves_combo_and_counts() {
+        let map = slider_map(ONE_TICK_SLIDER);
+        let input = replay(&[(1000, 0.0, 1), (964, 192.8, 0), (36, 200.0, 0)]);
+        let (stats, events) = run_with_journal(&map, &input, [2000.0]);
+        assert_eq!(
+            events,
+            [
+                tick_event(1500.0, 0, 0, true, 10, (0, 1)),
+                tail_event(1964.0, 0, 1, false, 0, (1, 1)),
+            ]
+        );
+        assert_eq!(stats.score, 10);
+        assert_eq!(stats.current_combo, 1);
+        assert_eq!(stats.max_combo, 1);
+        assert_eq!(stats.counts, Stats::default().counts);
     }
 }
