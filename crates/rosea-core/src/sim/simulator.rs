@@ -1,4 +1,4 @@
-//! Прогон кругов по объединённой временной шкале.
+//! Прогон кругов, тиков и повторов слайдеров по объединённой временной шкале.
 
 use crate::error::RoseaError;
 use crate::model::{Judgement, ObjectId, Stats, TimeMs};
@@ -15,6 +15,7 @@ use super::timeline::{Timeline, TimelineEvent};
 pub enum EventKind {
     Circle,
     SliderTick,
+    SliderRepeat,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -30,7 +31,7 @@ pub struct SimEvent {
     pub combo_after: u32,
 }
 
-/// Частичный прогон кругов и тиков слайдера.
+/// Частичный прогон кругов, тиков и повторов слайдеров.
 pub struct Simulator<'a> {
     map: &'a PreparedMap,
     replay: &'a ReplayTimeline,
@@ -257,16 +258,23 @@ impl EventProcessor<'_, '_, '_> {
                             self.map.visibility().radius,
                             std::slice::from_ref(&event),
                         )?;
-                        if event.kind == MapEventKind::SliderTick
-                            && let Some(index) = event.part_index
-                        {
+                        if let Some(index) = event.part_index {
                             let combo_before = self.stats.current_combo;
                             let score_before = self.stats.score;
-                            if let Some(hit) = slider.tick(index, self.stats)? {
+                            let (kind, result) = match event.kind {
+                                MapEventKind::SliderTick => {
+                                    (EventKind::SliderTick, slider.tick(index, self.stats)?)
+                                }
+                                MapEventKind::SliderRepeat => {
+                                    (EventKind::SliderRepeat, slider.repeat(index, self.stats)?)
+                                }
+                                _ => return Ok(()),
+                            };
+                            if let Some(hit) = result {
                                 (self.emit)(&SimEvent {
                                     time,
                                     object_id: event.object_id,
-                                    kind: EventKind::SliderTick,
+                                    kind,
                                     part_index: Some(index),
                                     part_hit: Some(hit),
                                     judgement: None,
@@ -302,6 +310,7 @@ mod tests {
     };
 
     const ONE_TICK_SLIDER: &str = "0,0,1000,2,0,L|200:0,1,200";
+    const ONE_REPEAT_SLIDER: &str = "0,0,1000,2,0,L|200:0,2,200";
 
     fn replay(records: &[(i64, f32, u32)]) -> ReplayTimeline {
         normalize(ReplayInput {
@@ -461,6 +470,17 @@ mod tests {
                     combo_after: 2,
                 },
                 tick_event(2000.0, 0, 1, false, 0, (2, 0)),
+                SimEvent {
+                    time: TimeMs::new(2500.0).unwrap(),
+                    object_id: ObjectId(0),
+                    kind: EventKind::SliderRepeat,
+                    part_index: Some(2),
+                    part_hit: Some(false),
+                    judgement: None,
+                    score_delta: 0,
+                    combo_before: 0,
+                    combo_after: 0,
+                },
                 tick_event(3000.0, 0, 3, false, 0, (0, 0)),
                 tick_event(3500.0, 0, 4, false, 0, (0, 0)),
             ]
@@ -732,5 +752,78 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn slider_repeat_hit_follows_simultaneous_tick_and_updates_stats() {
+        let map = slider_map(&format!(
+            "{ONE_REPEAT_SLIDER}\n100,0,1500,2,0,L|300:0,1,200"
+        ));
+        let input = replay(&[(1000, 0.0, 1), (1500, 300.0, 1)]);
+        let (stats, events) = run_with_journal(&map, &input, [2000.0]);
+        assert_eq!(
+            events,
+            [
+                tick_event(1500.0, 0, 0, true, 10, (0, 1)),
+                tick_event(2000.0, 1, 0, true, 10, (1, 2)),
+                SimEvent {
+                    time: TimeMs::new(2000.0).unwrap(),
+                    object_id: ObjectId(0),
+                    kind: EventKind::SliderRepeat,
+                    part_index: Some(1),
+                    part_hit: Some(true),
+                    judgement: None,
+                    score_delta: 30,
+                    combo_before: 2,
+                    combo_after: 3,
+                },
+            ]
+        );
+        assert_eq!(stats.score, 50);
+        assert_eq!(stats.current_combo, 3);
+        assert_eq!(stats.max_combo, 3);
+        assert_eq!(stats.counts, Stats::default().counts);
+
+        let mut plain = Simulator::new(&map, &input).unwrap();
+        plain.advance_to(TimeMs::new(2000.0).unwrap()).unwrap();
+        assert_eq!(plain.stats(), stats);
+
+        for fps in [30.0, 60.0, 144.0] {
+            let times = (0..)
+                .map(|frame| f64::from(frame) * 1000.0 / fps)
+                .take_while(|&time| time < 2000.0)
+                .chain([2000.0, 2000.0]);
+            let (frame_stats, frame_events) = run_with_journal(&map, &input, times);
+            assert_eq!(frame_stats, stats, "{fps} FPS");
+            assert_eq!(frame_events, events, "{fps} FPS");
+        }
+    }
+
+    #[test]
+    fn slider_repeat_miss_after_release_resets_combo_without_counting_a_miss() {
+        let map = slider_map(ONE_REPEAT_SLIDER);
+        let input = replay(&[(1000, 0.0, 1), (1000, 200.0, 0), (500, 100.0, 0)]);
+        let (stats, events) = run_with_journal(&map, &input, [1999.5, 2000.0]);
+        assert_eq!(
+            events,
+            [
+                tick_event(1500.0, 0, 0, true, 10, (0, 1)),
+                SimEvent {
+                    time: TimeMs::new(2000.0).unwrap(),
+                    object_id: ObjectId(0),
+                    kind: EventKind::SliderRepeat,
+                    part_index: Some(1),
+                    part_hit: Some(false),
+                    judgement: None,
+                    score_delta: 0,
+                    combo_before: 1,
+                    combo_after: 0,
+                },
+            ]
+        );
+        assert_eq!(stats.score, 10);
+        assert_eq!(stats.current_combo, 0);
+        assert_eq!(stats.max_combo, 1);
+        assert_eq!(stats.counts.count_miss, 0);
     }
 }
