@@ -394,6 +394,26 @@ impl EventProcessor<'_, '_, '_> {
                         );
                     }
                 }
+                MapEventKind::SliderHeadDeadline => {
+                    if let Some(Some(slider)) = self.sliders.get_mut(event.object_id.0 as usize) {
+                        let combo_before = self.stats.current_combo;
+                        let windows = self.map.hit_windows();
+                        if slider.timeout_head(time, windows, self.stats) {
+                            (self.emit)(&SimEvent {
+                                time,
+                                object_id: event.object_id,
+                                kind: EventKind::SliderHead,
+                                part_index: None,
+                                part_hit: Some(false),
+                                judgement: None,
+                                score_delta: 0,
+                                combo_before,
+                                combo_after: self.stats.current_combo,
+                            });
+                            debug_assert_eq!(self.stats.current_combo, 0);
+                        }
+                    }
+                }
                 MapEventKind::SliderEnd => {
                     if let Ok(pos) = self
                         .active_sliders
@@ -476,6 +496,20 @@ mod tests {
             score_delta: 30,
             combo_before,
             combo_after: combo_before + 1,
+        }
+    }
+
+    fn head_miss_event(time: f64, object_id: u32, combo_before: u32) -> SimEvent {
+        SimEvent {
+            time: TimeMs::new(time).unwrap(),
+            object_id: ObjectId(object_id),
+            kind: EventKind::SliderHead,
+            part_index: None,
+            part_hit: Some(false),
+            judgement: None,
+            score_delta: 0,
+            combo_before,
+            combo_after: 0,
         }
     }
 
@@ -609,6 +643,7 @@ mod tests {
         assert_eq!(
             events,
             [
+                head_miss_event(1120.0, 0, 0),
                 tick_event(1500.0, 0, 0, true, 10, (0, 1)),
                 tick_event(2000.0, 0, 1, false, 0, (1, 0)),
                 tail_event(2464.0, 0, 2, true, 30, (0, 1)),
@@ -670,6 +705,7 @@ mod tests {
         assert_eq!(
             expected.1,
             [
+                head_miss_event(1120.0, 0, 0),
                 tick_event(1500.0, 0, 0, false, 0, (0, 0)),
                 tail_event(1964.0, 0, 1, false, 0, (0, 0)),
             ]
@@ -941,8 +977,113 @@ mod tests {
 
         let integral = slider_map(ONE_TICK_SLIDER);
         let (stats, events) = run_with_journal(&integral, &input, [1500.25]);
-        assert_eq!(events, [tick_event(1500.0, 0, 0, false, 0, (0, 0))]);
+        assert_eq!(
+            events,
+            [
+                head_miss_event(1120.0, 0, 0),
+                tick_event(1500.0, 0, 0, false, 0, (0, 0)),
+            ]
+        );
         assert_eq!(stats, Stats::default());
+    }
+
+    #[test]
+    fn slider_head_timeout_resets_combo_without_counting_a_miss() {
+        // Круг в 500 мс даёт комбо 1; слайдер в 1000 мс не получает клика.
+        let map = slider_map(&format!("0,0,500,1,0\n{ONE_TICK_SLIDER}"));
+        let input = replay(&[(500, 0.0, 1), (100, 0.0, 0)]);
+        let (stats, events) = run_with_journal(&map, &input, [500.0, 1120.0, 1120.0, 1500.0]);
+        let circle_score = 300;
+        assert_eq!(
+            events,
+            [
+                SimEvent {
+                    time: TimeMs::new(500.0).unwrap(),
+                    object_id: ObjectId(0),
+                    kind: EventKind::Circle,
+                    part_index: None,
+                    part_hit: None,
+                    judgement: Some(Judgement::Great),
+                    score_delta: circle_score,
+                    combo_before: 0,
+                    combo_after: 1,
+                },
+                head_miss_event(1120.0, 1, 1),
+                tick_event(1500.0, 1, 0, false, 0, (0, 0)),
+            ]
+        );
+        // Срок головы сбросил current_combo в 0, но max_combo сохранился,
+        // а count_miss не увеличился.
+        assert_eq!(stats.score, circle_score);
+        assert_eq!(stats.current_combo, 0);
+        assert_eq!(stats.max_combo, 1);
+        assert_eq!(stats.counts.count_300, 1);
+        assert_eq!(stats.counts.count_100, 0);
+        assert_eq!(stats.counts.count_50, 0);
+        assert_eq!(stats.counts.count_miss, 0);
+    }
+
+    #[test]
+    fn slider_head_timeout_allows_subsequent_body_capture() {
+        // Пропуск головы слайдера не блокирует последующий захват шарика:
+        // после таймаута нажатие и удержание на шарике дают успешные тики и хвост.
+        let map = slider_map("0,0,1000,2,0,L|300:0,1,300");
+        // Голова в 1000 мс (срок 1120 мс) пропускается.
+        // В 1300 мс курсор встаёт на позицию шарика (60 px по X) с зажатой кнопкой.
+        let input = replay(&[
+            (1000, -100.0, 0),
+            (300, 60.0, 1),
+            (200, 100.0, 1),
+            (500, 200.0, 1),
+            (464, 292.8, 1),
+            (36, 300.0, 1),
+        ]);
+        let (stats, events) = run_with_journal(&map, &input, [1120.0, 1500.0, 2000.0, 2464.0]);
+        assert_eq!(
+            events,
+            [
+                head_miss_event(1120.0, 0, 0),
+                tick_event(1500.0, 0, 0, true, 10, (0, 1)),
+                tick_event(2000.0, 0, 1, true, 10, (1, 2)),
+                tail_event(2464.0, 0, 2, true, 30, (2, 3)),
+            ]
+        );
+        assert_eq!(stats.score, 50);
+        assert_eq!(stats.current_combo, 3);
+        assert_eq!(stats.max_combo, 3);
+        assert_eq!(stats.counts.count_miss, 0);
+    }
+
+    #[test]
+    fn slider_head_timeout_checks_fractional_boundary() {
+        let fractional = slider_map("0,0,1000.25,2,0,L|200:0,1,200");
+        // Клик в 1120 мс: delta = 119.75 < 120 (успех), таймаут в 1120.25 не срабатывает.
+        let hit_input = replay(&[(1120, 0.0, 1), (380, 100.0, 1), (500, 100.0, 1)]);
+        let (hit_stats, hit_events) =
+            run_with_journal(&fractional, &hit_input, [1120.0, 1120.25, 1500.25]);
+        assert_eq!(
+            hit_events,
+            [
+                head_event(1120.0, 0, 0),
+                tick_event(1500.25, 0, 0, true, 10, (1, 2)),
+            ]
+        );
+        assert_eq!(hit_stats.score, 40);
+        assert_eq!(hit_stats.counts.count_miss, 0);
+
+        // Клик в 1121 мс: delta = 120.75 >= 120 (вне окна), таймаут срабатывает в 1120.25 мс.
+        let miss_input = replay(&[(1121, 0.0, 1), (379, 100.0, 1), (500, 100.0, 1)]);
+        let (miss_stats, miss_events) =
+            run_with_journal(&fractional, &miss_input, [1120.25, 1121.0, 1500.25]);
+        assert_eq!(
+            miss_events,
+            [
+                head_miss_event(1120.25, 0, 0),
+                tick_event(1500.25, 0, 0, true, 10, (0, 1)),
+            ]
+        );
+        assert_eq!(miss_stats.score, 10);
+        assert_eq!(miss_stats.counts.count_miss, 0);
     }
 
     #[test]
@@ -983,7 +1124,8 @@ mod tests {
             [
                 head_event(1000.0, 0, 0),
                 tick_event(1500.0, 0, 0, true, 10, (1, 2)),
-                tick_event(2000.0, 1, 0, true, 10, (2, 3)),
+                head_miss_event(1620.0, 1, 2),
+                tick_event(2000.0, 1, 0, true, 10, (0, 1)),
                 SimEvent {
                     time: TimeMs::new(2000.0).unwrap(),
                     object_id: ObjectId(0),
@@ -992,14 +1134,14 @@ mod tests {
                     part_hit: Some(true),
                     judgement: None,
                     score_delta: 30,
-                    combo_before: 3,
-                    combo_after: 4,
+                    combo_before: 1,
+                    combo_after: 2,
                 },
             ]
         );
         assert_eq!(stats.score, 80);
-        assert_eq!(stats.current_combo, 4);
-        assert_eq!(stats.max_combo, 4);
+        assert_eq!(stats.current_combo, 2);
+        assert_eq!(stats.max_combo, 2);
         assert_eq!(stats.counts, Stats::default().counts);
 
         let mut plain = Simulator::new(&map, &input).unwrap();
@@ -1131,8 +1273,10 @@ mod tests {
             (500, 100.0, 0),
         ]);
         let (stats, events) = run_with_journal(&map, &sparse, [1500.0]);
-        assert!(events.iter().all(|event| event.time.get() == 1500.0));
-        let parts: Vec<_> = events
+        assert_eq!(events[0], head_miss_event(1120.0, 1, 0));
+        assert_eq!(events[1], head_miss_event(1220.0, 3, 0));
+        assert!(events[2..].iter().all(|event| event.time.get() == 1500.0));
+        let parts: Vec<_> = events[2..]
             .iter()
             .map(|event| {
                 (
@@ -1156,16 +1300,18 @@ mod tests {
         );
         assert_eq!(stats.score, 60);
         let (dense_stats, dense_events) = run_with_journal(&map, &dense, [1499.5, 1500.0, 1500.0]);
-        assert_eq!(dense_events[0], head_event(1500.0, 0, 0));
-        assert_eq!(dense_events[1], tick_event(1500.0, 1, 0, false, 0, (1, 0)));
-        assert_eq!(&dense_events[2..], &events[1..]);
+        assert_eq!(dense_events[0], head_miss_event(1120.0, 1, 0));
+        assert_eq!(dense_events[1], head_miss_event(1220.0, 3, 0));
+        assert_eq!(dense_events[2], head_event(1500.0, 0, 0));
+        assert_eq!(dense_events[3], tick_event(1500.0, 1, 0, false, 0, (1, 0)));
+        assert_eq!(&dense_events[4..], &events[3..]);
         assert_eq!(dense_stats, Stats { score: 90, ..stats });
 
         // Слайдер 3 был в радиусе захвата в 1500 мс, но своего события не имел.
         // К его тику курсор остался только в расширенном радиусе удержания.
         let (_, later_events) = run_with_journal(&map, &sparse, [1500.0, 1600.0]);
         assert_eq!(
-            &later_events[5..],
+            &later_events[7..],
             [tick_event(1600.0, 3, 0, false, 0, (1, 0))]
         );
     }
