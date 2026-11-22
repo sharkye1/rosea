@@ -1,5 +1,5 @@
 use rosea_core::{
-    model::{ObjectId, TimeMs},
+    model::{Judgement, ObjectId, TimeMs},
     parse::{osr, osu},
     prepare::{PreparedMap, prepare_map},
     replay::{ReplayTimeline, normalize},
@@ -15,6 +15,134 @@ fn map(objects: &str) -> PreparedMap {
         "osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n{objects}"
     );
     prepare_map(&osu(text.as_bytes()).unwrap().value).unwrap()
+}
+
+#[test]
+fn late_head_result_follows_phase_order_at_circle_deadline() {
+    // 1000: отпущено; 1050: нажатие; 1200: отпускание.
+    let compressed = [
+        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 48, 15, 145, 130, 44,
+        114, 12, 138, 148, 119, 117, 79, 90, 125, 242, 232, 95, 255, 251, 215, 192, 0,
+    ];
+    for (objects, slider_id, circle_id) in [
+        ("200,0,930,1,0\n0,0,1000,2,0,L|100:0,1,0", 1, 0),
+        ("0,0,1000,2,0,L|100:0,1,0\n200,0,930,1,0", 0, 1),
+    ] {
+        let map = map(objects);
+        let input = replay(&compressed);
+        let mut sim = Simulator::new(&map, &input).unwrap();
+        let mut events = Vec::new();
+        sim.advance_with(TimeMs::new(1000.0).unwrap(), &mut |event| {
+            events.push(*event)
+        })
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            (events[0].kind, events[0].part_hit),
+            (EventKind::SliderTail, Some(false))
+        );
+        assert_eq!(sim.stats().counts.count_100, 0);
+        sim.advance_with(TimeMs::new(1050.0).unwrap(), &mut |event| {
+            events.push(*event)
+        })
+        .unwrap();
+        assert_eq!(
+            (events[1].kind, events[1].object_id),
+            (EventKind::SliderHead, ObjectId(slider_id))
+        );
+        let finals: Vec<_> = events[2..]
+            .iter()
+            .map(|event| (event.object_id, event.kind, event.judgement))
+            .collect();
+        let slider_result = (
+            ObjectId(slider_id),
+            EventKind::SliderResult,
+            Some(Judgement::Ok),
+        );
+        let circle_result = (
+            ObjectId(circle_id),
+            EventKind::Circle,
+            Some(Judgement::Miss),
+        );
+        let expected = if slider_id < circle_id {
+            [slider_result, circle_result]
+        } else {
+            [circle_result, slider_result]
+        };
+        assert_eq!(finals, expected);
+        let stats = sim.finish_with(&mut |event| events.push(*event)).unwrap();
+        assert_eq!(stats.counts.count_100, 1);
+        assert_eq!(stats.counts.count_miss, 1);
+        assert_eq!(events.len(), 4);
+    }
+}
+
+#[test]
+fn body_before_head_timeout_counts_once_after_zero_duration_end() {
+    // Кнопка нажата до окна головы и удерживается до окончания ввода.
+    let compressed = [
+        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 28, 12, 44, 249, 16, 35, 17,
+        110, 171, 75, 32, 161, 225, 186, 11, 255, 255, 253, 81, 64, 0,
+    ];
+    let map = map("0,0,1000,2,0,L|100:0,1,0");
+    let input = replay(&compressed);
+    let mut sim = Simulator::new(&map, &input).unwrap();
+    let mut events = Vec::new();
+    sim.advance_with(TimeMs::new(1000.0).unwrap(), &mut |event| {
+        events.push(*event)
+    })
+    .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        (events[0].kind, events[0].part_hit),
+        (EventKind::SliderTail, Some(true))
+    );
+    assert_eq!(sim.stats().counts.count_100, 0);
+    let stats = sim.finish_with(&mut |event| events.push(*event)).unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        (events[1].time.get(), events[1].kind, events[1].part_hit),
+        (1120.0, EventKind::SliderHead, Some(false))
+    );
+    assert_eq!(
+        (events[2].time.get(), events[2].kind, events[2].judgement),
+        (1120.0, EventKind::SliderResult, Some(Judgement::Ok))
+    );
+    assert_eq!(stats.counts.count_100, 1);
+    assert_eq!(stats.counts.count_miss, 0);
+}
+
+#[test]
+fn late_head_after_nonzero_slider_end_does_not_rejudge_tail() {
+    // 1000: отпущено; 1050: нажатие после end; 1200: отпускание.
+    let compressed = [
+        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 48, 15, 145, 130, 44,
+        114, 12, 138, 148, 119, 117, 79, 90, 125, 242, 232, 95, 255, 251, 215, 192, 0,
+    ];
+    let map = map("0,0,1000,2,0,L|100:0,1,4");
+    let input = replay(&compressed);
+    let mut sim = Simulator::new(&map, &input).unwrap();
+    let mut events = Vec::new();
+    sim.advance_with(TimeMs::new(1020.0).unwrap(), &mut |event| {
+        events.push(*event)
+    })
+    .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        (events[0].time.get(), events[0].kind, events[0].part_hit),
+        (1010.0, EventKind::SliderTail, Some(false))
+    );
+    let stats = sim.finish_with(&mut |event| events.push(*event)).unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        (events[1].time.get(), events[1].kind),
+        (1050.0, EventKind::SliderHead)
+    );
+    assert_eq!(
+        (events[2].time.get(), events[2].kind, events[2].judgement),
+        (1050.0, EventKind::SliderResult, Some(Judgement::Ok))
+    );
+    assert_eq!(stats.counts.count_100, 1);
 }
 
 fn replay(compressed: &[u8]) -> ReplayTimeline {
