@@ -44,6 +44,42 @@ fn events(objects: &str) -> Vec<(ObjectId, EventKind, Option<bool>)> {
 }
 
 #[test]
+fn overlapping_sliders_keep_heads_and_parts_independent() {
+    let map = map("0,0,1000,2,0,L|200:0,1,200\n300,0,1000,2,0,L|500:0,2,200");
+    // Две головы нажаты раздельно; затем курсор следует только за вторым шариком.
+    let compressed = [
+        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 48, 15, 145, 2, 49,
+        22, 235, 172, 31, 203, 156, 103, 213, 255, 96, 2, 147, 36, 10, 172, 111, 67, 92, 20, 242,
+        10, 98, 235, 150, 113, 190, 237, 220, 46, 133, 247, 58, 7, 53, 255, 255, 217, 99, 128, 0,
+    ];
+    let replay = replay(&compressed);
+    let mut sim = Simulator::new(&map, &replay).unwrap();
+    let mut observed = Vec::new();
+    sim.advance_with(TimeMs::new(3000.0).unwrap(), &mut |event| {
+        observed.push((
+            event.time.get(),
+            event.object_id,
+            event.kind,
+            event.part_hit,
+        ));
+    })
+    .unwrap();
+    assert_eq!(
+        observed,
+        [
+            (1000.0, ObjectId(0), EventKind::SliderHead, Some(true)),
+            (1100.0, ObjectId(1), EventKind::SliderHead, Some(true)),
+            (1500.0, ObjectId(0), EventKind::SliderTick, Some(false)),
+            (1500.0, ObjectId(1), EventKind::SliderTick, Some(true)),
+            (1964.0, ObjectId(0), EventKind::SliderTail, Some(false)),
+            (2000.0, ObjectId(1), EventKind::SliderRepeat, Some(true)),
+            (2500.0, ObjectId(1), EventKind::SliderTick, Some(false)),
+            (2964.0, ObjectId(1), EventKind::SliderTail, Some(false)),
+        ]
+    );
+}
+
+#[test]
 fn simultaneous_fronts_reselect_and_held_actions_do_not_click() {
     let map =
         map("0,0,1000,1,0\n0,0,1000,2,0,L|200:0,1,200\n0,0,1010,1,0\n0,0,1020,2,0,L|200:0,1,200");
