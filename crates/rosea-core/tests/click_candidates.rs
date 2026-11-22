@@ -73,8 +73,10 @@ fn overlapping_sliders_keep_heads_and_parts_independent() {
             (1500.0, ObjectId(1), EventKind::SliderTick, Some(true)),
             (1964.0, ObjectId(0), EventKind::SliderTail, Some(false)),
             (2000.0, ObjectId(1), EventKind::SliderRepeat, Some(true)),
+            (2000.0, ObjectId(0), EventKind::SliderResult, None),
             (2500.0, ObjectId(1), EventKind::SliderTick, Some(false)),
             (2964.0, ObjectId(1), EventKind::SliderTail, Some(false)),
+            (3000.0, ObjectId(1), EventKind::SliderResult, None),
         ]
     );
 }

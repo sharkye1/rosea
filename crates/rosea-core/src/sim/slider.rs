@@ -1,7 +1,7 @@
 //! Проверка удержания шарика слайдера.
 
 use crate::error::RoseaError;
-use crate::model::{ObjectId, Point, Stats, TimeMs};
+use crate::model::{Judgement, ObjectId, Point, Stats, TimeMs};
 use crate::prepare::{
     HitWindows, MapEvent, MapEventKind, PreparedSlider, SliderEventKind, StackedObject,
 };
@@ -10,6 +10,18 @@ use crate::replay::ButtonState;
 use super::hit::{inside_radius, judge_click};
 use super::input::InputEvent;
 use super::score::{apply_slider_head, apply_slider_repeat, apply_slider_tail, apply_slider_tick};
+
+pub(super) fn result_for_parts(successful: u32, total: u32) -> Judgement {
+    if successful == total {
+        Judgement::Great
+    } else if successful == 0 {
+        Judgement::Miss
+    } else if u64::from(successful) * 2 >= u64::from(total) {
+        Judgement::Ok
+    } else {
+        Judgement::Meh
+    }
+}
 
 /// Состояние головы и удержания одного подготовленного слайдера.
 pub struct SliderState<'a> {
@@ -275,4 +287,22 @@ pub fn tracking_at_sample(
     }
     let threshold = if tracking { radius * 2.4_f32 } else { radius };
     inside_radius(cursor, ball, threshold)
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+
+    #[test]
+    fn judges_integer_part_ratios() {
+        for (successful, expected) in [
+            (4, Judgement::Great),
+            (3, Judgement::Ok),
+            (2, Judgement::Ok),
+            (1, Judgement::Meh),
+            (0, Judgement::Miss),
+        ] {
+            assert_eq!(result_for_parts(successful, 4), expected);
+        }
+    }
 }

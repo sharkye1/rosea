@@ -71,9 +71,7 @@ impl<'a> Timeline<'a> {
                 emit(group.time, TimelineStep::Map(spinner_starts));
             }
             input.apply_group(&group, |event| emit(group.time, TimelineStep::Input(event)));
-            if !map_events.is_empty() {
-                emit(group.time, TimelineStep::Map(map_events));
-            }
+            emit(group.time, TimelineStep::Map(map_events));
         })
     }
 }

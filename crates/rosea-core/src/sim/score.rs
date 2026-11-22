@@ -50,6 +50,29 @@ pub fn apply_circle(
     Ok(points)
 }
 
+/// Начисляет итог слайдера без изменения combo.
+pub(super) fn apply_slider_result(
+    stats: &mut Stats,
+    judgement: Judgement,
+    difficulty: u32,
+) -> Result<u64, RoseaError> {
+    let points = award(judgement, stats.current_combo, difficulty)?;
+    let mut updated = *stats;
+    updated.score = updated
+        .score
+        .checked_add(points)
+        .ok_or(RoseaError::ScoreOverflow)?;
+    let count = match judgement {
+        Judgement::Great => &mut updated.counts.count_300,
+        Judgement::Ok => &mut updated.counts.count_100,
+        Judgement::Meh => &mut updated.counts.count_50,
+        Judgement::Miss => &mut updated.counts.count_miss,
+    };
+    *count = count.checked_add(1).ok_or(RoseaError::ScoreOverflow)?;
+    *stats = updated;
+    Ok(points)
+}
+
 /// Начисляет очки и combo за успешную голову слайдера.
 pub fn apply_slider_head(stats: &mut Stats) -> Result<u64, RoseaError> {
     let mut updated = *stats;
@@ -123,4 +146,50 @@ pub fn apply_slider_tail(stats: &mut Stats, hit: bool) -> Result<u64, RoseaError
     updated.max_combo = updated.max_combo.max(updated.current_combo);
     *stats = updated;
     Ok(30)
+}
+
+#[cfg(test)]
+mod slider_result_tests {
+    use super::*;
+
+    #[test]
+    fn final_award_preserves_combo_and_checks_overflow() {
+        let mut stats = Stats {
+            score: 70,
+            current_combo: 3,
+            max_combo: 3,
+            ..Stats::default()
+        };
+        assert_eq!(
+            apply_slider_result(&mut stats, Judgement::Great, 5),
+            Ok(420)
+        );
+        assert_eq!(
+            (
+                stats.score,
+                stats.current_combo,
+                stats.max_combo,
+                stats.counts.count_300
+            ),
+            (490, 3, 3, 1)
+        );
+        let mut stats = Stats {
+            score: 40,
+            current_combo: 2,
+            max_combo: 2,
+            ..Stats::default()
+        };
+        assert_eq!(apply_slider_result(&mut stats, Judgement::Ok, 5), Ok(120));
+        assert_eq!(
+            (stats.score, stats.current_combo, stats.counts.count_100),
+            (160, 2, 1)
+        );
+        stats.score = u64::MAX;
+        let before = stats;
+        assert_eq!(
+            apply_slider_result(&mut stats, Judgement::Meh, 5),
+            Err(RoseaError::ScoreOverflow)
+        );
+        assert_eq!(stats, before);
+    }
 }
