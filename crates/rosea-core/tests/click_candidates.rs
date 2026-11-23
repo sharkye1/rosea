@@ -154,6 +154,113 @@ fn replay(compressed: &[u8]) -> ReplayTimeline {
     normalize(osr(&bytes).unwrap().value.input).unwrap().value
 }
 
+#[test]
+fn slider_score_matches_normative_examples_with_map_difficulty_five() {
+    let text = "osu file format v14\n[Difficulty]\nCircleSize:8\nOverallDifficulty:8\nHPDrainRate:8\nSliderMultiplier:1\nSliderTickRate:1\n[TimingPoints]\n0,500,4,0,0,100,1,0\n[HitObjects]\n0,0,1000,2,0,L|200:0,1,200";
+    let map = prepare_map(&osu(text.as_bytes()).unwrap().value).unwrap();
+    assert_eq!(map.difficulty_multiplier(), 5);
+    // Первый поток удерживает до конца; второй отпускает перед хвостом.
+    let all_hit = [
+        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 48, 15, 145, 2, 49,
+        23, 38, 139, 205, 8, 52, 200, 163, 221, 148, 97, 75, 50, 95, 255, 251, 250, 32, 0,
+    ];
+    let tail_miss = [
+        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 48, 15, 145, 2, 49,
+        22, 236, 206, 75, 106, 115, 204, 131, 65, 95, 211, 98, 247, 166, 156, 18, 123, 255, 255,
+        233, 88, 0, 0,
+    ];
+    for (compressed, expected_score, expected_combo, expected_judgement, expected_delta) in [
+        (all_hit.as_slice(), 490, 3, Judgement::Great, 420),
+        (tail_miss.as_slice(), 160, 2, Judgement::Ok, 120),
+    ] {
+        let input = replay(compressed);
+        let mut sim = Simulator::new(&map, &input).unwrap();
+        let mut events = Vec::new();
+        sim.advance_with(TimeMs::new(1999.0).unwrap(), &mut |event| {
+            events.push(*event)
+        })
+        .unwrap();
+        assert_eq!(sim.stats().score, if expected_combo == 3 { 70 } else { 40 });
+        assert_eq!(sim.stats().current_combo, expected_combo);
+        let stats = sim.finish_with(&mut |event| events.push(*event)).unwrap();
+        assert_eq!(stats.score, expected_score);
+        assert_eq!(stats.current_combo, expected_combo);
+        assert_eq!(stats.max_combo, expected_combo);
+        assert_eq!(stats.counts.count_miss, 0);
+        let final_event = events.last().unwrap();
+        assert_eq!(
+            (
+                final_event.kind,
+                final_event.judgement,
+                final_event.score_delta
+            ),
+            (
+                EventKind::SliderResult,
+                Some(expected_judgement),
+                expected_delta
+            )
+        );
+        assert_eq!(
+            Simulator::new(&map, &input).unwrap().finish().unwrap(),
+            stats
+        );
+    }
+}
+
+#[test]
+fn mixed_slider_paths_finish_after_recapture_and_early_eof() {
+    // Первый слайдер: отпускание, пропуск тика и повторный захват; EOF во время второго.
+    let compressed = [
+        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 48, 15, 145, 2, 49,
+        22, 234, 148, 52, 67, 103, 11, 12, 235, 141, 12, 39, 78, 36, 174, 248, 191, 1, 29, 166,
+        104, 44, 193, 107, 49, 187, 240, 205, 33, 70, 249, 255, 252, 12, 191, 0,
+    ];
+    let map = map(
+        "0,0,1000,2,0,L|200:0,2,200\n0,0,4000,2,0,B|100:0|200:0,1,200\n0,0,7000,2,0,P|100:100|200:0,1,200",
+    );
+    let input = replay(&compressed);
+    let mut sim = Simulator::new(&map, &input).unwrap();
+    let mut events = Vec::new();
+    sim.advance_with(TimeMs::new(4500.0).unwrap(), &mut |event| {
+        events.push(*event)
+    })
+    .unwrap();
+    let stats = sim.finish_with(&mut |event| events.push(*event)).unwrap();
+    let parts: Vec<_> = events
+        .iter()
+        .filter(|event| event.object_id == ObjectId(0))
+        .map(|event| (event.kind, event.part_hit, event.judgement))
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            (EventKind::SliderHead, Some(true), None),
+            (EventKind::SliderTick, Some(false), None),
+            (EventKind::SliderRepeat, Some(true), None),
+            (EventKind::SliderTick, Some(true), None),
+            (EventKind::SliderTail, Some(true), None),
+            (EventKind::SliderResult, None, Some(Judgement::Ok)),
+        ]
+    );
+    for id in [1, 2] {
+        assert!(events.iter().any(|event| event.object_id == ObjectId(id)
+            && event.kind == EventKind::SliderTail
+            && event.part_hit == Some(false)));
+    }
+    assert_eq!(
+        (
+            stats.counts.count_100,
+            stats.counts.count_50,
+            stats.counts.count_miss
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        Simulator::new(&map, &input).unwrap().finish().unwrap(),
+        stats
+    );
+}
+
 fn events(objects: &str) -> Vec<(ObjectId, EventKind, Option<bool>)> {
     let map = map(objects);
     // LZMA-поток одной записи: два фронта в точке (0, 0) на 1000 мс.
