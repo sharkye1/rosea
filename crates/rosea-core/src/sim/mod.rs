@@ -6,6 +6,7 @@ pub mod schedule;
 pub mod score;
 mod simulator;
 pub mod slider;
+mod spinner;
 pub mod timeline;
 
 pub use simulator::{EventKind, SimEvent, Simulator};

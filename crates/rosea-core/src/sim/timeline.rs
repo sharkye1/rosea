@@ -3,7 +3,7 @@
 use crate::error::RoseaError;
 use crate::model::TimeMs;
 use crate::prepare::{MapEvent, MapEventKind, PreparedMap};
-use crate::replay::ReplayTimeline;
+use crate::replay::{ButtonState, ReplayTimeline};
 
 use super::input::{InputEvent, InputState};
 use super::schedule::Schedule;
@@ -16,6 +16,10 @@ pub enum TimelineEvent {
 }
 
 pub(super) enum TimelineStep<'a> {
+    Begin {
+        previous: Option<TimeMs>,
+        buttons: ButtonState,
+    },
     Input(InputEvent),
     Map(&'a [MapEvent]),
 }
@@ -24,6 +28,7 @@ pub(super) enum TimelineStep<'a> {
 pub struct Timeline<'a> {
     schedule: Schedule<'a>,
     input: InputState,
+    previous: Option<TimeMs>,
 }
 
 impl<'a> Timeline<'a> {
@@ -31,6 +36,7 @@ impl<'a> Timeline<'a> {
         Self {
             schedule: Schedule::new(map, replay),
             input: InputState::default(),
+            previous: None,
         }
     }
 
@@ -45,6 +51,7 @@ impl<'a> Timeline<'a> {
         mut emit: impl FnMut(TimeMs, TimelineEvent),
     ) -> Result<(), RoseaError> {
         self.advance_grouped(time, |time, step| match step {
+            TimelineStep::Begin { .. } => {}
             TimelineStep::Input(event) => emit(time, TimelineEvent::Input(event)),
             TimelineStep::Map(events) => {
                 for &event in events {
@@ -61,7 +68,15 @@ impl<'a> Timeline<'a> {
         mut emit: impl FnMut(TimeMs, TimelineStep<'a>),
     ) -> Result<(), RoseaError> {
         let input = &mut self.input;
+        let previous = &mut self.previous;
         self.schedule.advance_to(time, |group| {
+            emit(
+                group.time,
+                TimelineStep::Begin {
+                    previous: previous.replace(group.time),
+                    buttons: input.buttons(),
+                },
+            );
             // В подготовленной группе начала спиннеров стоят перед остальными событиями.
             let spinner_count = group
                 .map_events

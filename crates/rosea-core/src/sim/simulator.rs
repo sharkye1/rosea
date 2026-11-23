@@ -9,6 +9,7 @@ use super::hit::{inside_radius, judge_click};
 use super::input::InputEvent;
 use super::score::{apply_circle, apply_slider_result};
 use super::slider::{SliderState, map_event_needs_tracking, result_for_parts};
+use super::spinner::SpinnerState;
 use super::timeline::{Timeline, TimelineEvent, TimelineStep};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -42,6 +43,8 @@ pub struct Simulator<'a> {
     resolved: Vec<bool>,
     sliders: Vec<Option<SliderState<'a>>>,
     active_sliders: Vec<ObjectId>,
+    spinners: Vec<Option<SpinnerState>>,
+    active_spinners: Vec<ObjectId>,
     next_slider_index: usize,
     stats: Stats,
     failed: bool,
@@ -55,6 +58,8 @@ struct EventProcessor<'map, 'state, 'sim> {
     resolved: &'state mut [bool],
     sliders: &'state mut [Option<SliderState<'sim>>],
     active_sliders: &'state mut Vec<ObjectId>,
+    spinners: &'state mut [Option<SpinnerState>],
+    active_spinners: &'state mut Vec<ObjectId>,
     next_slider_index: &'state mut usize,
     record_buttons: ButtonState,
     stats: &'state mut Stats,
@@ -87,8 +92,14 @@ impl<'a> Simulator<'a> {
         // ObjectId — плотный индекс исходной записи до сортировки карты.
         let mut sliders = Vec::new();
         sliders.resize_with(map.objects().len(), || None);
-        for object in map.objects() {
-            sliders[object.object_id().0 as usize] = SliderState::new(object);
+        let mut spinners = Vec::new();
+        spinners.resize_with(map.objects().len(), || None);
+        for (object, times) in map.objects().iter().zip(map.object_times()) {
+            let index = object.object_id().0 as usize;
+            sliders[index] = SliderState::new(object);
+            if matches!(object.kind(), StackedObjectKind::Spinner { .. }) {
+                spinners[index] = Some(SpinnerState::new(times));
+            }
         }
         Ok(Self {
             map,
@@ -97,6 +108,8 @@ impl<'a> Simulator<'a> {
             resolved: vec![false; map.objects().len()],
             sliders,
             active_sliders: Vec::new(),
+            spinners,
+            active_spinners: Vec::new(),
             next_slider_index: 0,
             stats: Stats::default(),
             failed: false,
@@ -138,23 +151,25 @@ impl<'a> Simulator<'a> {
             resolved,
             sliders,
             active_sliders,
+            spinners: &mut self.spinners,
+            active_spinners: &mut self.active_spinners,
             next_slider_index,
             record_buttons: ButtonState::default(),
             stats,
             emit,
             late_heads: Vec::new(),
         };
-        let mut last_synced_time = None;
         let mut failure = None;
         timeline.advance_grouped(time, |time, step| {
             if failure.is_some() {
                 return;
             }
-            if last_synced_time != Some(time) {
-                processor.sync_active_sliders(time);
-                last_synced_time = Some(time);
-            }
             failure = match step {
+                TimelineStep::Begin { previous, buttons } => {
+                    processor.sync_active_sliders(time);
+                    processor.advance_spinners(previous, time, buttons);
+                    Ok(())
+                }
                 TimelineStep::Input(event) => processor.process(time, TimelineEvent::Input(event)),
                 TimelineStep::Map(events) => processor.process_map_group(time, events),
             }
@@ -192,6 +207,16 @@ impl<'a> Simulator<'a> {
 }
 
 impl EventProcessor<'_, '_, '_> {
+    fn advance_spinners(&mut self, previous: Option<TimeMs>, time: TimeMs, buttons: ButtonState) {
+        if let Some(previous) = previous {
+            for &id in self.active_spinners.iter() {
+                if let Some(spinner) = &mut self.spinners[id.0 as usize] {
+                    spinner.advance(previous, time, buttons, self.replay);
+                }
+            }
+        }
+    }
+
     /// Поддерживает упорядоченный список слайдеров, активных в момент `time`.
     ///
     /// В момент начала слайдер уже доступен фазе ввода той же временной группы.
@@ -358,6 +383,22 @@ impl EventProcessor<'_, '_, '_> {
                 self.press(time, cursor)?;
             }
             TimelineEvent::Map(event) => match event.kind {
+                MapEventKind::SpinnerStart => {
+                    if let Err(pos) = self
+                        .active_spinners
+                        .binary_search_by_key(&event.object_id.0, |id| id.0)
+                    {
+                        self.active_spinners.insert(pos, event.object_id);
+                    }
+                }
+                MapEventKind::SpinnerEnd => {
+                    if let Ok(pos) = self
+                        .active_spinners
+                        .binary_search_by_key(&event.object_id.0, |id| id.0)
+                    {
+                        self.active_spinners.remove(pos);
+                    }
+                }
                 MapEventKind::CircleDeadline if !self.resolved[event.object_id.0 as usize] => {
                     let combo_before = self.stats.current_combo;
                     let score_delta = apply_circle(
