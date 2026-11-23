@@ -167,8 +167,7 @@ impl<'a> Simulator<'a> {
             failure = match step {
                 TimelineStep::Begin { previous, buttons } => {
                     processor.sync_active_sliders(time);
-                    processor.advance_spinners(previous, time, buttons);
-                    Ok(())
+                    processor.advance_spinners(previous, time, buttons)
                 }
                 TimelineStep::Input(event) => processor.process(time, TimelineEvent::Input(event)),
                 TimelineStep::Map(events) => processor.process_map_group(time, events),
@@ -207,14 +206,20 @@ impl<'a> Simulator<'a> {
 }
 
 impl EventProcessor<'_, '_, '_> {
-    fn advance_spinners(&mut self, previous: Option<TimeMs>, time: TimeMs, buttons: ButtonState) {
+    fn advance_spinners(
+        &mut self,
+        previous: Option<TimeMs>,
+        time: TimeMs,
+        buttons: ButtonState,
+    ) -> Result<(), RoseaError> {
         if let Some(previous) = previous {
             for &id in self.active_spinners.iter() {
                 if let Some(spinner) = &mut self.spinners[id.0 as usize] {
-                    spinner.advance(previous, time, buttons, self.replay);
+                    spinner.advance(previous, time, buttons, self.replay)?;
                 }
             }
         }
+        Ok(())
     }
 
     /// Поддерживает упорядоченный список слайдеров, активных в момент `time`.

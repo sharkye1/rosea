@@ -1,5 +1,9 @@
 //! Накопление угла по интервалам временной шкалы.
 
+use std::f64::consts::PI;
+use std::ops::Range;
+
+use crate::error::RoseaError;
 use crate::model::{Point, TimeMs};
 use crate::prepare::ObjectTimes;
 use crate::replay::{ButtonState, ReplayTimeline};
@@ -8,6 +12,7 @@ pub(super) struct SpinnerState {
     start: TimeMs,
     end: TimeMs,
     angle: f64,
+    half_turns: u32,
 }
 
 impl SpinnerState {
@@ -16,6 +21,7 @@ impl SpinnerState {
             start: times.start,
             end: times.end,
             angle: 0.0,
+            half_turns: 0,
         }
     }
 
@@ -25,7 +31,7 @@ impl SpinnerState {
         time: TimeMs,
         buttons: ButtonState,
         replay: &ReplayTimeline,
-    ) {
+    ) -> Result<Range<u32>, RoseaError> {
         let left = if previous.get() < self.start.get() {
             self.start
         } else {
@@ -37,10 +43,24 @@ impl SpinnerState {
             time
         };
         if left.get() >= right.get() || !(buttons.left || buttons.right) {
-            return;
+            return Ok(self.half_turns..self.half_turns);
         }
-        self.angle += angle_between(replay.cursor_at(left), replay.cursor_before(right));
+        let angle = self.angle + angle_between(replay.cursor_at(left), replay.cursor_before(right));
+        let half_turns = completed_halves(angle)?;
+        // Индексы с нуля: номер полуоборота на единицу больше индекса.
+        let crossed = self.half_turns..half_turns;
+        self.angle = angle;
+        self.half_turns = half_turns;
+        Ok(crossed)
     }
+}
+
+fn completed_halves(angle: f64) -> Result<u32, RoseaError> {
+    let halves = (angle / PI).floor();
+    if !(0.0..=f64::from(u32::MAX)).contains(&halves) {
+        return Err(RoseaError::ScoreOverflow);
+    }
+    Ok(halves as u32)
 }
 
 fn angle_between(left: Point, right: Point) -> f64 {
@@ -100,21 +120,25 @@ mod tests {
             (0, 156.0, 192.0, 0),
         ]);
         let mut spinner = state(150.0, 200.0);
-        spinner.advance(
-            time(100.0),
-            time(200.0),
-            replay.buttons_at(time(100.0)),
-            &replay,
-        );
+        spinner
+            .advance(
+                time(100.0),
+                time(200.0),
+                replay.buttons_at(time(100.0)),
+                &replay,
+            )
+            .unwrap();
         assert_eq!(spinner.angle, std::f64::consts::FRAC_PI_4);
 
         let mut spinner = state(100.0, 150.0);
-        spinner.advance(
-            time(100.0),
-            time(200.0),
-            replay.buttons_at(time(100.0)),
-            &replay,
-        );
+        spinner
+            .advance(
+                time(100.0),
+                time(200.0),
+                replay.buttons_at(time(100.0)),
+                &replay,
+            )
+            .unwrap();
         assert_eq!(spinner.angle, std::f64::consts::FRAC_PI_4);
     }
 
@@ -128,12 +152,14 @@ mod tests {
         ]);
         let mut spinner = state(0.0, 500.0);
         for (left, right) in [(0.0, 100.0), (100.0, 200.0), (200.0, 300.0), (300.0, 300.0)] {
-            spinner.advance(
-                time(left),
-                time(right),
-                replay.buttons_at(time(left)),
-                &replay,
-            );
+            spinner
+                .advance(
+                    time(left),
+                    time(right),
+                    replay.buttons_at(time(left)),
+                    &replay,
+                )
+                .unwrap();
         }
         assert_eq!(spinner.angle, 0.0);
     }
@@ -147,14 +173,33 @@ mod tests {
             (100, 156.0, 192.0, 1),
         ]);
         let mut spinner = state(0.0, 500.0);
-        for (left, right) in [(100.0, 200.0), (200.0, 300.0), (300.0, 400.0)] {
-            spinner.advance(
-                time(left),
-                time(right),
-                replay.buttons_at(time(left)),
-                &replay,
+        for (left, right, expected) in [
+            (100.0, 200.0, 0..0),
+            (200.0, 300.0, 0..1),
+            (300.0, 400.0, 1..1),
+        ] {
+            assert_eq!(
+                spinner
+                    .advance(
+                        time(left),
+                        time(right),
+                        replay.buttons_at(time(left)),
+                        &replay
+                    )
+                    .unwrap(),
+                expected
             );
         }
         assert_eq!(spinner.angle, std::f64::consts::PI);
+    }
+
+    #[test]
+    fn half_turn_boundaries_are_exact_and_checked() {
+        assert_eq!(completed_halves(PI.next_down()), Ok(0));
+        assert_eq!(completed_halves(PI), Ok(1));
+        assert_eq!(completed_halves(2.0 * PI), Ok(2));
+        for angle in [f64::NAN, f64::INFINITY, -PI, 2.0 * f64::from(u32::MAX) * PI] {
+            assert_eq!(completed_halves(angle), Err(RoseaError::ScoreOverflow));
+        }
     }
 }
