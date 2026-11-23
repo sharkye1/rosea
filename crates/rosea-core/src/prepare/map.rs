@@ -10,6 +10,17 @@ use super::{
 const MAX_TIME: f64 = 86_400_000.0;
 const MAX_SCHEDULE_EVENTS: usize = 2_300_000;
 
+fn spinner_requirements(duration_ms: f64, od: f32) -> (u32, u32) {
+    let od = f64::from(od);
+    let ratio = if od < 5.0 {
+        3.0 + 0.4 * od
+    } else {
+        2.5 + 0.5 * od
+    };
+    let req_half = ((duration_ms / 1000.0) * ratio).floor() as u32;
+    (req_half, req_half + 3)
+}
+
 /// Виды событий, подготовленных для временной шкалы карты.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MapEventKind {
@@ -68,6 +79,14 @@ pub struct ObjectTimes {
     pub latest_resolution: TimeMs,
 }
 
+/// Длительность в миллисекундах и пороги полуоборотов спиннера.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SpinnerParameters {
+    pub duration_ms: f64,
+    pub req_half: u32,
+    pub req_bonus: u32,
+}
+
 /// Подготовленные объекты и параметры их видимости.
 #[derive(Debug)]
 pub struct PreparedMap {
@@ -75,6 +94,7 @@ pub struct PreparedMap {
     visibility: Visibility,
     hit_windows: HitWindows,
     object_times: Vec<ObjectTimes>,
+    spinner_parameters: Vec<Option<SpinnerParameters>>,
     events: Vec<MapEvent>,
     drain_seconds: i64,
     difficulty_multiplier: u32,
@@ -99,6 +119,13 @@ impl PreparedMap {
 
     pub fn object_times(&self) -> &[ObjectTimes] {
         &self.object_times
+    }
+
+    pub fn spinner_parameters(&self, id: ObjectId) -> Option<SpinnerParameters> {
+        self.spinner_parameters
+            .get(id.0 as usize)
+            .copied()
+            .flatten()
     }
 
     pub fn events(&self) -> &[MapEvent] {
@@ -129,6 +156,8 @@ pub fn prepare_map(map: &Beatmap) -> Result<PreparedMap, RoseaError> {
         meh: (200.0 - 10.0 * od).floor() as i64,
     };
     let mut object_times = Vec::with_capacity(objects.len());
+    // ObjectId — плотный индекс исходной записи, независимый от сортировки.
+    let mut spinner_parameters = vec![None; objects.len()];
     for object in &objects {
         let checked = |value: f64| -> Result<TimeMs, RoseaError> {
             let time = TimeMs::new(value).map_err(|_| RoseaError::NumericalError {
@@ -165,6 +194,15 @@ pub fn prepare_map(map: &Beatmap) -> Result<PreparedMap, RoseaError> {
         let latest_resolution = head_deadline
             .filter(|deadline| deadline.get() > end.get())
             .unwrap_or(end);
+        if matches!(object.kind(), StackedObjectKind::Spinner { .. }) {
+            let duration_ms = end.get() - start.get();
+            let (req_half, req_bonus) = spinner_requirements(duration_ms, map.difficulty().od);
+            spinner_parameters[object.object_id().0 as usize] = Some(SpinnerParameters {
+                duration_ms,
+                req_half,
+                req_bonus,
+            });
+        }
         object_times.push(ObjectTimes {
             object_id: object.object_id(),
             start,
@@ -253,6 +291,7 @@ pub fn prepare_map(map: &Beatmap) -> Result<PreparedMap, RoseaError> {
         visibility: visibility(map)?,
         hit_windows,
         object_times,
+        spinner_parameters,
         events,
         drain_seconds,
         difficulty_multiplier,
