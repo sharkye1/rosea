@@ -48,6 +48,9 @@ fn angle_between(left: Point, right: Point) -> f64 {
     let uy = f64::from(left.y) - 192.0;
     let vx = f64::from(right.x) - 256.0;
     let vy = f64::from(right.y) - 192.0;
+    if (ux == 0.0 && uy == 0.0) || (vx == 0.0 && vy == 0.0) {
+        return 0.0;
+    }
     (ux * vy - uy * vx).atan2(ux * vx + uy * vy).abs()
 }
 
@@ -113,5 +116,45 @@ mod tests {
             &replay,
         );
         assert_eq!(spinner.angle, std::f64::consts::FRAC_PI_4);
+    }
+
+    #[test]
+    fn zero_vectors_and_intervals_add_no_angle() {
+        let replay = replay(&[
+            (100, 156.0, 192.0, 1),
+            (100, 256.0, 192.0, 1),
+            (100, 156.0, 192.0, 1),
+            (0, 356.0, 192.0, 1),
+        ]);
+        let mut spinner = state(0.0, 500.0);
+        for (left, right) in [(0.0, 100.0), (100.0, 200.0), (200.0, 300.0), (300.0, 300.0)] {
+            spinner.advance(
+                time(left),
+                time(right),
+                replay.buttons_at(time(left)),
+                &replay,
+            );
+        }
+        assert_eq!(spinner.angle, 0.0);
+    }
+
+    #[test]
+    fn reversing_direction_adds_angle_only_while_held() {
+        let replay = replay(&[
+            (100, 356.0, 192.0, 1),
+            (100, 256.0, 292.0, 2),
+            (100, 356.0, 192.0, 0),
+            (100, 156.0, 192.0, 1),
+        ]);
+        let mut spinner = state(0.0, 500.0);
+        for (left, right) in [(100.0, 200.0), (200.0, 300.0), (300.0, 400.0)] {
+            spinner.advance(
+                time(left),
+                time(right),
+                replay.buttons_at(time(left)),
+                &replay,
+            );
+        }
+        assert_eq!(spinner.angle, std::f64::consts::PI);
     }
 }
