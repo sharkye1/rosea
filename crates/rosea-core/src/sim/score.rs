@@ -24,6 +24,15 @@ pub fn apply_circle(
     judgement: Judgement,
     difficulty: u32,
 ) -> Result<u64, RoseaError> {
+    apply_combo_result(stats, judgement, difficulty)
+}
+
+/// Применяет итог круга или спиннера с изменением combo.
+pub(super) fn apply_combo_result(
+    stats: &mut Stats,
+    judgement: Judgement,
+    difficulty: u32,
+) -> Result<u64, RoseaError> {
     let points = award(judgement, stats.current_combo, difficulty)?;
     let mut updated = *stats;
     updated.score = updated

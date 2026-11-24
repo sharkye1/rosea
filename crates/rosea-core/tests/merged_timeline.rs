@@ -1,5 +1,4 @@
 use rosea_core::{
-    error::RoseaError,
     model::{HitCounts, Judgement, ObjectId, Point, Stats, TimeMs},
     parse::{osr, osu},
     prepare::{MapEventKind, prepare_map},
@@ -154,7 +153,7 @@ fn parsed_inputs_can_finish_circle_simulation_after_replay_ends() {
 }
 
 #[test]
-fn simulator_accepts_slider_ticks_but_rejects_spinners() {
+fn simulator_finishes_short_spinner_and_circle() {
     let replay = normalize(osr(&replay_bytes()).unwrap().value.input)
         .unwrap()
         .value;
@@ -165,10 +164,15 @@ fn simulator_accepts_slider_ticks_but_rejects_spinners() {
 
     let spinner_map = format!("{prefix}256,192,100,8,0,200");
     let spinner_map = prepare_map(&osu(spinner_map.as_bytes()).unwrap().value).unwrap();
-    assert!(matches!(
-        Simulator::new(&spinner_map, &replay),
-        Err(RoseaError::UnsupportedSimulationObject {
-            object_id: ObjectId(1)
-        })
-    ));
+    let stats = Simulator::new(&spinner_map, &replay)
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        stats.counts,
+        HitCounts {
+            count_300: 2,
+            ..HitCounts::default()
+        }
+    );
 }

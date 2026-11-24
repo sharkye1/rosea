@@ -1,4 +1,4 @@
-//! Прогон кругов и частей слайдеров по объединённой временной шкале.
+//! Прогон кругов, слайдеров и спиннеров по объединённой временной шкале.
 
 use crate::error::RoseaError;
 use crate::model::{Judgement, ObjectId, Point, Stats, TimeMs};
@@ -7,7 +7,7 @@ use crate::replay::{ButtonState, ReplayTimeline};
 
 use super::hit::{inside_radius, judge_click};
 use super::input::InputEvent;
-use super::score::{apply_circle, apply_slider_result, apply_spinner_points};
+use super::score::{apply_circle, apply_combo_result, apply_slider_result, apply_spinner_points};
 use super::slider::{SliderState, map_event_needs_tracking, result_for_parts};
 use super::spinner::{HalfTurnAward, SpinnerState, half_turn_award};
 use super::timeline::{Timeline, TimelineEvent, TimelineStep};
@@ -22,6 +22,7 @@ pub enum EventKind {
     SliderResult,
     SpinnerPoints,
     SpinnerBonus,
+    SpinnerResult,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -37,7 +38,7 @@ pub struct SimEvent {
     pub combo_after: u32,
 }
 
-/// Частичный прогон кругов и частей слайдеров.
+/// Событийный прогон подготовленной карты и реплея.
 pub struct Simulator<'a> {
     map: &'a PreparedMap,
     replay: &'a ReplayTimeline,
@@ -71,16 +72,6 @@ struct EventProcessor<'map, 'state, 'sim> {
 
 impl<'a> Simulator<'a> {
     pub fn new(map: &'a PreparedMap, input: &'a ReplayTimeline) -> Result<Self, RoseaError> {
-        if let Some(object) = map.objects().iter().find(|object| {
-            !matches!(
-                object.kind(),
-                StackedObjectKind::Circle | StackedObjectKind::Slider(_)
-            )
-        }) {
-            return Err(RoseaError::UnsupportedSimulationObject {
-                object_id: object.object_id(),
-            });
-        }
         let last_input = input
             .records()
             .last()
@@ -339,7 +330,8 @@ impl EventProcessor<'_, '_, '_> {
             .take_while(|object| object.start_time() - click < w50)
             .find_map(|object| {
                 let id = object.object_id().0 as usize;
-                if self.resolved[id]
+                if matches!(object.kind(), StackedObjectKind::Spinner { .. })
+                    || self.resolved[id]
                     || self.sliders[id]
                         .as_ref()
                         .is_some_and(|slider| !slider.head_is_pending())
@@ -425,6 +417,31 @@ impl EventProcessor<'_, '_, '_> {
                         .binary_search_by_key(&event.object_id.0, |id| id.0)
                     {
                         self.active_spinners.remove(pos);
+                    }
+                    let index = event.object_id.0 as usize;
+                    if !self.resolved[index]
+                        && let Some(spinner) = &self.spinners[index]
+                        && let Some(parameters) = self.map.spinner_parameters(event.object_id)
+                    {
+                        let judgement = spinner.judgement(parameters.req_half);
+                        let combo_before = self.stats.current_combo;
+                        let score_delta = apply_combo_result(
+                            self.stats,
+                            judgement,
+                            self.map.difficulty_multiplier(),
+                        )?;
+                        self.resolved[index] = true;
+                        (self.emit)(&SimEvent {
+                            time,
+                            object_id: event.object_id,
+                            kind: EventKind::SpinnerResult,
+                            part_index: None,
+                            part_hit: None,
+                            judgement: Some(judgement),
+                            score_delta,
+                            combo_before,
+                            combo_after: self.stats.current_combo,
+                        });
                     }
                 }
                 MapEventKind::CircleDeadline if !self.resolved[event.object_id.0 as usize] => {
@@ -1112,14 +1129,42 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_objects_are_rejected() {
-        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n256,192,1000,8,0,2000";
+    fn spinner_does_not_consume_click_or_block_circle() {
+        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n256,192,1000,8,0,3000\n256,192,1000,1,0";
         let map = prepare_map(&osu(map).unwrap().value).unwrap();
-        let replay = replay(&[(1000, 0.0, 0)]);
-        assert!(matches!(
-            Simulator::new(&map, &replay),
-            Err(RoseaError::UnsupportedSimulationObject { .. })
-        ));
+        let input = normalize(ReplayInput {
+            records: vec![ReplayRecord {
+                index: 0,
+                delta_ms: 1000,
+                cursor: Point { x: 256.0, y: 192.0 },
+                keys: 1,
+            }],
+            seed: None,
+        })
+        .unwrap()
+        .value;
+        let mut sim = Simulator::new(&map, &input).unwrap();
+        let mut events = Vec::new();
+        sim.advance_with(TimeMs::new(1000.0).unwrap(), &mut |event| {
+            events.push(*event)
+        })
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].object_id, ObjectId(1));
+        assert_eq!(events[0].judgement, Some(Judgement::Great));
+        let stats = sim.finish_with(&mut |event| events.push(*event)).unwrap();
+        assert_eq!(events.len(), 2);
+        let result = events[1];
+        assert_eq!(result.time.get(), 3000.0);
+        assert_eq!(result.kind, EventKind::SpinnerResult);
+        assert_eq!(result.object_id, ObjectId(0));
+        assert_eq!(result.judgement, Some(Judgement::Miss));
+        assert_eq!((result.combo_before, result.combo_after), (1, 0));
+        assert_eq!((stats.counts.count_300, stats.counts.count_miss), (1, 1));
+        assert_eq!(
+            (stats.current_combo, stats.max_combo, stats.score),
+            (0, 1, 300)
+        );
     }
 
     #[test]

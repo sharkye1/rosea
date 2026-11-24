@@ -4,7 +4,7 @@ use std::f64::consts::PI;
 use std::ops::Range;
 
 use crate::error::RoseaError;
-use crate::model::{ObjectId, Point, TimeMs};
+use crate::model::{Judgement, ObjectId, Point, TimeMs};
 use crate::prepare::ObjectTimes;
 use crate::replay::{ButtonState, ReplayTimeline};
 
@@ -75,6 +75,18 @@ impl SpinnerState {
         self.angle = angle;
         self.half_turns = half_turns;
         Ok(crossed)
+    }
+
+    pub(super) fn judgement(&self, req_half: u32) -> Judgement {
+        if req_half == 0 || self.half_turns > req_half {
+            Judgement::Great
+        } else if self.half_turns >= (req_half - 1).max(1) {
+            Judgement::Ok
+        } else if self.half_turns >= req_half / 4 {
+            Judgement::Meh
+        } else {
+            Judgement::Miss
+        }
     }
 }
 
@@ -241,5 +253,24 @@ mod tests {
         assert_eq!(half_turn_award(16, 15), Some(Points));
         assert_eq!(half_turn_award(17, 15), Some(Bonus));
         assert_eq!(half_turn_award(18, 15), Some(Points));
+    }
+
+    #[test]
+    fn spinner_result_uses_inclusive_thresholds() {
+        let mut spinner = state(0.0, 2000.0);
+        assert_eq!(spinner.judgement(0), Judgement::Great);
+        assert_eq!(spinner.judgement(1), Judgement::Meh);
+        for (halves, judgement) in [
+            (0, Judgement::Miss),
+            (2, Judgement::Miss),
+            (3, Judgement::Meh),
+            (11, Judgement::Meh),
+            (12, Judgement::Ok),
+            (13, Judgement::Ok),
+            (14, Judgement::Great),
+        ] {
+            spinner.half_turns = halves;
+            assert_eq!(spinner.judgement(13), judgement);
+        }
     }
 }
