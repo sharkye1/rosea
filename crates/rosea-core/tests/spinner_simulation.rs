@@ -5,6 +5,7 @@ use rosea_core::{
     replay::normalize,
     sim::{EventKind, Simulator},
 };
+use std::fmt::Write as _;
 
 fn map(objects: &str) -> PreparedMap {
     let text = format!(
@@ -22,6 +23,15 @@ fn replay(records: &str) -> ParsedReplay {
     bytes.extend_from_slice(&i32::try_from(compressed.len()).unwrap().to_le_bytes());
     bytes.extend_from_slice(&compressed);
     osr(&bytes).unwrap().value
+}
+
+fn alternating_positions(halves: u32, step_ms: u32) -> String {
+    let mut records = String::from("1000|356|192|1,");
+    for half in 1..=halves {
+        let x = if half.is_multiple_of(2) { 356 } else { 156 };
+        write!(records, "{step_ms}|{x}|192|1,").unwrap();
+    }
+    records
 }
 
 #[test]
@@ -92,4 +102,102 @@ fn overlapping_spinners_follow_object_ids_and_group_phases() {
         Simulator::new(&map, &input).unwrap().finish().unwrap(),
         stats
     );
+}
+
+#[test]
+fn normative_spinner_scores_through_public_simulator() {
+    use EventKind::{SpinnerBonus, SpinnerPoints, SpinnerResult};
+
+    // Полуобороты, на которых спецификация начисляет очки. В чётном пороге
+    // бонус замещает обычное начисление, в нечётном обе серии чередуются.
+    type Case = (u32, u32, Judgement, u64, &'static [u32], &'static [u32]);
+    let cases: [Case; 7] = [
+        (100, 0, Judgement::Great, 300, &[], &[]),
+        (2000, 0, Judgement::Miss, 0, &[], &[]),
+        (2000, 3, Judgement::Meh, 150, &[2], &[]),
+        (2000, 12, Judgement::Ok, 700, &[2, 4, 6, 8, 10, 12], &[]),
+        (
+            2000,
+            14,
+            Judgement::Great,
+            1000,
+            &[2, 4, 6, 8, 10, 12, 14],
+            &[],
+        ),
+        (
+            2000,
+            20,
+            Judgement::Great,
+            3300,
+            &[2, 4, 6, 8, 10, 12, 14, 16],
+            &[18, 20],
+        ),
+        (
+            1996,
+            24,
+            Judgement::Great,
+            5900,
+            &[2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24],
+            &[17, 19, 21, 23],
+        ),
+    ];
+    for (duration, halves, judgement, score, points, bonuses) in cases {
+        let end = 1000 + duration;
+        let map = map(&format!("256,192,1000,8,0,{end}"));
+        let input = normalize(replay(&alternating_positions(halves, 50)).input)
+            .unwrap()
+            .value;
+        let mut events = Vec::new();
+        let stats = Simulator::new(&map, &input)
+            .unwrap()
+            .finish_with(&mut |event| events.push(*event))
+            .unwrap();
+        let mut expected = Vec::new();
+        expected.extend(
+            points
+                .iter()
+                .map(|half| (f64::from(1000 + half * 50), SpinnerPoints, 100)),
+        );
+        expected.extend(
+            bonuses
+                .iter()
+                .map(|half| (f64::from(1000 + half * 50), SpinnerBonus, 1100)),
+        );
+        expected.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let observed: Vec<_> = events[..events.len() - 1]
+            .iter()
+            .map(|event| (event.time.get(), event.kind, event.score_delta))
+            .collect();
+        assert_eq!(observed, expected, "duration={duration}, H={halves}");
+        let result = events.last().unwrap();
+        let combo = u32::from(judgement != Judgement::Miss);
+        assert_eq!(
+            (result.time.get(), result.kind, result.judgement),
+            (f64::from(end), SpinnerResult, Some(judgement))
+        );
+        assert_eq!((result.combo_before, result.combo_after), (0, combo));
+        let expected_counts = match judgement {
+            Judgement::Great => HitCounts {
+                count_300: 1,
+                ..HitCounts::default()
+            },
+            Judgement::Ok => HitCounts {
+                count_100: 1,
+                ..HitCounts::default()
+            },
+            Judgement::Meh => HitCounts {
+                count_50: 1,
+                ..HitCounts::default()
+            },
+            Judgement::Miss => HitCounts {
+                count_miss: 1,
+                ..HitCounts::default()
+            },
+        };
+        assert_eq!(stats.counts, expected_counts);
+        assert_eq!(
+            (stats.score, stats.current_combo, stats.max_combo),
+            (score, combo, combo)
+        );
+    }
 }

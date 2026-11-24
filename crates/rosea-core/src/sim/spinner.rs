@@ -273,4 +273,42 @@ mod tests {
             assert_eq!(spinner.judgement(13), judgement);
         }
     }
+
+    #[test]
+    fn normative_spinner_scores_from_accumulated_angle() {
+        for (duration, req_half, halves, judgement, points, bonuses) in [
+            (100.0, 0, 0, Judgement::Great, 0, 0),
+            (2000.0, 13, 0, Judgement::Miss, 0, 0),
+            (2000.0, 13, 3, Judgement::Meh, 1, 0),
+            (2000.0, 13, 12, Judgement::Ok, 6, 0),
+            (2000.0, 13, 14, Judgement::Great, 7, 0),
+            (2000.0, 13, 20, Judgement::Great, 8, 2),
+            (1996.0, 12, 24, Judgement::Great, 12, 4),
+        ] {
+            let mut records = vec![(1000, 356.0, 192.0, 1)];
+            for half in 1..=halves {
+                records.push((50, if half % 2 == 0 { 356.0 } else { 156.0 }, 192.0, 1));
+            }
+            let replay = replay(&records);
+            let mut spinner = state(1000.0, 1000.0 + duration);
+            let (mut observed_points, mut observed_bonuses) = (0, 0);
+            for pair in replay.records().windows(2) {
+                let left = time(pair[0].time_ms as f64);
+                let right = time(pair[1].time_ms as f64);
+                for crossed in spinner
+                    .advance(left, right, replay.buttons_at(left), &replay)
+                    .unwrap()
+                {
+                    match half_turn_award(crossed + 1, req_half + 3) {
+                        Some(HalfTurnAward::Points) => observed_points += 1,
+                        Some(HalfTurnAward::Bonus) => observed_bonuses += 1,
+                        None => {}
+                    }
+                }
+            }
+            assert_eq!(spinner.half_turns, halves);
+            assert_eq!(spinner.judgement(req_half), judgement);
+            assert_eq!((observed_points, observed_bonuses), (points, bonuses));
+        }
+    }
 }
