@@ -14,11 +14,11 @@ fn map(objects: &str) -> PreparedMap {
     prepare_map(&osu(text.as_bytes()).unwrap().value).unwrap()
 }
 
-fn replay(records: &str) -> ParsedReplay {
+fn replay(records: &str, game_version: i32) -> ParsedReplay {
     let mut compressed = Vec::new();
     lzma_rs::lzma_compress(&mut records.as_bytes(), &mut compressed).unwrap();
     let mut bytes = vec![0];
-    bytes.extend_from_slice(&20200427_i32.to_le_bytes());
+    bytes.extend_from_slice(&game_version.to_le_bytes());
     bytes.extend_from_slice(&[0; 3 + 12 + 4 + 2 + 1 + 4 + 1 + 8]);
     bytes.extend_from_slice(&i32::try_from(compressed.len()).unwrap().to_le_bytes());
     bytes.extend_from_slice(&compressed);
@@ -42,10 +42,13 @@ fn overlapping_spinners_follow_object_ids_and_group_phases() {
         "256,192,1100,8,0,1100\n",
         "156,192,1100,1,0",
     ));
-    let replay = replay(concat!(
-        "1000|356|192|1,10|356|192|1,20|156|192|1,20|356|192|1,",
-        "20|156|192|1,20|356|192|1,10|156|192|3,10|356|192|3,",
-    ));
+    let replay = replay(
+        concat!(
+            "1000|356|192|1,10|356|192|1,20|156|192|1,20|356|192|1,",
+            "20|156|192|1,20|356|192|1,10|156|192|3,10|356|192|3,",
+        ),
+        20200427,
+    );
     let input = normalize(replay.input).unwrap().value;
     let mut sim = Simulator::new(&map, &input).unwrap();
     let mut events = Vec::new();
@@ -144,7 +147,7 @@ fn normative_spinner_scores_through_public_simulator() {
     for (duration, halves, judgement, score, points, bonuses) in cases {
         let end = 1000 + duration;
         let map = map(&format!("256,192,1000,8,0,{end}"));
-        let input = normalize(replay(&alternating_positions(halves, 50)).input)
+        let input = normalize(replay(&alternating_positions(halves, 50), 20200427).input)
             .unwrap()
             .value;
         let mut events = Vec::new();
@@ -199,5 +202,51 @@ fn normative_spinner_scores_through_public_simulator() {
             (stats.score, stats.current_combo, stats.max_combo),
             (score, combo, combo)
         );
+    }
+}
+
+#[test]
+fn spinner_geometry_produces_same_results_across_versions_and_frame_rates() {
+    let map = map("256,192,1000,8,0,3000");
+    // Одинаковые полуобороты занимают 1 или 90 мс каждый. Первая серия
+    // превышает 477 RPM уже на первом интервале, вторая укладывается в предел.
+    let fast = alternating_positions(20, 1);
+    let slow = alternating_positions(20, 90);
+    let baseline_input = normalize(replay(&fast, 20200427).input).unwrap().value;
+    let mut baseline_journal = Vec::new();
+    let baseline = Simulator::new(&map, &baseline_input)
+        .unwrap()
+        .finish_with(&mut |event| baseline_journal.push(*event))
+        .unwrap();
+    assert_eq!(baseline.score, 3300);
+    let slow_input = normalize(replay(&slow, 20200427).input).unwrap().value;
+    assert_eq!(
+        Simulator::new(&map, &slow_input).unwrap().finish().unwrap(),
+        baseline
+    );
+
+    for version in [20180101, 20200427, 20261124] {
+        let parsed = replay(&fast, version);
+        assert_eq!(parsed.meta.game_version(), version);
+        let input = normalize(parsed.input).unwrap().value;
+        for fps in [30.0, 60.0, 144.0] {
+            let mut sim = Simulator::new(&map, &input).unwrap();
+            let mut journal = Vec::new();
+            let frames = (0..)
+                .map(|frame| f64::from(frame) * 1000.0 / fps)
+                .take_while(|&time| time < 3000.0);
+            for time in frames {
+                sim.advance_with(TimeMs::new(time).unwrap(), &mut |event| {
+                    journal.push(*event)
+                })
+                .unwrap();
+            }
+            let stats = sim.finish_with(&mut |event| journal.push(*event)).unwrap();
+            assert_eq!(stats, baseline, "game_version={version}, FPS={fps}");
+            assert_eq!(
+                journal, baseline_journal,
+                "game_version={version}, FPS={fps}"
+            );
+        }
     }
 }
