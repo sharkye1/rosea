@@ -17,6 +17,10 @@ fn replay_bytes() -> Vec<u8> {
         199, 107, 63, 23, 15, 40, 77, 211, 55, 220, 66, 27, 182, 252, 131, 104, 180, 165, 99, 223,
         255, 147, 91, 32, 0,
     ];
+    replay_with_payload(&compressed)
+}
+
+fn replay_with_payload(compressed: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0];
     bytes.extend_from_slice(&20200427_i32.to_le_bytes());
     bytes.extend_from_slice(&[0, 0, 0]);
@@ -30,7 +34,7 @@ fn replay_bytes() -> Vec<u8> {
     bytes.push(0);
     bytes.extend_from_slice(&[0; 8]);
     bytes.extend_from_slice(&(compressed.len() as i32).to_le_bytes());
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(compressed);
     bytes
 }
 
@@ -174,5 +178,94 @@ fn simulator_finishes_short_spinner_and_circle() {
             count_300: 2,
             ..HitCounts::default()
         }
+    );
+}
+
+#[test]
+fn mixed_map_finishes_each_object_once_after_early_eof() {
+    let map = b"osu file format v14\n\
+        [Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n\
+        [TimingPoints]\n0,500,4,0,0,100,1,0\n\
+        [HitObjects]\n300,0,1500.25,2,0,B|400:100|500:0,1,200\n\
+        50,200,900.25,1,0\n\
+        256,192,1250.25,8,0,2000.25\n\
+        0,0,1000.25,2,0,L|200:0,1,200\n\
+        0,300,1800.25,2,0,P|100:400|200:300,1,200";
+    let parsed = osu(map).unwrap().value;
+    let map = prepare_map(&parsed).unwrap();
+    // После круга и головы L курсор делает пять полуоборотов, затем
+    // возвращается к тику L. Последняя запись нажимает голову B.
+    let mut records = &b"900|50|200|1,10|50|200|0,90|0|0|1,250|356|192|1,1|356|192|1,\
+        9|156|192|1,20|356|192|1,20|156|192|1,20|356|192|1,20|156|192|1,\
+        159|100|0|1,2|100|0|1,9|300|0|3,"[..];
+    let mut compressed = Vec::new();
+    lzma_rs::lzma_compress(&mut records, &mut compressed).unwrap();
+    let replay = osr(&replay_with_payload(&compressed)).unwrap().value;
+    let input = normalize(replay.input).unwrap().value;
+    let mut sim = Simulator::new(&map, &input).unwrap();
+    let eof = input.records().last().unwrap().time_ms;
+    assert_eq!(eof, 1510);
+    assert_eq!(sim.end_time().get(), 2800.25);
+
+    let mut journal = Vec::new();
+    sim.advance_with(TimeMs::new(eof as f64).unwrap(), &mut |event| {
+        journal.push(*event)
+    })
+    .unwrap();
+    assert_eq!(
+        sim.stats().counts,
+        HitCounts {
+            count_300: 1,
+            ..HitCounts::default()
+        }
+    );
+    let stats = sim.finish_with(&mut |event| journal.push(*event)).unwrap();
+
+    use EventKind::{Circle, SliderResult, SliderTick, SpinnerResult};
+    use Judgement::{Great, Meh, Miss, Ok};
+    let simultaneous: Vec<_> = journal
+        .iter()
+        .filter(|event| event.time.get() == 2000.25)
+        .map(|event| (event.object_id, event.kind, event.part_hit))
+        .collect();
+    assert_eq!(
+        simultaneous,
+        [
+            (ObjectId(0), SliderTick, Some(false)),
+            (ObjectId(2), SpinnerResult, None),
+            (ObjectId(3), SliderResult, None),
+        ]
+    );
+    let finals: Vec<_> = journal
+        .iter()
+        .filter_map(|event| {
+            event
+                .judgement
+                .map(|grade| (event.time.get(), event.object_id, event.kind, grade))
+        })
+        .collect();
+    assert_eq!(
+        finals,
+        [
+            (900.0, ObjectId(1), Circle, Great),
+            (2000.25, ObjectId(2), SpinnerResult, Great),
+            (2000.25, ObjectId(3), SliderResult, Ok),
+            (2500.25, ObjectId(0), SliderResult, Meh),
+            (2800.25, ObjectId(4), SliderResult, Miss),
+        ]
+    );
+    let counts = stats.counts;
+    assert_eq!(
+        counts,
+        HitCounts {
+            count_300: 2,
+            count_100: 1,
+            count_50: 1,
+            count_miss: 1
+        }
+    );
+    assert_eq!(
+        counts.count_300 + counts.count_100 + counts.count_50 + counts.count_miss,
+        parsed.object_count()
     );
 }
