@@ -7,9 +7,9 @@ use crate::replay::{ButtonState, ReplayTimeline};
 
 use super::hit::{inside_radius, judge_click};
 use super::input::InputEvent;
-use super::score::{apply_circle, apply_slider_result};
+use super::score::{apply_circle, apply_slider_result, apply_spinner_points};
 use super::slider::{SliderState, map_event_needs_tracking, result_for_parts};
-use super::spinner::SpinnerState;
+use super::spinner::{HalfTurnAward, SpinnerState, half_turn_award};
 use super::timeline::{Timeline, TimelineEvent, TimelineStep};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -20,6 +20,8 @@ pub enum EventKind {
     SliderRepeat,
     SliderTail,
     SliderResult,
+    SpinnerPoints,
+    SpinnerBonus,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -98,7 +100,7 @@ impl<'a> Simulator<'a> {
             let index = object.object_id().0 as usize;
             sliders[index] = SliderState::new(object);
             if matches!(object.kind(), StackedObjectKind::Spinner { .. }) {
-                spinners[index] = Some(SpinnerState::new(times));
+                spinners[index] = Some(SpinnerState::new(times, object.source_line()));
             }
         }
         Ok(Self {
@@ -214,8 +216,29 @@ impl EventProcessor<'_, '_, '_> {
     ) -> Result<(), RoseaError> {
         if let Some(previous) = previous {
             for &id in self.active_spinners.iter() {
-                if let Some(spinner) = &mut self.spinners[id.0 as usize] {
-                    spinner.advance(previous, time, buttons, self.replay)?;
+                if let Some(spinner) = &mut self.spinners[id.0 as usize]
+                    && let Some(parameters) = self.map.spinner_parameters(id)
+                {
+                    for index in spinner.advance(previous, time, buttons, self.replay)? {
+                        let (kind, score_delta) =
+                            match half_turn_award(index + 1, parameters.req_bonus) {
+                                Some(HalfTurnAward::Points) => (EventKind::SpinnerPoints, 100),
+                                Some(HalfTurnAward::Bonus) => (EventKind::SpinnerBonus, 1100),
+                                None => continue,
+                            };
+                        apply_spinner_points(self.stats, score_delta)?;
+                        (self.emit)(&SimEvent {
+                            time,
+                            object_id: id,
+                            kind,
+                            part_index: None,
+                            part_hit: None,
+                            judgement: None,
+                            score_delta,
+                            combo_before: self.stats.current_combo,
+                            combo_after: self.stats.current_combo,
+                        });
+                    }
                 }
             }
         }

@@ -4,11 +4,29 @@ use std::f64::consts::PI;
 use std::ops::Range;
 
 use crate::error::RoseaError;
-use crate::model::{Point, TimeMs};
+use crate::model::{ObjectId, Point, TimeMs};
 use crate::prepare::ObjectTimes;
 use crate::replay::{ButtonState, ReplayTimeline};
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum HalfTurnAward {
+    Points,
+    Bonus,
+}
+
+pub(super) fn half_turn_award(half: u32, req_bonus: u32) -> Option<HalfTurnAward> {
+    if half > req_bonus && (half - req_bonus).is_multiple_of(2) {
+        Some(HalfTurnAward::Bonus)
+    } else if half > 1 && half.is_multiple_of(2) {
+        Some(HalfTurnAward::Points)
+    } else {
+        None
+    }
+}
+
 pub(super) struct SpinnerState {
+    object_id: ObjectId,
+    line: usize,
     start: TimeMs,
     end: TimeMs,
     angle: f64,
@@ -16,8 +34,10 @@ pub(super) struct SpinnerState {
 }
 
 impl SpinnerState {
-    pub(super) fn new(times: &ObjectTimes) -> Self {
+    pub(super) fn new(times: &ObjectTimes, line: usize) -> Self {
         Self {
+            object_id: times.object_id,
+            line,
             start: times.start,
             end: times.end,
             angle: 0.0,
@@ -46,7 +66,10 @@ impl SpinnerState {
             return Ok(self.half_turns..self.half_turns);
         }
         let angle = self.angle + angle_between(replay.cursor_at(left), replay.cursor_before(right));
-        let half_turns = completed_halves(angle)?;
+        let half_turns = completed_halves(angle).ok_or(RoseaError::NumericalError {
+            line: self.line,
+            object_id: self.object_id,
+        })?;
         // Индексы с нуля: номер полуоборота на единицу больше индекса.
         let crossed = self.half_turns..half_turns;
         self.angle = angle;
@@ -55,12 +78,12 @@ impl SpinnerState {
     }
 }
 
-fn completed_halves(angle: f64) -> Result<u32, RoseaError> {
+fn completed_halves(angle: f64) -> Option<u32> {
     let halves = (angle / PI).floor();
     if !(0.0..=f64::from(u32::MAX)).contains(&halves) {
-        return Err(RoseaError::ScoreOverflow);
+        return None;
     }
-    Ok(halves as u32)
+    Some(halves as u32)
 }
 
 fn angle_between(left: Point, right: Point) -> f64 {
@@ -77,7 +100,7 @@ fn angle_between(left: Point, right: Point) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ObjectId, ReplayInput, ReplayRecord};
+    use crate::model::{ReplayInput, ReplayRecord};
     use crate::replay::normalize;
 
     fn time(ms: f64) -> TimeMs {
@@ -85,13 +108,16 @@ mod tests {
     }
 
     fn state(start: f64, end: f64) -> SpinnerState {
-        SpinnerState::new(&ObjectTimes {
-            object_id: ObjectId(0),
-            start: time(start),
-            end: time(end),
-            head_deadline: None,
-            latest_resolution: time(end),
-        })
+        SpinnerState::new(
+            &ObjectTimes {
+                object_id: ObjectId(0),
+                start: time(start),
+                end: time(end),
+                head_deadline: None,
+                latest_resolution: time(end),
+            },
+            1,
+        )
     }
 
     fn replay(records: &[(i64, f32, f32, u32)]) -> ReplayTimeline {
@@ -195,11 +221,25 @@ mod tests {
 
     #[test]
     fn half_turn_boundaries_are_exact_and_checked() {
-        assert_eq!(completed_halves(PI.next_down()), Ok(0));
-        assert_eq!(completed_halves(PI), Ok(1));
-        assert_eq!(completed_halves(2.0 * PI), Ok(2));
+        assert_eq!(completed_halves(PI.next_down()), Some(0));
+        assert_eq!(completed_halves(PI), Some(1));
+        assert_eq!(completed_halves(2.0 * PI), Some(2));
         for angle in [f64::NAN, f64::INFINITY, -PI, 2.0 * f64::from(u32::MAX) * PI] {
-            assert_eq!(completed_halves(angle), Err(RoseaError::ScoreOverflow));
+            assert_eq!(completed_halves(angle), None);
         }
+    }
+
+    #[test]
+    fn bonus_threshold_preserves_parity_and_takes_precedence() {
+        use HalfTurnAward::{Bonus, Points};
+
+        assert_eq!(half_turn_award(1, 16), None);
+        assert_eq!(half_turn_award(16, 16), Some(Points));
+        assert_eq!(half_turn_award(17, 16), None);
+        assert_eq!(half_turn_award(18, 16), Some(Bonus));
+        assert_eq!(half_turn_award(15, 15), None);
+        assert_eq!(half_turn_award(16, 15), Some(Points));
+        assert_eq!(half_turn_award(17, 15), Some(Bonus));
+        assert_eq!(half_turn_award(18, 15), Some(Points));
     }
 }

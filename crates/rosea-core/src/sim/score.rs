@@ -73,6 +73,15 @@ pub(super) fn apply_slider_result(
     Ok(points)
 }
 
+/// Добавляет очки за полуоборот без изменения combo и счётчиков оценок.
+pub(super) fn apply_spinner_points(stats: &mut Stats, points: u64) -> Result<(), RoseaError> {
+    stats.score = stats
+        .score
+        .checked_add(points)
+        .ok_or(RoseaError::ScoreOverflow)?;
+    Ok(())
+}
+
 /// Начисляет очки и combo за успешную голову слайдера.
 pub fn apply_slider_head(stats: &mut Stats) -> Result<u64, RoseaError> {
     let mut updated = *stats;
@@ -188,6 +197,39 @@ mod slider_result_tests {
         let before = stats;
         assert_eq!(
             apply_slider_result(&mut stats, Judgement::Meh, 5),
+            Err(RoseaError::ScoreOverflow)
+        );
+        assert_eq!(stats, before);
+    }
+}
+
+#[cfg(test)]
+mod spinner_points_tests {
+    use super::*;
+
+    #[test]
+    fn spinner_points_preserve_combo_and_do_not_partially_overflow() {
+        let mut stats = Stats {
+            score: 300,
+            current_combo: 2,
+            max_combo: 5,
+            ..Stats::default()
+        };
+        let before = stats;
+        apply_spinner_points(&mut stats, 100).unwrap();
+        apply_spinner_points(&mut stats, 1100).unwrap();
+        assert_eq!(
+            stats,
+            Stats {
+                score: 1500,
+                ..before
+            }
+        );
+
+        stats.score = u64::MAX - 100;
+        let before = stats;
+        assert_eq!(
+            apply_spinner_points(&mut stats, 1100),
             Err(RoseaError::ScoreOverflow)
         );
         assert_eq!(stats, before);

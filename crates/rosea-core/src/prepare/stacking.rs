@@ -42,7 +42,7 @@ impl StackedObject {
     pub fn kind(&self) -> StackedObjectKind {
         self.kind
     }
-    pub(super) fn source_line(&self) -> usize {
+    pub(crate) fn source_line(&self) -> usize {
         self.line
     }
     pub fn height(&self) -> i32 {
