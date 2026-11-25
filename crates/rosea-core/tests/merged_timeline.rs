@@ -1,5 +1,5 @@
 use rosea_core::{
-    model::{Beatmap, HitCounts, Judgement, ObjectId, Point, Stats, TimeMs},
+    model::{Beatmap, ExpectedStats, HitCounts, Judgement, ObjectId, Point, Stats, TimeMs},
     parse::{osr, osu},
     prepare::{MapEventKind, prepare_map},
     replay::{ButtonState, normalize},
@@ -366,4 +366,78 @@ fn mixed_map_stats_and_journal_are_independent_of_advance_frequency() {
         ],
         "нерегулярные и повторные времена",
     );
+}
+
+#[test]
+fn mixed_map_simulation_is_independent_of_each_expected_header_field() {
+    // В фикстуре три пустые строки занимают по одному байту после mode и версии.
+    const COUNTS: usize = 1 + 4 + 3;
+    const SCORE: usize = COUNTS + 6 * 2;
+    const MAX_COMBO: usize = SCORE + 4;
+    let mut bytes = mixed_replay_bytes();
+    // Результат смешанной карты: круг 300, части L/B 70, два начисления
+    // спиннера по 100, итоги спиннера/L/B/P — 300/100/50/0.
+    bytes[SCORE..MAX_COMBO].copy_from_slice(&1020_i32.to_le_bytes());
+    for (offset, value) in [
+        (MAX_COMBO, 4_u16),
+        (COUNTS, 2),
+        (COUNTS + 2, 1),
+        (COUNTS + 4, 1),
+        (COUNTS + 10, 1),
+    ] {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    let map = prepare_map(&mixed_beatmap()).unwrap();
+    let simulate = |input: &_| {
+        let mut journal = Vec::new();
+        let stats = Simulator::new(&map, input)
+            .unwrap()
+            .finish_with(&mut |event| journal.push(*event))
+            .unwrap();
+        (stats, journal)
+    };
+    // Сравнение здесь — утверждение теста над уже готовой статистикой.
+    let compare = |actual: Stats, expected: ExpectedStats| {
+        [
+            i128::from(actual.score) == i128::from(expected.score),
+            actual.max_combo == u32::from(expected.max_combo),
+            actual.counts.count_300 == u32::from(expected.count_300),
+            actual.counts.count_100 == u32::from(expected.count_100),
+            actual.counts.count_50 == u32::from(expected.count_50),
+            actual.counts.count_miss == u32::from(expected.count_miss),
+        ]
+    };
+    let reference = osr(&bytes).unwrap().value;
+    let input = normalize(reference.input).unwrap().value;
+    let baseline = simulate(&input);
+    assert_eq!(compare(baseline.0, reference.expected), [true; 6]);
+
+    for (index, (name, offset)) in [
+        ("score", SCORE),
+        ("max_combo", MAX_COMBO),
+        ("count_300", COUNTS),
+        ("count_100", COUNTS + 2),
+        ("count_50", COUNTS + 4),
+        ("count_miss", COUNTS + 10),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut changed_bytes = bytes.clone();
+        changed_bytes[offset] ^= 1;
+        let changed = osr(&changed_bytes).unwrap().value;
+        assert_eq!(changed.meta, reference.meta, "{name}");
+        let changed_input = normalize(changed.input).unwrap().value;
+        assert_eq!(changed_input, input, "{name}");
+        let observed = simulate(&changed_input);
+        assert_eq!(observed, baseline, "{name}");
+        let mut expected_equal = [true; 6];
+        expected_equal[index] = false;
+        assert_eq!(
+            compare(observed.0, changed.expected),
+            expected_equal,
+            "{name}"
+        );
+    }
 }
