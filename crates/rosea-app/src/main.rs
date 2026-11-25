@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod load;
 
 use std::{
     env,
@@ -23,10 +24,16 @@ fn main() -> ExitCode {
                 Err(error) => fail(format_args!("IoError [write]: {error}")),
             }
         }
-        Ok(cli::Command::Inspect { map, replay }) => fail(format_args!(
-            "InspectUnavailable: загрузка пары пока недоступна ({:?}, {:?})",
-            map, replay
-        )),
+        Ok(cli::Command::Inspect { map, replay }) => {
+            let bytes = match load::read_limited(&map, load::MAP_LIMIT) {
+                Ok(bytes) => bytes,
+                Err(error) => return fail(error),
+            };
+            fail(format_args!(
+                "InspectUnavailable: карта {map:?} прочитана ({} байт), загрузка реплея {replay:?} пока недоступна",
+                bytes.len()
+            ))
+        }
         Err(cli::UsageError(message)) => {
             fail(format_args!("UsageError: {message}. Справка: rosea --help"))
         }
