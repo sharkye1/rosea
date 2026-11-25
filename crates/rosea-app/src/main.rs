@@ -39,6 +39,10 @@ fn main() -> ExitCode {
                 pair.warnings.len()
             ))
         }
+        Ok(cli::Command::Play) if !cfg!(feature = "window") => {
+            fail("WindowUnavailable: пересоберите rosea-app с feature window для оконного режима")
+        }
+        Ok(cli::Command::Play) => fail("PlayUnavailable: оконный режим пока недоступен"),
         Err(cli::UsageError(message)) => {
             fail(format_args!("UsageError: {message}. Справка: rosea --help"))
         }

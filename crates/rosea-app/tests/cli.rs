@@ -59,6 +59,54 @@ fn rejects_invalid_command_lines() {
 }
 
 #[test]
+fn play_reports_window_availability_before_opening_files() {
+    let args = [
+        "play",
+        "--map",
+        "нет карты.osu",
+        "--replay",
+        "нет реплея.osr",
+    ];
+    for options in [&[][..], &["--width", "4096", "--height", "2048"]] {
+        let args: Vec<_> = args.iter().chain(options).copied().collect();
+        let out = run(&args);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(out.stdout.is_empty());
+        let error = String::from_utf8(out.stderr).unwrap();
+        if cfg!(feature = "window") {
+            assert!(error.starts_with("PlayUnavailable:"));
+        } else {
+            assert!(error.starts_with("WindowUnavailable:"));
+            assert!(error.contains("feature window"));
+        }
+    }
+}
+
+#[test]
+fn rejects_invalid_play_dimensions_as_usage_errors() {
+    for options in [
+        &["--width", "63"][..],
+        &["--height", "4097"],
+        &["--height", "１２８"],
+        &["--height", "64.0"],
+        &["--width", "4096", "--height", "2049"],
+        &["--height", "64", "--height", "128"],
+    ] {
+        let mut args = vec!["play", "--map", "m.osu", "--replay", "r.osr"];
+        args.extend_from_slice(options);
+        let out = run(&args);
+        assert_eq!(out.status.code(), Some(2), "{options:?}");
+        assert!(out.stdout.is_empty());
+        assert!(
+            String::from_utf8(out.stderr)
+                .unwrap()
+                .starts_with("UsageError:"),
+            "{options:?}"
+        );
+    }
+}
+
+#[test]
 fn inspection_reads_a_map_at_the_limit_and_preserves_paths() {
     let map = TempFile::sized("моя карта.osu", 16 * 1024 * 1024);
     let replay = TempFile::sized("мой реплей.osr", 0);
