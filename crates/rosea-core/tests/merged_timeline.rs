@@ -369,6 +369,30 @@ fn mixed_map_stats_and_journal_are_independent_of_advance_frequency() {
 }
 
 #[test]
+fn mixed_map_produces_identical_results_in_three_runs() {
+    let map = prepare_map(&mixed_beatmap()).unwrap();
+    let input = normalize(osr(&mixed_replay_bytes()).unwrap().value.input)
+        .unwrap()
+        .value;
+    let run = || {
+        let mut journal = Vec::new();
+        let stats = Simulator::new(&map, &input)
+            .unwrap()
+            .finish_with(&mut |event| journal.push(*event))
+            .unwrap();
+        (stats, journal)
+    };
+
+    let (expected_stats, expected_journal) = run();
+    assert!(!expected_journal.is_empty());
+    for run_number in 2..=3 {
+        let (stats, journal) = run();
+        assert_eq!(stats, expected_stats, "статистика прогона {run_number}");
+        assert_eq!(journal, expected_journal, "журнал прогона {run_number}");
+    }
+}
+
+#[test]
 fn mixed_map_simulation_is_independent_of_each_expected_header_field() {
     // В фикстуре три пустые строки занимают по одному байту после mode и версии.
     const COUNTS: usize = 1 + 4 + 3;
