@@ -325,3 +325,45 @@ fn mixed_map_journal_keeps_order_without_changing_stats() {
         with_journal.score
     );
 }
+
+#[test]
+fn mixed_map_stats_and_journal_are_independent_of_advance_frequency() {
+    let map = prepare_map(&mixed_beatmap()).unwrap();
+    let input = normalize(osr(&mixed_replay_bytes()).unwrap().value.input)
+        .unwrap()
+        .value;
+    let baseline = Simulator::new(&map, &input).unwrap();
+    let end = baseline.end_time().get();
+    let mut expected_journal = Vec::new();
+    let expected_stats = baseline
+        .finish_with(&mut |event| expected_journal.push(*event))
+        .unwrap();
+
+    let check = |times: &[f64], schedule: &str| {
+        let mut sim = Simulator::new(&map, &input).unwrap();
+        let mut journal = Vec::new();
+        let mut emit = |event: &SimEvent| journal.push(*event);
+        for &time in times {
+            sim.advance_with(TimeMs::new(time).unwrap(), &mut emit)
+                .unwrap();
+        }
+        let stats = sim.finish_with(&mut emit).unwrap();
+        assert_eq!(stats, expected_stats, "{schedule}");
+        assert_eq!(journal, expected_journal, "{schedule}");
+    };
+    for fps in [30, 60, 144] {
+        let times: Vec<_> = (0..)
+            .map(|frame| f64::from(frame) * 1000.0 / f64::from(fps))
+            .take_while(|&time| time < end)
+            .collect();
+        check(&times, &format!("{fps} FPS"));
+    }
+    // Повторы в момент тика L, на EOF и в группе с двумя итогами.
+    check(
+        &[
+            10.0, 899.75, 900.0, 1280.0, 1500.0, 1500.25, 1500.25, 1510.0, 1510.0, 2000.0, 2000.25,
+            2000.25, 2300.5, 2800.0,
+        ],
+        "нерегулярные и повторные времена",
+    );
+}
