@@ -517,6 +517,32 @@ fn mixed_map_produces_identical_results_in_three_runs() {
 }
 
 #[test]
+fn mixed_map_simulation_is_independent_of_replay_version() {
+    let map = prepare_map(&mixed_beatmap()).unwrap();
+    let bytes = mixed_replay_bytes();
+    let run = |version: i32| {
+        let mut replay_bytes = bytes.clone();
+        replay_bytes[1..5].copy_from_slice(&version.to_le_bytes());
+        let parsed = osr(&replay_bytes).unwrap();
+        assert_eq!(parsed.value.meta.game_version(), version);
+        let input = normalize(parsed.value.input).unwrap().value;
+        let mut journal = Vec::new();
+        let stats = Simulator::new(&map, &input)
+            .unwrap()
+            .finish_with(&mut |event| journal.push(*event))
+            .unwrap();
+        (stats, journal)
+    };
+
+    let baseline = run(20200427);
+    for version in [0, 1, 20131216, i32::MAX] {
+        let (stats, journal) = run(version);
+        assert_eq!(stats, baseline.0, "статистика, версия {version}");
+        assert_eq!(journal, baseline.1, "журнал, версия {version}");
+    }
+}
+
+#[test]
 fn mixed_map_simulation_is_independent_of_each_expected_header_field() {
     // В фикстуре три пустые строки занимают по одному байту после mode и версии.
     const COUNTS: usize = 1 + 4 + 3;
