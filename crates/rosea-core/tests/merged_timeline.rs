@@ -1,5 +1,5 @@
 use rosea_core::{
-    model::{HitCounts, Judgement, ObjectId, Point, Stats, TimeMs},
+    model::{Beatmap, HitCounts, Judgement, ObjectId, Point, Stats, TimeMs},
     parse::{osr, osu},
     prepare::{MapEventKind, prepare_map},
     replay::{ButtonState, normalize},
@@ -181,8 +181,7 @@ fn simulator_finishes_short_spinner_and_circle() {
     );
 }
 
-#[test]
-fn mixed_map_finishes_each_object_once_after_early_eof() {
+fn mixed_beatmap() -> Beatmap {
     let map = b"osu file format v14\n\
         [Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n\
         [TimingPoints]\n0,500,4,0,0,100,1,0\n\
@@ -191,8 +190,10 @@ fn mixed_map_finishes_each_object_once_after_early_eof() {
         256,192,1250.25,8,0,2000.25\n\
         0,0,1000.25,2,0,L|200:0,1,200\n\
         0,300,1800.25,2,0,P|100:400|200:300,1,200";
-    let parsed = osu(map).unwrap().value;
-    let map = prepare_map(&parsed).unwrap();
+    osu(map).unwrap().value
+}
+
+fn mixed_replay_bytes() -> Vec<u8> {
     // После круга и головы L курсор делает пять полуоборотов, затем
     // возвращается к тику L. Последняя запись нажимает голову B.
     let mut records = &b"900|50|200|1,10|50|200|0,90|0|0|1,250|356|192|1,1|356|192|1,\
@@ -200,7 +201,14 @@ fn mixed_map_finishes_each_object_once_after_early_eof() {
         159|100|0|1,2|100|0|1,9|300|0|3,"[..];
     let mut compressed = Vec::new();
     lzma_rs::lzma_compress(&mut records, &mut compressed).unwrap();
-    let replay = osr(&replay_with_payload(&compressed)).unwrap().value;
+    replay_with_payload(&compressed)
+}
+
+#[test]
+fn mixed_map_finishes_each_object_once_after_early_eof() {
+    let parsed = mixed_beatmap();
+    let map = prepare_map(&parsed).unwrap();
+    let replay = osr(&mixed_replay_bytes()).unwrap().value;
     let input = normalize(replay.input).unwrap().value;
     let mut sim = Simulator::new(&map, &input).unwrap();
     let eof = input.records().last().unwrap().time_ms;
@@ -267,5 +275,53 @@ fn mixed_map_finishes_each_object_once_after_early_eof() {
     assert_eq!(
         counts.count_300 + counts.count_100 + counts.count_50 + counts.count_miss,
         parsed.object_count()
+    );
+}
+
+#[test]
+fn mixed_map_journal_keeps_order_without_changing_stats() {
+    let map = prepare_map(&mixed_beatmap()).unwrap();
+    let input = normalize(osr(&mixed_replay_bytes()).unwrap().value.input)
+        .unwrap()
+        .value;
+    let mut journal = Vec::new();
+    let with_journal = Simulator::new(&map, &input)
+        .unwrap()
+        .finish_with(&mut |event| journal.push(*event))
+        .unwrap();
+    let without_journal = Simulator::new(&map, &input).unwrap().finish().unwrap();
+    assert_eq!(with_journal, without_journal);
+
+    use EventKind::{
+        Circle, SliderHead, SliderResult, SliderTail, SliderTick, SpinnerPoints, SpinnerResult,
+    };
+    let observed: Vec<_> = journal
+        .iter()
+        .map(|event| (event.time.get(), event.object_id, event.kind))
+        .collect();
+    assert_eq!(
+        observed,
+        [
+            (900.0, ObjectId(1), Circle),
+            (1000.0, ObjectId(3), SliderHead),
+            (1280.0, ObjectId(2), SpinnerPoints),
+            (1320.0, ObjectId(2), SpinnerPoints),
+            (1500.25, ObjectId(3), SliderTick),
+            (1510.0, ObjectId(0), SliderHead),
+            (1920.25, ObjectId(4), SliderHead),
+            (1964.25, ObjectId(3), SliderTail),
+            (2000.25, ObjectId(0), SliderTick),
+            (2000.25, ObjectId(2), SpinnerResult),
+            (2000.25, ObjectId(3), SliderResult),
+            (2300.25, ObjectId(4), SliderTick),
+            (2464.25, ObjectId(0), SliderTail),
+            (2500.25, ObjectId(0), SliderResult),
+            (2764.25, ObjectId(4), SliderTail),
+            (2800.25, ObjectId(4), SliderResult),
+        ]
+    );
+    assert_eq!(
+        journal.iter().map(|event| event.score_delta).sum::<u64>(),
+        with_journal.score
     );
 }
