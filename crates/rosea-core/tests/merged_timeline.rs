@@ -1,4 +1,5 @@
 use rosea_core::{
+    error::RoseaError,
     model::{Beatmap, ExpectedStats, HitCounts, Judgement, ObjectId, Point, Stats, TimeMs},
     parse::{osr, osu},
     prepare::{MapEventKind, prepare_map},
@@ -196,12 +197,135 @@ fn mixed_beatmap() -> Beatmap {
 fn mixed_replay_bytes() -> Vec<u8> {
     // После круга и головы L курсор делает пять полуоборотов, затем
     // возвращается к тику L. Последняя запись нажимает голову B.
-    let mut records = &b"900|50|200|1,10|50|200|0,90|0|0|1,250|356|192|1,1|356|192|1,\
+    let records = b"900|50|200|1,10|50|200|0,90|0|0|1,250|356|192|1,1|356|192|1,\
         9|156|192|1,20|356|192|1,20|156|192|1,20|356|192|1,20|156|192|1,\
-        159|100|0|1,2|100|0|1,9|300|0|3,"[..];
+        159|100|0|1,2|100|0|1,9|300|0|3,";
+    replay_from_records(records)
+}
+
+fn replay_from_records(mut records: &[u8]) -> Vec<u8> {
     let mut compressed = Vec::new();
     lzma_rs::lzma_compress(&mut records, &mut compressed).unwrap();
     replay_with_payload(&compressed)
+}
+
+#[test]
+fn simulator_handles_day_boundaries_and_signed_zero() {
+    let map = b"osu file format v14\n\
+        [Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n\
+        [HitObjects]\n256,192,86400000,8,0,86400000\n\
+        100,0,0,1,0\n\
+        0,0,-86400000,1,0\n\
+        100,0,-0,1,0";
+    let map = prepare_map(&osu(map).unwrap().value).unwrap();
+    // Нажатие в начале суток, отпускание в -1 мс, два фронта в 0 мс и запись в конце суток.
+    let bytes =
+        replay_from_records(b"-86400000|0|0|1,86399999|100|0|0,1|100|0|3,86400000|256|192|0,");
+    let input = normalize(osr(&bytes).unwrap().value.input).unwrap().value;
+    let mut sim = Simulator::new(&map, &input).unwrap();
+    assert_eq!(sim.end_time().get(), 86_400_000.0);
+    for object in &map.objects()[1..3] {
+        assert_eq!(object.start_time().to_bits(), 0.0_f64.to_bits());
+    }
+
+    let mut journal = Vec::new();
+    let mut advance = |sim: &mut Simulator<'_>, time| {
+        sim.advance_with(TimeMs::new(time).unwrap(), &mut |event| {
+            journal.push(*event)
+        })
+        .unwrap();
+        journal.len()
+    };
+    assert_eq!(advance(&mut sim, -86_400_001.0), 0);
+    assert_eq!(sim.stats(), Stats::default());
+    assert_eq!(advance(&mut sim, -86_400_000.0), 1);
+    assert_eq!(advance(&mut sim, -0.0), 3);
+    assert_eq!(advance(&mut sim, 0.0), 3);
+    assert_eq!(advance(&mut sim, 86_400_000.0), 4);
+    let stats = sim.stats();
+    assert_eq!(advance(&mut sim, 86_400_001.0), 4);
+    assert_eq!(sim.stats(), stats);
+    assert_eq!(
+        sim.finish_with(&mut |event| journal.push(*event)).unwrap(),
+        stats
+    );
+    assert_eq!(
+        stats.counts,
+        HitCounts {
+            count_300: 4,
+            ..HitCounts::default()
+        }
+    );
+    let observed: Vec<_> = journal
+        .iter()
+        .map(|event| {
+            (
+                event.time.get().to_bits(),
+                event.object_id,
+                event.kind,
+                event.judgement,
+            )
+        })
+        .collect();
+    assert_eq!(
+        observed,
+        [
+            (
+                (-86_400_000.0_f64).to_bits(),
+                ObjectId(2),
+                EventKind::Circle,
+                Some(Judgement::Great)
+            ),
+            (
+                0.0_f64.to_bits(),
+                ObjectId(1),
+                EventKind::Circle,
+                Some(Judgement::Great)
+            ),
+            (
+                0.0_f64.to_bits(),
+                ObjectId(3),
+                EventKind::Circle,
+                Some(Judgement::Great)
+            ),
+            (
+                86_400_000.0_f64.to_bits(),
+                ObjectId(0),
+                EventKind::SpinnerResult,
+                Some(Judgement::Great)
+            ),
+        ]
+    );
+}
+
+#[test]
+fn preparation_and_normalization_reject_times_outside_day() {
+    for objects in ["0,0,-86400001,1,0", "256,192,86400000,8,0,86400001"] {
+        let text = format!(
+            "osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n{objects}"
+        );
+        let map = osu(text.as_bytes()).unwrap().value;
+        assert!(matches!(
+            prepare_map(&map),
+            Err(RoseaError::ResourceLimit {
+                resource: "absolute_time_ms",
+                limit: 86_400_000,
+                observed: 86_400_001
+            }),
+        ));
+    }
+    for time in [-86_400_001, 86_400_001] {
+        let bytes = replay_from_records(format!("{time}|0|0|0,").as_bytes());
+        let replay = osr(&bytes).unwrap().value;
+        assert!(matches!(
+            normalize(replay.input),
+            Err(RoseaError::ResourceLimit {
+                resource: "replay time ms",
+                limit: 86_400_000,
+                observed: 86_400_001
+            }),
+        ));
+    }
 }
 
 #[test]
