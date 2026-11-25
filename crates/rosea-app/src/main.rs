@@ -25,13 +25,18 @@ fn main() -> ExitCode {
             }
         }
         Ok(cli::Command::Inspect { map, replay }) => {
-            let bytes = match load::read_limited(&map, load::MAP_LIMIT) {
+            let map_bytes = match load::read_limited(&map, load::MAP_LIMIT) {
+                Ok(bytes) => bytes,
+                Err(error) => return fail(error),
+            };
+            let replay_bytes = match load::read_limited(&replay, load::REPLAY_LIMIT) {
                 Ok(bytes) => bytes,
                 Err(error) => return fail(error),
             };
             fail(format_args!(
-                "InspectUnavailable: карта {map:?} прочитана ({} байт), загрузка реплея {replay:?} пока недоступна",
-                bytes.len()
+                "InspectUnavailable: прочитаны карта {map:?} ({} байт) и реплей {replay:?} ({} байт), разбор пары пока недоступен",
+                map_bytes.len(),
+                replay_bytes.len()
             ))
         }
         Err(cli::UsageError(message)) => {

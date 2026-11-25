@@ -1,5 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process::{self, Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
@@ -61,7 +62,8 @@ fn rejects_invalid_command_lines() {
 #[test]
 fn inspection_reads_a_map_at_the_limit_and_preserves_paths() {
     let map = TempFile::sized("моя карта.osu", 16 * 1024 * 1024);
-    let out = inspect(&map.0, Path::new("мой реплей.osr"));
+    let replay = TempFile::sized("мой реплей.osr", 0);
+    let out = inspect(&map.0, &replay.0);
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     let error = String::from_utf8(out.stderr).unwrap();
@@ -82,6 +84,63 @@ fn rejects_a_map_one_byte_over_the_limit() {
     assert!(error.contains("большая карта.osu"));
     assert!(error.contains("limit=16777216"));
     assert!(error.contains("observed=16777217"));
+}
+
+#[test]
+fn enforces_replay_file_limit_including_trailer() {
+    let map = TempFile::sized("карта.osu", 0);
+    let replay = TempFile::sized("реплей с хвостом.osr", 0);
+    let mut file = OpenOptions::new().write(true).open(&replay.0).unwrap();
+    // После небольшого LZMA-потока остальной файл является хвостом.
+    let compressed = [
+        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 12, 3, 65, 4, 153,
+        91, 83, 160, 122, 219, 176, 37, 27, 45, 1, 127, 255, 225, 190, 128, 0,
+    ];
+    file.write_all(&[0; 1 + 4 + 3 + 12 + 4 + 2 + 1 + 4 + 1 + 8])
+        .unwrap();
+    file.write_all(&i32::try_from(compressed.len()).unwrap().to_le_bytes())
+        .unwrap();
+    file.write_all(&compressed).unwrap();
+    file.set_len(64 * 1024 * 1024).unwrap();
+    drop(file);
+
+    let out = inspect(&map.0, &replay.0);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let error = String::from_utf8(out.stderr).unwrap();
+    assert!(error.starts_with("InspectUnavailable:"));
+    assert!(error.contains("реплей с хвостом.osr"));
+    assert!(error.contains("67108864"));
+
+    OpenOptions::new()
+        .write(true)
+        .open(&replay.0)
+        .unwrap()
+        .set_len(64 * 1024 * 1024 + 1)
+        .unwrap();
+    let out = inspect(&map.0, &replay.0);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let error = String::from_utf8(out.stderr).unwrap();
+    assert!(error.starts_with("ResourceLimit [read]"));
+    assert!(error.contains("реплей с хвостом.osr"));
+    assert!(error.contains("limit=67108864"));
+    assert!(error.contains("observed=67108865"));
+}
+
+#[test]
+fn reports_missing_replay_with_path_and_io_cause() {
+    let map = TempFile::sized("карта.osu", 0);
+    let replay = TempFile::sized("отсутствующий реплей.osr", 0);
+    fs::remove_file(&replay.0).unwrap();
+    let out = inspect(&map.0, &replay.0);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let error = String::from_utf8(out.stderr).unwrap();
+    let (context, cause) = error.trim().split_once(": ").unwrap();
+    assert!(context.starts_with("IoError [read]"));
+    assert!(context.contains("отсутствующий реплей.osr"));
+    assert!(!cause.is_empty());
 }
 
 fn inspect(map: &Path, replay: &Path) -> Output {

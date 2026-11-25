@@ -8,6 +8,7 @@ use std::{
 };
 
 pub(crate) const MAP_LIMIT: u64 = 16 * 1024 * 1024;
+pub(crate) const REPLAY_LIMIT: u64 = 64 * 1024 * 1024;
 
 pub(crate) enum ReadError<'a> {
     Io {
