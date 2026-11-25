@@ -1,6 +1,5 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
     path::{Path, PathBuf},
     process::{self, Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
@@ -67,10 +66,8 @@ fn inspection_reads_a_map_at_the_limit_and_preserves_paths() {
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     let error = String::from_utf8(out.stderr).unwrap();
-    assert!(error.starts_with("InspectUnavailable:"));
-    assert!(error.contains("мой реплей.osr"));
+    assert!(error.starts_with("MapParseError [parse]"));
     assert!(error.contains("моя карта.osu"));
-    assert!(error.contains("16777216"));
 }
 
 #[test]
@@ -89,18 +86,10 @@ fn rejects_a_map_one_byte_over_the_limit() {
 #[test]
 fn enforces_replay_file_limit_including_trailer() {
     let map = TempFile::sized("карта.osu", 0);
+    fs::write(&map.0, MAP_BYTES).unwrap();
     let replay = TempFile::sized("реплей с хвостом.osr", 0);
-    let mut file = OpenOptions::new().write(true).open(&replay.0).unwrap();
-    // После небольшого LZMA-потока остальной файл является хвостом.
-    let compressed = [
-        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 12, 3, 65, 4, 153,
-        91, 83, 160, 122, 219, 176, 37, 27, 45, 1, 127, 255, 225, 190, 128, 0,
-    ];
-    file.write_all(&[0; 1 + 4 + 3 + 12 + 4 + 2 + 1 + 4 + 1 + 8])
-        .unwrap();
-    file.write_all(&i32::try_from(compressed.len()).unwrap().to_le_bytes())
-        .unwrap();
-    file.write_all(&compressed).unwrap();
+    fs::write(&replay.0, replay_for(MAP_BYTES)).unwrap();
+    let file = OpenOptions::new().write(true).open(&replay.0).unwrap();
     file.set_len(64 * 1024 * 1024).unwrap();
     drop(file);
 
@@ -109,8 +98,6 @@ fn enforces_replay_file_limit_including_trailer() {
     assert!(out.stdout.is_empty());
     let error = String::from_utf8(out.stderr).unwrap();
     assert!(error.starts_with("InspectUnavailable:"));
-    assert!(error.contains("реплей с хвостом.osr"));
-    assert!(error.contains("67108864"));
 
     OpenOptions::new()
         .write(true)
@@ -126,6 +113,53 @@ fn enforces_replay_file_limit_including_trailer() {
     assert!(error.contains("реплей с хвостом.osr"));
     assert!(error.contains("limit=67108864"));
     assert!(error.contains("observed=67108865"));
+}
+
+const MAP_BYTES: &[u8] = b"\xef\xbb\xbfosu file format v14\r\n[General]\r\nAudioFilename: missing.mp3\r\nUnknownField: 1\r\n[Difficulty]\r\nCircleSize:5\r\nOverallDifficulty:8\r\nHPDrainRate:5\r\n[HitObjects]\r\n0,0,10,1,0\r\n";
+
+fn replay_for(map: &[u8]) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut hex = String::new();
+    for byte in rosea_core::parse::beatmap_md5(map) {
+        write!(hex, "{byte:02X}").unwrap();
+    }
+    // Две записи с одним временем, неизвестный бит кнопки и seed.
+    let compressed = [
+        93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 12, 17, 29, 240, 138,
+        210, 67, 185, 117, 204, 55, 148, 8, 134, 117, 193, 194, 120, 221, 231, 7, 247, 23, 255,
+        255, 90, 28, 0, 0,
+    ];
+    let mut bytes = vec![0];
+    bytes.extend_from_slice(&20200427_i32.to_le_bytes());
+    bytes.extend_from_slice(&[0x0b, 32]);
+    bytes.extend_from_slice(hex.as_bytes());
+    bytes.extend_from_slice(&[0; 2 + 12 + 4 + 2 + 1 + 4 + 1 + 8]);
+    bytes.extend_from_slice(&i32::try_from(compressed.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(&compressed);
+    bytes.push(9);
+    bytes
+}
+
+#[test]
+fn inspect_verifies_raw_bytes_and_preserves_all_loader_warnings() {
+    let map = TempFile::sized("пара карта.osu", 0);
+    let replay = TempFile::sized("пара реплей.osr", 0);
+    fs::write(&map.0, MAP_BYTES).unwrap();
+    fs::write(&replay.0, replay_for(MAP_BYTES)).unwrap();
+    let out = inspect(&map.0, &replay.0);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let error = String::from_utf8(out.stderr).unwrap();
+    assert!(error.starts_with("InspectUnavailable: пара проверена"));
+    assert!(error.contains("объектов 1, записей 2, версия 20200427, предупреждений 3"));
+
+    fs::write(&map.0, &MAP_BYTES[3..]).unwrap();
+    let out = inspect(&map.0, &replay.0);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let error = String::from_utf8(out.stderr).unwrap();
+    assert!(error.starts_with("BeatmapHashMismatch [parse]"));
+    assert!(error.contains("пара карта.osu") && error.contains("пара реплей.osr"));
 }
 
 #[test]

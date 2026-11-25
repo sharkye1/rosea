@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod hash;
 mod load;
 
 use std::{
@@ -25,18 +26,17 @@ fn main() -> ExitCode {
             }
         }
         Ok(cli::Command::Inspect { map, replay }) => {
-            let map_bytes = match load::read_limited(&map, load::MAP_LIMIT) {
-                Ok(bytes) => bytes,
+            let pair = match load::load_pair(&map, &replay) {
+                Ok(pair) => pair,
                 Err(error) => return fail(error),
             };
-            let replay_bytes = match load::read_limited(&replay, load::REPLAY_LIMIT) {
-                Ok(bytes) => bytes,
-                Err(error) => return fail(error),
-            };
+            let _expected = pair.expected;
             fail(format_args!(
-                "InspectUnavailable: прочитаны карта {map:?} ({} байт) и реплей {replay:?} ({} байт), разбор пары пока недоступен",
-                map_bytes.len(),
-                replay_bytes.len()
+                "InspectUnavailable: пара проверена (объектов {}, записей {}, версия {}, предупреждений {}), вывод сводки пока недоступен",
+                pair.map.object_count(),
+                pair.input.record_count(),
+                pair.meta.game_version(),
+                pair.warnings.len()
             ))
         }
         Err(cli::UsageError(message)) => {
