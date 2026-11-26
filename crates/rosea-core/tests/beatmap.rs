@@ -46,3 +46,72 @@ fn reads_sections_and_reports_unknown_fields() {
     );
     assert!(matches!(osu(b"osu file format v14\n[Difficulty]\nCircleSize:4\nOverallDifficulty:5\nHPDrainRate:6\n"), Err(RoseaError::EmptyBeatmap)));
 }
+
+#[test]
+fn reports_general_field_errors_from_the_public_parser() {
+    let suffix =
+        "[Difficulty]\nCircleSize:4\nOverallDifficulty:5\nHPDrainRate:6\n[HitObjects]\n0,0,0,1,0\n";
+    for (general, expected) in [
+        ("Mode: nope\n", RoseaError::InvalidMode { line: 3 }),
+        (
+            "Mode: 2\n",
+            RoseaError::UnsupportedMode { mode: 2, line: 3 },
+        ),
+        (
+            "Mode: 0\n[General]\nMode: 0\n",
+            RoseaError::DuplicateField {
+                field: "Mode",
+                line: 5,
+            },
+        ),
+        (
+            "StackLeniency: 0.5\n[General]\nStackLeniency: 0.5\n",
+            RoseaError::DuplicateField {
+                field: "StackLeniency",
+                line: 5,
+            },
+        ),
+    ] {
+        let map = format!("osu file format v14\n[General]\n{general}{suffix}");
+        assert_eq!(osu(map.as_bytes()).unwrap_err(), expected);
+    }
+}
+
+#[test]
+fn reports_duplicate_and_required_fields_from_the_public_parser() {
+    let prefix = "osu file format v14\n[Difficulty]\nOverallDifficulty:5\nHPDrainRate:6\n[HitObjects]\n0,0,0,1,0\n";
+    for (fields, expected) in [
+        (
+            "[Difficulty]\nCircleSize:4\nCircleSize:5\n",
+            RoseaError::DuplicateField {
+                field: "CircleSize",
+                line: 9,
+            },
+        ),
+        ("", RoseaError::MissingDifficultyField("CircleSize")),
+        (
+            "[Difficulty]\nCircleSize:\n",
+            RoseaError::InvalidDifficultyField {
+                field: "CircleSize",
+                line: 8,
+            },
+        ),
+        (
+            "[Difficulty]\nCircleSize:4\n[Metadata]\nTitle:A\n[Metadata]\nTitle:B\n",
+            RoseaError::DuplicateField {
+                field: "Title",
+                line: 12,
+            },
+        ),
+        (
+            "[Difficulty]\nCircleSize:4\n[Colours]\nCombo1:1,2,3\n[Colours]\nCombo1:4,5,6\n",
+            RoseaError::DuplicateField {
+                field: "Combo1",
+                line: 12,
+            },
+        ),
+    ] {
+        let map = format!("{prefix}{fields}");
+        assert_eq!(osu(map.as_bytes()).unwrap_err(), expected);
+    }
+}

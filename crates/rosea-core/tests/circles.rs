@@ -155,7 +155,7 @@ fn checks_header_and_standard_mode() {
     let text = "osu file format v14\n[General]\nMode: 1\n[HitObjects]\n256,192,1000,1,0";
     assert_eq!(
         osu_circles(text.as_bytes()),
-        Err(RoseaError::UnsupportedMode(1))
+        Err(RoseaError::UnsupportedMode { mode: 1, line: 3 })
     );
 }
 

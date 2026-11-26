@@ -174,7 +174,10 @@ fn rejects_duplicate_metadata_fields() {
         let text = map(body);
         assert_eq!(
             osu_metadata(text.as_bytes()),
-            Err(RoseaError::DuplicateField),
+            Err(RoseaError::DuplicateField {
+                field: name,
+                line: 4
+            }),
             "Ожидался DuplicateField для поля {name}"
         );
     }
@@ -201,7 +204,10 @@ fn rejects_duplicate_metadata_fields_across_split_sections() {
         );
         assert_eq!(
             osu_metadata(text.as_bytes()),
-            Err(RoseaError::DuplicateField),
+            Err(RoseaError::DuplicateField {
+                field: field.split_once(':').unwrap().0,
+                line: 7
+            }),
             "Ожидался DuplicateField для раздельных секций с {field}"
         );
     }
@@ -315,7 +321,7 @@ fn checks_header_and_mode() {
     );
     assert_eq!(
         osu_metadata(b"osu file format v14\n[General]\nMode: 1\n[Metadata]\nTitle: Test"),
-        Err(RoseaError::UnsupportedMode(1))
+        Err(RoseaError::UnsupportedMode { mode: 1, line: 3 })
     );
     assert_eq!(osu_metadata(b"\xff"), Err(RoseaError::InvalidEncoding));
 }

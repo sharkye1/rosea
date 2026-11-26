@@ -56,7 +56,7 @@ fn rejects_other_modes() {
         let text = format!("osu file format v14\n[General]\nMode: {mode}");
         assert_eq!(
             osu_mode(text.as_bytes()),
-            Err(RoseaError::UnsupportedMode(mode))
+            Err(RoseaError::UnsupportedMode { mode, line: 3 })
         );
     }
 }
@@ -65,14 +65,23 @@ fn rejects_other_modes() {
 fn rejects_invalid_or_duplicate_mode() {
     for field in ["Mode: abc", "Mode: -1", "Mode: 0.5", "Mode:", "Mode"] {
         let text = format!("osu file format v14\n[General]\n{field}");
-        assert_eq!(osu_mode(text.as_bytes()), Err(RoseaError::InvalidMode));
+        assert_eq!(
+            osu_mode(text.as_bytes()),
+            Err(RoseaError::InvalidMode { line: 3 })
+        );
     }
     for body in [
         "Mode: 0\nMode: 0",
         "Mode: 0\n[Metadata]\nTitle: A\n[General]\nMode: 0",
     ] {
         let text = format!("osu file format v14\n[General]\n{body}");
-        assert_eq!(osu_mode(text.as_bytes()), Err(RoseaError::DuplicateField));
+        assert_eq!(
+            osu_mode(text.as_bytes()),
+            Err(RoseaError::DuplicateField {
+                field: "Mode",
+                line: text.lines().count()
+            })
+        );
     }
 }
 
@@ -228,7 +237,10 @@ fn rejects_duplicate_difficulty_fields() {
             );
             assert_eq!(
                 osu_difficulty(text.as_bytes()),
-                Err(RoseaError::DuplicateField)
+                Err(RoseaError::DuplicateField {
+                    field,
+                    line: text.lines().count()
+                })
             );
         }
     }

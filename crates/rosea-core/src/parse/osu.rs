@@ -133,7 +133,7 @@ pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
     // Не сбрасываем при повторной секции General: второй Mode остаётся дубликатом.
     let mut mode = None;
 
-    for line in text.lines() {
+    for (index, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with("//") {
             continue;
@@ -146,9 +146,10 @@ pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
             continue;
         }
 
+        let line_number = index + 1;
         let Some((key, value)) = line.split_once(':') else {
             if line == "Mode" {
-                return Err(RoseaError::InvalidMode);
+                return Err(RoseaError::InvalidMode { line: line_number });
             }
             continue;
         };
@@ -156,11 +157,20 @@ pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
             continue;
         }
         if mode.is_some() {
-            return Err(RoseaError::DuplicateField);
+            return Err(RoseaError::DuplicateField {
+                field: "Mode",
+                line: line_number,
+            });
         }
-        let value: u32 = value.trim().parse().map_err(|_| RoseaError::InvalidMode)?;
+        let value: u32 = value
+            .trim()
+            .parse()
+            .map_err(|_| RoseaError::InvalidMode { line: line_number })?;
         if value != 0 {
-            return Err(RoseaError::UnsupportedMode(value));
+            return Err(RoseaError::UnsupportedMode {
+                mode: value,
+                line: line_number,
+            });
         }
         mode = Some(value);
     }
@@ -203,7 +213,10 @@ pub fn osu_stack_leniency(bytes: &[u8]) -> Result<f32, RoseaError> {
         }
         // Повторная секция General не разрешает второе объявление того же поля.
         if leniency.is_some() {
-            return Err(RoseaError::DuplicateField);
+            return Err(RoseaError::DuplicateField {
+                field: "StackLeniency",
+                line: index + 1,
+            });
         }
         let invalid = || RoseaError::InvalidStackLeniency { line: index + 1 };
         let value: f32 = value.trim().parse().map_err(|_| invalid())?;
@@ -333,7 +346,7 @@ fn read_difficulty_value<T: std::str::FromStr>(
     slider_setting: bool,
 ) -> Result<(), RoseaError> {
     if slot.is_some() {
-        return Err(RoseaError::DuplicateField);
+        return Err(RoseaError::DuplicateField { field, line });
     }
     let invalid = || RoseaError::InvalidDifficultyField { field, line };
     let text = text.trim();

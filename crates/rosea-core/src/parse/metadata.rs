@@ -91,55 +91,82 @@ pub fn osu_metadata(bytes: &[u8]) -> Result<Metadata, RoseaError> {
         match key {
             "Title" => {
                 if title.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "Title",
+                        line: index + 1,
+                    });
                 }
                 title = Some(value.to_owned());
             }
             "TitleUnicode" => {
                 if title_unicode.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "TitleUnicode",
+                        line: index + 1,
+                    });
                 }
                 title_unicode = Some(value.to_owned());
             }
             "Artist" => {
                 if artist.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "Artist",
+                        line: index + 1,
+                    });
                 }
                 artist = Some(value.to_owned());
             }
             "ArtistUnicode" => {
                 if artist_unicode.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "ArtistUnicode",
+                        line: index + 1,
+                    });
                 }
                 artist_unicode = Some(value.to_owned());
             }
             "Creator" => {
                 if creator.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "Creator",
+                        line: index + 1,
+                    });
                 }
                 creator = Some(value.to_owned());
             }
             "Version" => {
                 if version.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "Version",
+                        line: index + 1,
+                    });
                 }
                 version = Some(value.to_owned());
             }
             "Source" => {
                 if source.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "Source",
+                        line: index + 1,
+                    });
                 }
                 source = Some(value.to_owned());
             }
             "Tags" => {
                 if tags.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "Tags",
+                        line: index + 1,
+                    });
                 }
                 tags = Some(value.to_owned());
             }
             "BeatmapID" => {
                 if beatmap_id.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "BeatmapID",
+                        line: index + 1,
+                    });
                 }
                 let id: i32 = value
                     .parse()
@@ -151,7 +178,10 @@ pub fn osu_metadata(bytes: &[u8]) -> Result<Metadata, RoseaError> {
             }
             "BeatmapSetID" => {
                 if beatmap_set_id.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "BeatmapSetID",
+                        line: index + 1,
+                    });
                 }
                 let id: i32 = value
                     .parse()

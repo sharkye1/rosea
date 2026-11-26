@@ -97,7 +97,10 @@ fn rejects_duplicate_colour_fields() {
         let text = map(body);
         assert_eq!(
             osu_colours(text.as_bytes()),
-            Err(RoseaError::DuplicateField),
+            Err(RoseaError::DuplicateField {
+                field: name,
+                line: 4
+            }),
             "Ожидался DuplicateField для {name}"
         );
     }
@@ -109,7 +112,10 @@ fn rejects_duplicate_colour_fields_across_split_sections() {
         [General]\nMode: 0\n[Colours]\nCombo1: 2,2,2";
     assert_eq!(
         osu_colours(text.as_bytes()),
-        Err(RoseaError::DuplicateField)
+        Err(RoseaError::DuplicateField {
+            field: "Combo1",
+            line: 7
+        })
     );
 }
 
@@ -194,7 +200,7 @@ fn checks_header_and_mode() {
     );
     assert_eq!(
         osu_colours(b"osu file format v14\n[General]\nMode: 1\n[Colours]\nCombo1: 1,2,3"),
-        Err(RoseaError::UnsupportedMode(1))
+        Err(RoseaError::UnsupportedMode { mode: 1, line: 3 })
     );
     assert_eq!(osu_colours(b"\xff"), Err(RoseaError::InvalidEncoding));
 }

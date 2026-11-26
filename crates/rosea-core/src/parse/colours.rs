@@ -6,6 +6,9 @@ use crate::model::{Colours, DEFAULT_COMBO_COLOURS, Rgb};
 use super::osu_mode;
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
+const COMBO_FIELDS: [&str; 8] = [
+    "Combo1", "Combo2", "Combo3", "Combo4", "Combo5", "Combo6", "Combo7", "Combo8",
+];
 
 /// Читает цветовую информацию карты из секции `[Colours]`.
 ///
@@ -43,10 +46,9 @@ pub fn osu_colours(bytes: &[u8]) -> Result<Colours, RoseaError> {
         }
 
         let Some((key, value)) = line.split_once(':') else {
-            let key = line.trim();
-            if is_supported_colour_key(key) {
+            if let Some(field) = colour_field_name(line) {
                 return Err(RoseaError::InvalidColourField {
-                    field: supported_field_name(key),
+                    field,
                     line: index + 1,
                 });
             }
@@ -57,11 +59,14 @@ pub fn osu_colours(bytes: &[u8]) -> Result<Colours, RoseaError> {
         let value = value.trim();
 
         if let Some(n) = parse_combo_index(key) {
+            let field = COMBO_FIELDS[n - 1];
             let slot = &mut combo_slots[n - 1];
             if slot.is_some() {
-                return Err(RoseaError::DuplicateField);
+                return Err(RoseaError::DuplicateField {
+                    field,
+                    line: index + 1,
+                });
             }
-            let field = supported_field_name(key);
             *slot = Some(parse_rgb(value, field, index + 1)?);
             continue;
         }
@@ -69,13 +74,19 @@ pub fn osu_colours(bytes: &[u8]) -> Result<Colours, RoseaError> {
         match key {
             "SliderTrackOverride" => {
                 if slider_track_override.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "SliderTrackOverride",
+                        line: index + 1,
+                    });
                 }
                 slider_track_override = Some(parse_rgb(value, "SliderTrackOverride", index + 1)?);
             }
             "SliderBorder" => {
                 if slider_border.is_some() {
-                    return Err(RoseaError::DuplicateField);
+                    return Err(RoseaError::DuplicateField {
+                        field: "SliderBorder",
+                        line: index + 1,
+                    });
                 }
                 slider_border = Some(parse_rgb(value, "SliderBorder", index + 1)?);
             }
@@ -103,23 +114,11 @@ fn parse_combo_index(key: &str) -> Option<usize> {
     if (1..=8).contains(&n) { Some(n) } else { None }
 }
 
-fn is_supported_colour_key(key: &str) -> bool {
-    parse_combo_index(key).is_some() || matches!(key, "SliderTrackOverride" | "SliderBorder")
-}
-
-fn supported_field_name(key: &str) -> &'static str {
+fn colour_field_name(key: &str) -> Option<&'static str> {
     match key {
-        "Combo1" => "Combo1",
-        "Combo2" => "Combo2",
-        "Combo3" => "Combo3",
-        "Combo4" => "Combo4",
-        "Combo5" => "Combo5",
-        "Combo6" => "Combo6",
-        "Combo7" => "Combo7",
-        "Combo8" => "Combo8",
-        "SliderTrackOverride" => "SliderTrackOverride",
-        "SliderBorder" => "SliderBorder",
-        _ => "unknown",
+        "SliderTrackOverride" => Some("SliderTrackOverride"),
+        "SliderBorder" => Some("SliderBorder"),
+        _ => parse_combo_index(key).map(|n| COMBO_FIELDS[n - 1]),
     }
 }
 

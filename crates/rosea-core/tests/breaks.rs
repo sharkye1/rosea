@@ -195,7 +195,7 @@ fn checks_header_and_standard_mode() {
     );
     assert_eq!(
         osu_breaks(b"osu file format v14\n[General]\nMode: 1\n[Events]\n2,1000,2000"),
-        Err(RoseaError::UnsupportedMode(1))
+        Err(RoseaError::UnsupportedMode { mode: 1, line: 3 })
     );
     assert_eq!(
         osu_breaks(&[0xff, 0xff, 0xff]),

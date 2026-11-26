@@ -362,6 +362,6 @@ fn keeps_the_circle_only_entry_strict_and_checks_input_profile() {
     let text = "osu file format v14\n[General]\nMode: 1\n[HitObjects]\n0,0,0,2,0,L|1:1,1,1";
     assert_eq!(
         osu_hit_objects(text.as_bytes()),
-        Err(RoseaError::UnsupportedMode(1))
+        Err(RoseaError::UnsupportedMode { mode: 1, line: 3 })
     );
 }

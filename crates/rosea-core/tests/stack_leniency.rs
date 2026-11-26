@@ -65,7 +65,10 @@ fn rejects_duplicates_across_repeated_general_sections() {
     ] {
         assert_eq!(
             osu_stack_leniency(map(body).as_bytes()),
-            Err(RoseaError::DuplicateField)
+            Err(RoseaError::DuplicateField {
+                field: "StackLeniency",
+                line: body.lines().count() + 1
+            })
         );
     }
     // Одноимённые ключи в других секциях не считаются объявлением поля General.
@@ -91,7 +94,7 @@ fn checks_the_header_and_standard_mode() {
     );
     assert_eq!(
         osu_stack_leniency(map("[General]\nMode: 1\nStackLeniency: 0.7").as_bytes()),
-        Err(RoseaError::UnsupportedMode(1))
+        Err(RoseaError::UnsupportedMode { mode: 1, line: 3 })
     );
 }
 

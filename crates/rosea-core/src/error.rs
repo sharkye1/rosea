@@ -46,12 +46,20 @@ pub enum RoseaError {
     InvalidEncoding,
     InvalidHeader,
     UnsupportedBeatmapVersion(u32),
-    InvalidMode,
-    UnsupportedMode(u32),
+    InvalidMode {
+        line: usize,
+    },
+    UnsupportedMode {
+        mode: u32,
+        line: usize,
+    },
     InvalidStackLeniency {
         line: usize,
     },
-    DuplicateField,
+    DuplicateField {
+        field: &'static str,
+        line: usize,
+    },
     MissingDifficultyField(&'static str),
     InvalidDifficultyField {
         field: &'static str,
@@ -161,9 +169,15 @@ impl fmt::Display for RoseaError {
             Self::UnsupportedBeatmapVersion(version) => {
                 write!(f, "Версия v{version} не поддерживается, нужна v14")
             }
-            Self::InvalidMode => write!(f, "В поле Mode должно быть целое неотрицательное число"),
-            Self::UnsupportedMode(mode) => {
-                write!(f, "Режим {mode} не поддерживается, нужен Mode: 0")
+            Self::InvalidMode { line } => write!(
+                f,
+                "Строка {line}: в поле Mode должно быть целое неотрицательное число"
+            ),
+            Self::UnsupportedMode { mode, line } => {
+                write!(
+                    f,
+                    "Строка {line}: режим {mode} не поддерживается, нужен Mode: 0"
+                )
             }
             Self::InvalidStackLeniency { line } => {
                 write!(
@@ -171,7 +185,9 @@ impl fmt::Display for RoseaError {
                     "Строка {line}: StackLeniency должен быть конечным числом от 0 до 1"
                 )
             }
-            Self::DuplicateField => write!(f, "Поддерживаемое поле указано повторно"),
+            Self::DuplicateField { field, line } => {
+                write!(f, "Строка {line}: поле {field} указано повторно")
+            }
             Self::MissingDifficultyField(field) => {
                 write!(
                     f,

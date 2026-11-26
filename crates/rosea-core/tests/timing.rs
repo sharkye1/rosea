@@ -250,7 +250,7 @@ fn checks_header_and_standard_mode() {
     let text = "osu file format v14\n[General]\nMode: 1\n[TimingPoints]\n0,500,4,1,0,100,1,0";
     assert_eq!(
         osu_timing_points(text.as_bytes()),
-        Err(RoseaError::UnsupportedMode(1))
+        Err(RoseaError::UnsupportedMode { mode: 1, line: 3 })
     );
 }
 
