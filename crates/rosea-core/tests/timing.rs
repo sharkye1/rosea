@@ -238,14 +238,20 @@ fn rejects_invalid_inherited_fields() {
 
 #[test]
 fn checks_header_and_standard_mode() {
-    assert_eq!(osu_timing_points(b"\xff"), Err(RoseaError::InvalidEncoding));
+    assert_eq!(
+        osu_timing_points(b"\xff"),
+        Err(RoseaError::InvalidEncoding { line: 1 })
+    );
     assert_eq!(
         osu_timing_points(b"[TimingPoints]"),
-        Err(RoseaError::InvalidHeader)
+        Err(RoseaError::InvalidHeader { line: Some(1) })
     );
     assert_eq!(
         osu_timing_points(b"osu file format v13"),
-        Err(RoseaError::UnsupportedBeatmapVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion {
+            version: 13,
+            line: 1
+        })
     );
     let text = "osu file format v14\n[General]\nMode: 1\n[TimingPoints]\n0,500,4,1,0,100,1,0";
     assert_eq!(
@@ -272,10 +278,12 @@ fn enforces_timing_point_and_line_limits() {
     text.push_str("0,500,4,1,0,100,1,0");
     assert_eq!(
         osu_timing_points(text.as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "timing_points",
             limit: 100_000,
-            observed: 100_001
+            observed: 100_001,
+            line: 100003,
+            object_id: None,
         })
     );
 
@@ -287,10 +295,12 @@ fn enforces_timing_point_and_line_limits() {
     point.push('0');
     assert_eq!(
         osu_timing_points(map(&point).as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: 1_048_576,
-            observed: 1_048_577
+            observed: 1_048_577,
+            line: 3,
+            object_id: None,
         })
     );
 }

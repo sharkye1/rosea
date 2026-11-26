@@ -3,7 +3,7 @@
 use crate::error::RoseaError;
 use crate::model::{Colours, DEFAULT_COMBO_COLOURS, Rgb};
 
-use super::osu_mode;
+use super::{osu::osu_text, osu_mode};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const COMBO_FIELDS: [&str; 8] = [
@@ -18,7 +18,7 @@ const COMBO_FIELDS: [&str; 8] = [
 /// используются 4 стандартных цвета комбо.
 pub fn osu_colours(bytes: &[u8]) -> Result<Colours, RoseaError> {
     osu_mode(bytes)?;
-    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let text = osu_text(bytes)?;
 
     let mut in_colours = false;
     let mut combo_slots: [Option<Rgb>; 8] = [None; 8];
@@ -27,10 +27,12 @@ pub fn osu_colours(bytes: &[u8]) -> Result<Colours, RoseaError> {
 
     for (index, raw_line) in text.lines().enumerate() {
         if raw_line.len() > MAX_LINE_BYTES {
-            return Err(RoseaError::ResourceLimit {
+            return Err(RoseaError::MapResourceLimit {
                 resource: "osu_line_bytes",
                 limit: MAX_LINE_BYTES as u64,
                 observed: raw_line.len() as u64,
+                line: index + 1,
+                object_id: None,
             });
         }
         let line = raw_line.trim();

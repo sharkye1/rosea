@@ -1,6 +1,6 @@
 use rosea_core::{
-    error::RoseaError,
-    model::Warning,
+    error::{ErrorCode, RoseaError, SourceLocation},
+    model::{ObjectId, Warning},
     parse::{beatmap_md5, osu},
 };
 
@@ -114,4 +114,28 @@ fn reports_duplicate_and_required_fields_from_the_public_parser() {
         let map = format!("{prefix}{fields}");
         assert_eq!(osu(map.as_bytes()).unwrap_err(), expected);
     }
+}
+
+#[test]
+fn exposes_codes_and_source_locations_without_parsing_messages() {
+    for (map, code, line, object_id) in [
+        (&b"osu file format v14\r\n[General]\r\n\xff"[..], ErrorCode::InvalidEncoding, 3, None),
+        (&b"\n\nosu file format v13"[..], ErrorCode::UnsupportedBeatmapVersion, 3, None),
+        (&b"\nwrong header"[..], ErrorCode::InvalidHeader, 2, None),
+        (&b"osu file format v14\n[General]\nMode:2"[..], ErrorCode::UnsupportedMode, 3, None),
+        (&b"osu file format v14\n[Difficulty]\nCircleSize:4\nOverallDifficulty:5\nHPDrainRate:5\n[HitObjects]\n0,0,10,1,0\n0,0,0,128,0"[..], ErrorCode::UnsupportedHitObject, 8, Some(ObjectId(1))),
+    ] {
+        let error = osu(map).unwrap_err();
+        assert_eq!(error.code(), code);
+        assert_eq!(error.source_location(), SourceLocation::Line { line, object_id });
+    }
+
+    let error =
+        osu(b"osu file format v14\n[Difficulty]\nOverallDifficulty:5\nHPDrainRate:5").unwrap_err();
+    assert_eq!(error.code(), ErrorCode::MissingDifficultyField);
+    assert_eq!(error.source_location(), SourceLocation::None);
+    assert_eq!(
+        ErrorCode::UnsupportedHitObject.to_string(),
+        "UnsupportedHitObject"
+    );
 }

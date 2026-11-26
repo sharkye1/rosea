@@ -3,7 +3,7 @@
 use crate::error::RoseaError;
 use crate::model::Metadata;
 
-use super::osu_mode;
+use super::{osu::osu_text, osu_mode};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
@@ -15,7 +15,7 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 /// Неизвестные поля и строки комментариев пропускаются.
 pub fn osu_metadata(bytes: &[u8]) -> Result<Metadata, RoseaError> {
     osu_mode(bytes)?;
-    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let text = osu_text(bytes)?;
 
     let mut in_metadata = false;
     let mut title = None;
@@ -31,10 +31,12 @@ pub fn osu_metadata(bytes: &[u8]) -> Result<Metadata, RoseaError> {
 
     for (index, raw_line) in text.lines().enumerate() {
         if raw_line.len() > MAX_LINE_BYTES {
-            return Err(RoseaError::ResourceLimit {
+            return Err(RoseaError::MapResourceLimit {
                 resource: "osu_line_bytes",
                 limit: MAX_LINE_BYTES as u64,
                 observed: raw_line.len() as u64,
+                line: index + 1,
+                object_id: None,
             });
         }
         let line = raw_line.trim();

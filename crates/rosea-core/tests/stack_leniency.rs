@@ -82,15 +82,18 @@ fn rejects_duplicates_across_repeated_general_sections() {
 fn checks_the_header_and_standard_mode() {
     assert_eq!(
         osu_stack_leniency(b"\xff"),
-        Err(RoseaError::InvalidEncoding)
+        Err(RoseaError::InvalidEncoding { line: 1 })
     );
     assert_eq!(
         osu_stack_leniency(b"[General]\nStackLeniency: 0.7"),
-        Err(RoseaError::InvalidHeader)
+        Err(RoseaError::InvalidHeader { line: Some(1) })
     );
     assert_eq!(
         osu_stack_leniency(b"osu file format v13"),
-        Err(RoseaError::UnsupportedBeatmapVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion {
+            version: 13,
+            line: 1
+        })
     );
     assert_eq!(
         osu_stack_leniency(map("[General]\nMode: 1\nStackLeniency: 0.7").as_bytes()),
@@ -112,10 +115,12 @@ fn enforces_the_line_limit_before_trimming_whitespace() {
     line.push(' ');
     assert_eq!(
         osu_stack_leniency(map(&format!("[General]\n{line}")).as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: LIMIT as u64,
             observed: LIMIT as u64 + 1,
+            line: 3,
+            object_id: None,
         })
     );
 }

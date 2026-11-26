@@ -3,7 +3,7 @@
 use crate::error::RoseaError;
 use crate::model::TimingPoint;
 
-use super::osu_mode;
+use super::{osu::osu_text, osu_mode};
 
 const MAX_TIMING_POINTS: usize = 100_000;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -12,16 +12,18 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 /// Пустая секция допустима. Результат упорядочен по времени и исходной строке.
 pub fn osu_timing_points(bytes: &[u8]) -> Result<Vec<TimingPoint>, RoseaError> {
     osu_mode(bytes)?;
-    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let text = osu_text(bytes)?;
     let mut in_timing = false;
     let mut points = Vec::new();
 
     for (index, raw_line) in text.lines().enumerate() {
         if raw_line.len() > MAX_LINE_BYTES {
-            return Err(RoseaError::ResourceLimit {
+            return Err(RoseaError::MapResourceLimit {
                 resource: "osu_line_bytes",
                 limit: MAX_LINE_BYTES as u64,
                 observed: raw_line.len() as u64,
+                line: index + 1,
+                object_id: None,
             });
         }
         let line = raw_line.trim();
@@ -37,10 +39,12 @@ pub fn osu_timing_points(bytes: &[u8]) -> Result<Vec<TimingPoint>, RoseaError> {
         }
         // Проверяем до push, чтобы вход не увеличивал Vec сверх лимита.
         if points.len() == MAX_TIMING_POINTS {
-            return Err(RoseaError::ResourceLimit {
+            return Err(RoseaError::MapResourceLimit {
                 resource: "timing_points",
                 limit: MAX_TIMING_POINTS as u64,
                 observed: points.len() as u64 + 1,
+                line: index + 1,
+                object_id: None,
             });
         }
         points.push(parse_timing_point(line, index + 1)?);

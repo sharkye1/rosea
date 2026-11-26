@@ -4,6 +4,68 @@ use std::fmt;
 
 use crate::model::ObjectId;
 
+/// Устойчивый машинный код диагностики.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ErrorCode {
+    UnexpectedEof,
+    InvalidLength,
+    InvalidStringMarker,
+    InvalidReplayString,
+    UnsupportedReplayMode,
+    UnsupportedMods,
+    NoReplayData,
+    InvalidLzma,
+    InvalidReplayRecord,
+    UnsupportedReplayFeature,
+    ReplayTimeOverflow,
+    BeatmapHashMismatch,
+    InvalidEncoding,
+    InvalidHeader,
+    UnsupportedBeatmapVersion,
+    InvalidMode,
+    UnsupportedMode,
+    InvalidStackLeniency,
+    DuplicateField,
+    MissingDifficultyField,
+    InvalidDifficultyField,
+    InvalidMetadataField,
+    InvalidColourField,
+    EmptyBeatmap,
+    InvalidHitObjectField,
+    UnsupportedHitObject,
+    UnsupportedSliderSyntax,
+    InvalidTimingPointField,
+    InvalidBreakField,
+    InvalidSliderLength,
+    InvalidTime,
+    TimeWentBackwards,
+    ScoreOverflow,
+    UnsupportedSimulationObject,
+    IncompleteSimulation,
+    NumericalError,
+    PreprocessError,
+    ResourceLimit,
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+/// Исходная позиция ошибки. Номера строк начинаются с 1, смещения и индексы — с 0.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SourceLocation {
+    None,
+    Line {
+        line: u32,
+        object_id: Option<ObjectId>,
+    },
+    ByteOffset(u64),
+    ReplayRecord(u32),
+    Object(ObjectId),
+}
+
 // Вызывающий код может различать причины через match, без разбора сообщений Display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoseaError {
@@ -43,9 +105,16 @@ pub enum RoseaError {
         index: u32,
     },
     BeatmapHashMismatch,
-    InvalidEncoding,
-    InvalidHeader,
-    UnsupportedBeatmapVersion(u32),
+    InvalidEncoding {
+        line: usize,
+    },
+    InvalidHeader {
+        line: Option<usize>,
+    },
+    UnsupportedBeatmapVersion {
+        version: u32,
+        line: usize,
+    },
     InvalidMode {
         line: usize,
     },
@@ -124,6 +193,117 @@ pub enum RoseaError {
         limit: u64,
         observed: u64,
     },
+    MapResourceLimit {
+        resource: &'static str,
+        limit: u64,
+        observed: u64,
+        line: usize,
+        object_id: Option<ObjectId>,
+    },
+}
+
+impl RoseaError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::UnexpectedEof { .. } => ErrorCode::UnexpectedEof,
+            Self::InvalidLength { .. } => ErrorCode::InvalidLength,
+            Self::InvalidStringMarker { .. } => ErrorCode::InvalidStringMarker,
+            Self::InvalidReplayString { .. } => ErrorCode::InvalidReplayString,
+            Self::UnsupportedReplayMode { .. } => ErrorCode::UnsupportedReplayMode,
+            Self::UnsupportedMods { .. } => ErrorCode::UnsupportedMods,
+            Self::NoReplayData { .. } => ErrorCode::NoReplayData,
+            Self::InvalidLzma { .. } => ErrorCode::InvalidLzma,
+            Self::InvalidReplayRecord { .. } => ErrorCode::InvalidReplayRecord,
+            Self::UnsupportedReplayFeature { .. } => ErrorCode::UnsupportedReplayFeature,
+            Self::ReplayTimeOverflow { .. } => ErrorCode::ReplayTimeOverflow,
+            Self::BeatmapHashMismatch => ErrorCode::BeatmapHashMismatch,
+            Self::InvalidEncoding { .. } => ErrorCode::InvalidEncoding,
+            Self::InvalidHeader { .. } => ErrorCode::InvalidHeader,
+            Self::UnsupportedBeatmapVersion { .. } => ErrorCode::UnsupportedBeatmapVersion,
+            Self::InvalidMode { .. } => ErrorCode::InvalidMode,
+            Self::UnsupportedMode { .. } => ErrorCode::UnsupportedMode,
+            Self::InvalidStackLeniency { .. } => ErrorCode::InvalidStackLeniency,
+            Self::DuplicateField { .. } => ErrorCode::DuplicateField,
+            Self::MissingDifficultyField(..) => ErrorCode::MissingDifficultyField,
+            Self::InvalidDifficultyField { .. } => ErrorCode::InvalidDifficultyField,
+            Self::InvalidMetadataField { .. } => ErrorCode::InvalidMetadataField,
+            Self::InvalidColourField { .. } => ErrorCode::InvalidColourField,
+            Self::EmptyBeatmap => ErrorCode::EmptyBeatmap,
+            Self::InvalidHitObjectField { .. } => ErrorCode::InvalidHitObjectField,
+            Self::UnsupportedHitObject { .. } => ErrorCode::UnsupportedHitObject,
+            Self::UnsupportedSliderSyntax { .. } => ErrorCode::UnsupportedSliderSyntax,
+            Self::InvalidTimingPointField { .. } => ErrorCode::InvalidTimingPointField,
+            Self::InvalidBreakField { .. } => ErrorCode::InvalidBreakField,
+            Self::InvalidSliderLength { .. } => ErrorCode::InvalidSliderLength,
+            Self::InvalidTime => ErrorCode::InvalidTime,
+            Self::TimeWentBackwards => ErrorCode::TimeWentBackwards,
+            Self::ScoreOverflow => ErrorCode::ScoreOverflow,
+            Self::UnsupportedSimulationObject { .. } => ErrorCode::UnsupportedSimulationObject,
+            Self::IncompleteSimulation { .. } => ErrorCode::IncompleteSimulation,
+            Self::NumericalError { .. } => ErrorCode::NumericalError,
+            Self::PreprocessError { .. } => ErrorCode::PreprocessError,
+            Self::ResourceLimit { .. } | Self::MapResourceLimit { .. } => ErrorCode::ResourceLimit,
+        }
+    }
+
+    pub fn source_location(&self) -> SourceLocation {
+        let (line, object_id) = match *self {
+            Self::InvalidEncoding { line }
+            | Self::InvalidHeader { line: Some(line) }
+            | Self::UnsupportedBeatmapVersion { line, .. }
+            | Self::InvalidMode { line }
+            | Self::UnsupportedMode { line, .. }
+            | Self::InvalidStackLeniency { line }
+            | Self::DuplicateField { line, .. }
+            | Self::InvalidDifficultyField { line, .. }
+            | Self::InvalidMetadataField { line, .. }
+            | Self::InvalidColourField { line, .. }
+            | Self::InvalidTimingPointField { line, .. }
+            | Self::InvalidBreakField { line, .. } => (line, None),
+            Self::InvalidHitObjectField {
+                line, object_id, ..
+            }
+            | Self::UnsupportedHitObject {
+                line, object_id, ..
+            }
+            | Self::UnsupportedSliderSyntax { line, object_id }
+            | Self::InvalidSliderLength { line, object_id }
+            | Self::NumericalError { line, object_id }
+            | Self::PreprocessError {
+                line, object_id, ..
+            } => (line, Some(object_id)),
+            Self::MapResourceLimit {
+                line, object_id, ..
+            } => (line, object_id),
+            Self::UnexpectedEof { offset }
+            | Self::InvalidLength { offset }
+            | Self::InvalidStringMarker { offset }
+            | Self::InvalidReplayString { offset }
+            | Self::UnsupportedReplayMode { offset, .. }
+            | Self::UnsupportedMods { offset, .. }
+            | Self::NoReplayData { offset }
+            | Self::InvalidLzma { offset } => return SourceLocation::ByteOffset(offset as u64),
+            Self::InvalidReplayRecord { index }
+            | Self::UnsupportedReplayFeature { index }
+            | Self::ReplayTimeOverflow { index } => return SourceLocation::ReplayRecord(index),
+            Self::UnsupportedSimulationObject { object_id } => {
+                return SourceLocation::Object(object_id);
+            }
+            Self::InvalidHeader { line: None }
+            | Self::MissingDifficultyField(_)
+            | Self::EmptyBeatmap
+            | Self::BeatmapHashMismatch
+            | Self::InvalidTime
+            | Self::TimeWentBackwards
+            | Self::ScoreOverflow
+            | Self::IncompleteSimulation { .. }
+            | Self::ResourceLimit { .. } => return SourceLocation::None,
+        };
+        match u32::try_from(line) {
+            Ok(line) => SourceLocation::Line { line, object_id },
+            Err(_) => SourceLocation::None,
+        }
+    }
 }
 
 impl fmt::Display for RoseaError {
@@ -164,10 +344,16 @@ impl fmt::Display for RoseaError {
                 write!(f, "Переполнение времени в записи реплея {index}")
             }
             Self::BeatmapHashMismatch => write!(f, "Хеш карты не совпадает с хешем реплея"),
-            Self::InvalidEncoding => write!(f, "Карта должна быть в UTF-8"),
-            Self::InvalidHeader => write!(f, "Нет корректного заголовка .osu"),
-            Self::UnsupportedBeatmapVersion(version) => {
-                write!(f, "Версия v{version} не поддерживается, нужна v14")
+            Self::InvalidEncoding { line } => write!(f, "Строка {line}: карта должна быть в UTF-8"),
+            Self::InvalidHeader { line: Some(line) } => {
+                write!(f, "Строка {line}: некорректный заголовок .osu")
+            }
+            Self::InvalidHeader { line: None } => write!(f, "Нет корректного заголовка .osu"),
+            Self::UnsupportedBeatmapVersion { version, line } => {
+                write!(
+                    f,
+                    "Строка {line}: версия v{version} не поддерживается, нужна v14"
+                )
             }
             Self::InvalidMode { line } => write!(
                 f,
@@ -276,6 +462,22 @@ impl fmt::Display for RoseaError {
                 message,
             } => {
                 write!(f, "Строка {line}, объект {}: {message}", object_id.0)
+            }
+            Self::MapResourceLimit {
+                resource,
+                limit,
+                observed,
+                line,
+                object_id,
+            } => {
+                write!(f, "Строка {line}")?;
+                if let Some(id) = object_id {
+                    write!(f, ", объект {}", id.0)?;
+                }
+                write!(
+                    f,
+                    ": превышен лимит {resource}: {observed}, допустимо {limit}"
+                )
             }
             Self::ResourceLimit {
                 resource,

@@ -187,11 +187,14 @@ fn rejects_invalid_field_values_with_line_and_field() {
 fn checks_header_and_standard_mode() {
     assert_eq!(
         osu_breaks(b"not a valid osu file"),
-        Err(RoseaError::InvalidHeader)
+        Err(RoseaError::InvalidHeader { line: Some(1) })
     );
     assert_eq!(
         osu_breaks(b"osu file format v13\n[General]\nMode: 0"),
-        Err(RoseaError::UnsupportedBeatmapVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion {
+            version: 13,
+            line: 1
+        })
     );
     assert_eq!(
         osu_breaks(b"osu file format v14\n[General]\nMode: 1\n[Events]\n2,1000,2000"),
@@ -199,7 +202,7 @@ fn checks_header_and_standard_mode() {
     );
     assert_eq!(
         osu_breaks(&[0xff, 0xff, 0xff]),
-        Err(RoseaError::InvalidEncoding)
+        Err(RoseaError::InvalidEncoding { line: 1 })
     );
 }
 
@@ -208,10 +211,12 @@ fn enforces_break_limit_and_line_limit() {
     let long_line = "2,1000,".to_string() + &"0".repeat(1024 * 1024);
     assert_eq!(
         osu_breaks(map(&long_line).as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: 1024 * 1024,
             observed: long_line.len() as u64,
+            line: 5,
+            object_id: None,
         })
     );
 
@@ -221,10 +226,12 @@ fn enforces_break_limit_and_line_limit() {
     }
     assert_eq!(
         osu_breaks(many_breaks.as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "breaks",
             limit: 100_000,
             observed: 100_001,
+            line: 100005,
+            object_id: None,
         })
     );
 }

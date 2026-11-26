@@ -146,11 +146,20 @@ fn rejects_object_parameters_mislabeled_as_circle_samples() {
 
 #[test]
 fn checks_header_and_standard_mode() {
-    assert_eq!(osu_circles(b"\xff"), Err(RoseaError::InvalidEncoding));
-    assert_eq!(osu_circles(b"[HitObjects]"), Err(RoseaError::InvalidHeader));
+    assert_eq!(
+        osu_circles(b"\xff"),
+        Err(RoseaError::InvalidEncoding { line: 1 })
+    );
+    assert_eq!(
+        osu_circles(b"[HitObjects]"),
+        Err(RoseaError::InvalidHeader { line: Some(1) })
+    );
     assert_eq!(
         osu_circles(b"osu file format v13"),
-        Err(RoseaError::UnsupportedBeatmapVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion {
+            version: 13,
+            line: 1
+        })
     );
     let text = "osu file format v14\n[General]\nMode: 1\n[HitObjects]\n256,192,1000,1,0";
     assert_eq!(
@@ -167,10 +176,12 @@ fn enforces_object_and_line_limits() {
     text.push_str("0,0,0,1,0");
     assert_eq!(
         osu_circles(text.as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "hit_objects",
             limit: 100_000,
-            observed: 100_001
+            observed: 100_001,
+            line: 100003,
+            object_id: Some(ObjectId(100000)),
         })
     );
 
@@ -181,10 +192,12 @@ fn enforces_object_and_line_limits() {
     object.push('a');
     assert_eq!(
         osu_circles(map(&object).as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: 1_048_576,
-            observed: 1_048_577
+            observed: 1_048_577,
+            line: 3,
+            object_id: None,
         })
     );
 }

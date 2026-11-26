@@ -192,17 +192,23 @@ fn handles_spaces_comments_and_unknown_fields() {
 fn checks_header_and_mode() {
     assert_eq!(
         osu_colours(b"[Colours]\nCombo1: 1,2,3"),
-        Err(RoseaError::InvalidHeader)
+        Err(RoseaError::InvalidHeader { line: Some(1) })
     );
     assert_eq!(
         osu_colours(b"osu file format v13\n[Colours]\nCombo1: 1,2,3"),
-        Err(RoseaError::UnsupportedBeatmapVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion {
+            version: 13,
+            line: 1
+        })
     );
     assert_eq!(
         osu_colours(b"osu file format v14\n[General]\nMode: 1\n[Colours]\nCombo1: 1,2,3"),
         Err(RoseaError::UnsupportedMode { mode: 1, line: 3 })
     );
-    assert_eq!(osu_colours(b"\xff"), Err(RoseaError::InvalidEncoding));
+    assert_eq!(
+        osu_colours(b"\xff"),
+        Err(RoseaError::InvalidEncoding { line: 1 })
+    );
 }
 
 #[test]
@@ -222,10 +228,12 @@ fn enforces_line_length_limits() {
     line.push('3');
     assert_eq!(
         osu_colours(map(&line).as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: 1_048_576,
             observed: 1_048_577,
+            line: 3,
+            object_id: None,
         })
     );
 }

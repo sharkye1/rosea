@@ -14,7 +14,7 @@ pub fn osu(bytes: &[u8]) -> Result<Parsed<Beatmap>, RoseaError> {
         metadata: super::osu_metadata(bytes)?,
         colours: super::osu_colours(bytes)?,
     };
-    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let text = osu_text(bytes)?;
     let mut section = "";
     let mut count = 0_u32;
     for raw in text.lines() {
@@ -101,34 +101,47 @@ pub struct Difficulty {
     pub slider_tick_rate: Option<f64>,
 }
 
+pub(super) fn osu_text(bytes: &[u8]) -> Result<&str, RoseaError> {
+    std::str::from_utf8(bytes).map_err(|error| RoseaError::InvalidEncoding {
+        line: bytes[..error.valid_up_to()]
+            .split(|&byte| byte == b'\n')
+            .count(),
+    })
+}
+
 pub fn osu_header(bytes: &[u8]) -> Result<u32, RoseaError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let text = osu_text(bytes)?;
     // BOM допустим только в начале. Убираем его из текстового представления.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
 
-    for line in text.lines() {
+    for (index, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
 
         // Комментарии до заголовка не допускаются: первая непустая строка задаёт версию.
-        let version = line
-            .strip_prefix("osu file format v")
-            .ok_or(RoseaError::InvalidHeader)?;
-        let version: u32 = version.parse().map_err(|_| RoseaError::InvalidHeader)?;
+        let line_number = index + 1;
+        let invalid = || RoseaError::InvalidHeader {
+            line: Some(line_number),
+        };
+        let version = line.strip_prefix("osu file format v").ok_or_else(invalid)?;
+        let version: u32 = version.parse().map_err(|_| invalid())?;
         if version != 14 {
-            return Err(RoseaError::UnsupportedBeatmapVersion(version));
+            return Err(RoseaError::UnsupportedBeatmapVersion {
+                version,
+                line: line_number,
+            });
         }
         return Ok(version);
     }
 
-    Err(RoseaError::InvalidHeader)
+    Err(RoseaError::InvalidHeader { line: None })
 }
 
 pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
     osu_header(bytes)?;
-    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let text = osu_text(bytes)?;
     let mut in_general = false;
     // Не сбрасываем при повторной секции General: второй Mode остаётся дубликатом.
     let mut mode = None;
@@ -184,16 +197,18 @@ pub fn osu_stack_leniency(bytes: &[u8]) -> Result<f32, RoseaError> {
     const MAX_LINE_BYTES: usize = 1024 * 1024;
 
     osu_mode(bytes)?;
-    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let text = osu_text(bytes)?;
     let mut in_general = false;
     let mut leniency = None;
 
     for (index, raw_line) in text.lines().enumerate() {
         if raw_line.len() > MAX_LINE_BYTES {
-            return Err(RoseaError::ResourceLimit {
+            return Err(RoseaError::MapResourceLimit {
                 resource: "osu_line_bytes",
                 limit: MAX_LINE_BYTES as u64,
                 observed: raw_line.len() as u64,
+                line: index + 1,
+                object_id: None,
             });
         }
         let line = raw_line.trim();
@@ -233,7 +248,7 @@ pub fn osu_stack_leniency(bytes: &[u8]) -> Result<f32, RoseaError> {
 /// SliderMultiplier и SliderTickRate обязательны, если в HitObjects есть слайдер.
 pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
     osu_header(bytes)?;
-    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let text = osu_text(bytes)?;
     let mut in_difficulty = false;
     let mut in_objects = false;
     let mut object_index = 0_u32;
@@ -257,10 +272,12 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
         }
         if in_objects {
             if object_index == 100_000 {
-                return Err(RoseaError::ResourceLimit {
+                return Err(RoseaError::MapResourceLimit {
                     resource: "hit_objects",
                     limit: 100_000,
                     observed: u64::from(object_index) + 1,
+                    line: index + 1,
+                    object_id: Some(ObjectId(object_index)),
                 });
             }
             // Для обязательности параметров читаем только флаг типа.

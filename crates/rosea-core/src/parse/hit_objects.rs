@@ -3,7 +3,7 @@
 use crate::error::RoseaError;
 use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point};
 
-use super::osu_mode;
+use super::{osu::osu_text, osu_mode};
 
 const MAX_OBJECTS: usize = 100_000;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -21,15 +21,17 @@ pub(super) fn parse_objects(
     allow_complex: bool,
 ) -> Result<Vec<HitObject>, RoseaError> {
     osu_mode(bytes)?;
-    let text = std::str::from_utf8(bytes).map_err(|_| RoseaError::InvalidEncoding)?;
+    let text = osu_text(bytes)?;
     let mut in_objects = false;
     let mut objects = Vec::new();
     for (index, raw_line) in text.lines().enumerate() {
         if raw_line.len() > MAX_LINE_BYTES {
-            return Err(RoseaError::ResourceLimit {
+            return Err(RoseaError::MapResourceLimit {
                 resource: "osu_line_bytes",
                 limit: MAX_LINE_BYTES as u64,
                 observed: raw_line.len() as u64,
+                line: index + 1,
+                object_id: None,
             });
         }
         let line = raw_line.trim();
@@ -44,10 +46,12 @@ pub(super) fn parse_objects(
             continue;
         }
         if objects.len() == MAX_OBJECTS {
-            return Err(RoseaError::ResourceLimit {
+            return Err(RoseaError::MapResourceLimit {
                 resource: "hit_objects",
                 limit: MAX_OBJECTS as u64,
                 observed: objects.len() as u64 + 1,
+                line: index + 1,
+                object_id: Some(ObjectId(MAX_OBJECTS as u32)),
             });
         }
         // ID назначается до сортировки и общий для кругов, слайдеров и спиннеров.
@@ -217,10 +221,12 @@ fn parse_slider(
         return Err(invalid("slides"));
     }
     if spans > MAX_SPANS {
-        return Err(RoseaError::ResourceLimit {
+        return Err(RoseaError::MapResourceLimit {
             resource: "slider_spans",
             limit: u64::from(MAX_SPANS),
             observed: u64::from(spans),
+            line,
+            object_id: Some(id),
         });
     }
     let declared_length: f64 = fields
@@ -242,10 +248,12 @@ fn parse_slider(
             });
         }
         if controls.len() == MAX_CONTROLS {
-            return Err(RoseaError::ResourceLimit {
+            return Err(RoseaError::MapResourceLimit {
                 resource: "slider_control_points",
                 limit: MAX_CONTROLS as u64,
                 observed: controls.len() as u64 + 1,
+                line,
+                object_id: Some(id),
             });
         }
         let (x, y) = point

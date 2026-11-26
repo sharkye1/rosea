@@ -1,7 +1,7 @@
 //! Проверяем заголовок и поля секций на маленьких картах, заданных прямо в тестах.
 
-use rosea_core::error::RoseaError;
 use rosea_core::parse::{Difficulty, osu_difficulty, osu_header, osu_mode};
+use rosea_core::{error::RoseaError, model::ObjectId};
 
 #[test]
 fn reads_header() {
@@ -21,9 +21,16 @@ fn rejects_bad_header() {
         "osu file format vabc",
         "// comment\nosu file format v14",
     ] {
-        assert_eq!(osu_header(text.as_bytes()), Err(RoseaError::InvalidHeader));
+        let line = (!text.trim().is_empty()).then_some(1);
+        assert_eq!(
+            osu_header(text.as_bytes()),
+            Err(RoseaError::InvalidHeader { line })
+        );
     }
-    assert_eq!(osu_header(b"\xff"), Err(RoseaError::InvalidEncoding));
+    assert_eq!(
+        osu_header(b"\xff"),
+        Err(RoseaError::InvalidEncoding { line: 1 })
+    );
 }
 
 #[test]
@@ -32,7 +39,7 @@ fn rejects_other_versions() {
         let text = format!("osu file format v{version}\n");
         assert_eq!(
             osu_header(text.as_bytes()),
-            Err(RoseaError::UnsupportedBeatmapVersion(version))
+            Err(RoseaError::UnsupportedBeatmapVersion { version, line: 1 })
         );
     }
 }
@@ -89,13 +96,19 @@ fn rejects_invalid_or_duplicate_mode() {
 fn mode_parser_checks_header() {
     assert_eq!(
         osu_mode(b"[General]\nMode: 0"),
-        Err(RoseaError::InvalidHeader)
+        Err(RoseaError::InvalidHeader { line: Some(1) })
     );
     assert_eq!(
         osu_mode(b"osu file format v13"),
-        Err(RoseaError::UnsupportedBeatmapVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion {
+            version: 13,
+            line: 1
+        })
     );
-    assert_eq!(osu_mode(b"\xff"), Err(RoseaError::InvalidEncoding));
+    assert_eq!(
+        osu_mode(b"\xff"),
+        Err(RoseaError::InvalidEncoding { line: 1 })
+    );
 }
 
 #[test]
@@ -250,13 +263,19 @@ fn rejects_duplicate_difficulty_fields() {
 fn difficulty_parser_checks_header() {
     assert_eq!(
         osu_difficulty(b"[Difficulty]\nCircleSize: 4"),
-        Err(RoseaError::InvalidHeader)
+        Err(RoseaError::InvalidHeader { line: Some(1) })
     );
     assert_eq!(
         osu_difficulty(b"osu file format v13"),
-        Err(RoseaError::UnsupportedBeatmapVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion {
+            version: 13,
+            line: 1
+        })
     );
-    assert_eq!(osu_difficulty(b"\xff"), Err(RoseaError::InvalidEncoding));
+    assert_eq!(
+        osu_difficulty(b"\xff"),
+        Err(RoseaError::InvalidEncoding { line: 1 })
+    );
 }
 
 #[test]
@@ -396,10 +415,12 @@ fn bounds_the_object_scan_used_for_slider_settings() {
     text.push_str("0,0,0,1,0");
     assert_eq!(
         osu_difficulty(text.as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "hit_objects",
             limit: 100_000,
-            observed: 100_001
+            observed: 100_001,
+            line: text.lines().count(),
+            object_id: Some(ObjectId(100000)),
         })
     );
 }

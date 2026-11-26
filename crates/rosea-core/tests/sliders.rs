@@ -147,7 +147,7 @@ fn rejects_extended_slider_syntax_with_source_context() {
     let text = map(&format!("0,0,0,2,0,B{},1,100", "|1:1".repeat(4096)));
     assert!(matches!(
         osu_hit_objects(text.as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "slider_control_points",
             ..
         })
@@ -305,19 +305,23 @@ fn enforces_control_and_span_limits_before_growing_buffers() {
     let text = map(&format!("0,0,0,2,0,{curve}|1:1,1,100"));
     assert_eq!(
         osu_hit_objects(text.as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "slider_control_points",
             limit: 4096,
-            observed: 4097
+            observed: 4097,
+            line: 3,
+            object_id: Some(ObjectId(0)),
         })
     );
     let text = map("0,0,0,2,0,L|1:1,10001,100");
     assert_eq!(
         osu_hit_objects(text.as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "slider_spans",
             limit: 10000,
-            observed: 10001
+            observed: 10001,
+            line: 3,
+            object_id: Some(ObjectId(0)),
         })
     );
 }
@@ -331,10 +335,12 @@ fn enforces_a_shared_limit_for_mixed_objects() {
     text.push_str("0,0,0,1,0");
     assert_eq!(
         osu_hit_objects(text.as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "hit_objects",
             limit: 100_000,
-            observed: 100_001
+            observed: 100_001,
+            line: 100003,
+            object_id: Some(ObjectId(100000)),
         })
     );
 }
@@ -350,10 +356,16 @@ fn keeps_the_circle_only_entry_strict_and_checks_input_profile() {
             flags: 2
         })
     );
-    assert_eq!(osu_hit_objects(b"\xff"), Err(RoseaError::InvalidEncoding));
+    assert_eq!(
+        osu_hit_objects(b"\xff"),
+        Err(RoseaError::InvalidEncoding { line: 1 })
+    );
     assert_eq!(
         osu_hit_objects(b"osu file format v13"),
-        Err(RoseaError::UnsupportedBeatmapVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion {
+            version: 13,
+            line: 1
+        })
     );
     assert_eq!(
         osu_hit_objects(map("").as_bytes()),

@@ -313,17 +313,23 @@ fn ignores_comments_unknown_fields_and_other_sections() {
 fn checks_header_and_mode() {
     assert_eq!(
         osu_metadata(b"[Metadata]\nTitle: Test"),
-        Err(RoseaError::InvalidHeader)
+        Err(RoseaError::InvalidHeader { line: Some(1) })
     );
     assert_eq!(
         osu_metadata(b"osu file format v13\n[Metadata]\nTitle: Test"),
-        Err(RoseaError::UnsupportedBeatmapVersion(13))
+        Err(RoseaError::UnsupportedBeatmapVersion {
+            version: 13,
+            line: 1
+        })
     );
     assert_eq!(
         osu_metadata(b"osu file format v14\n[General]\nMode: 1\n[Metadata]\nTitle: Test"),
         Err(RoseaError::UnsupportedMode { mode: 1, line: 3 })
     );
-    assert_eq!(osu_metadata(b"\xff"), Err(RoseaError::InvalidEncoding));
+    assert_eq!(
+        osu_metadata(b"\xff"),
+        Err(RoseaError::InvalidEncoding { line: 1 })
+    );
 }
 
 #[test]
@@ -337,10 +343,12 @@ fn enforces_line_length_limits() {
     line.push('a');
     assert_eq!(
         osu_metadata(map(&line).as_bytes()),
-        Err(RoseaError::ResourceLimit {
+        Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: 1_048_576,
             observed: 1_048_577,
+            line: 3,
+            object_id: None,
         })
     );
 }
