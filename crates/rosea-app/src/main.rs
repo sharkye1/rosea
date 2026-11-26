@@ -13,31 +13,18 @@ use std::{
     process::ExitCode,
 };
 
+use rosea_core::model::Warning;
+
 fn main() -> ExitCode {
     match cli::parse(env::args_os().skip(1)) {
-        Ok(cli::Command::Help) => {
-            let mut stdout = io::stdout().lock();
-            match stdout
-                .write_all(cli::HELP.as_bytes())
-                .and_then(|()| stdout.flush())
-            {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => fail(format_args!("IoError [write]: {error}")),
-            }
-        }
+        Ok(cli::Command::Help) => write_stdout(|out| out.write_all(cli::HELP.as_bytes())),
         Ok(cli::Command::Inspect { map, replay }) => {
             let pair = match load::load_pair(&map, &replay) {
                 Ok(pair) => pair,
                 Err(error) => return fail(error),
             };
             let _expected = pair.expected;
-            fail(format_args!(
-                "InspectUnavailable: пара проверена (объектов {}, записей {}, версия {}, предупреждений {}), вывод сводки пока недоступен",
-                pair.map.object_count(),
-                pair.input.record_count(),
-                pair.meta.game_version(),
-                pair.warnings.len()
-            ))
+            write_stdout(|out| write_inspection(out, &pair))
         }
         Ok(cli::Command::Play) if !cfg!(feature = "window") => {
             fail("WindowUnavailable: пересоберите rosea-app с feature window для оконного режима")
@@ -46,6 +33,66 @@ fn main() -> ExitCode {
         Err(cli::UsageError(message)) => {
             fail(format_args!("UsageError: {message}. Справка: rosea --help"))
         }
+    }
+}
+
+fn write_inspection(out: &mut impl Write, pair: &load::LoadedPair) -> io::Result<()> {
+    let counts = pair.map.object_counts();
+    writeln!(
+        out,
+        "MD5 карты: {}",
+        pair.meta.beatmap_hash().to_ascii_lowercase()
+    )?;
+    writeln!(
+        out,
+        "Версия клиента (game_version): {}",
+        pair.meta.game_version()
+    )?;
+    writeln!(out, "Объектов: {}", pair.map.object_count())?;
+    writeln!(
+        out,
+        "Круги: {}, слайдеры L: {}, B: {}, P: {}, спиннеры: {}",
+        counts.circles, counts.sliders_l, counts.sliders_b, counts.sliders_p, counts.spinners
+    )?;
+    writeln!(
+        out,
+        "Нормализованных записей: {}",
+        pair.input.record_count()
+    )?;
+    writeln!(out, "Предупреждений: {}", pair.warnings.len())?;
+    for warning in &pair.warnings {
+        match warning {
+            Warning::UnknownBeatmapFields { count } => writeln!(
+                out,
+                "UnknownBeatmapFields: неизвестных полей и секций карты {count}"
+            )?,
+            Warning::ReplayTrailerNotInterpreted => writeln!(
+                out,
+                "ReplayTrailerNotInterpreted: хвост реплея сохранён без интерпретации"
+            )?,
+            Warning::UnknownReplayKeys { bits, records } => writeln!(
+                out,
+                "UnknownReplayKeys: неизвестные биты кнопок {bits:#x}, записей {records}"
+            )?,
+            Warning::ReplayInputNormalized {
+                changed_times,
+                initial_dummy_removed,
+                backward_removed,
+                ..
+            } => writeln!(
+                out,
+                "ReplayInputNormalized: изменено времён {changed_times}, удалено служебных записей {initial_dummy_removed}, удалено записей с обратным ходом времени {backward_removed}"
+            )?,
+        }
+    }
+    Ok(())
+}
+
+fn write_stdout(write: impl FnOnce(&mut io::StdoutLock<'_>) -> io::Result<()>) -> ExitCode {
+    let mut stdout = io::stdout().lock();
+    match write(&mut stdout).and_then(|()| stdout.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => fail(format_args!("IoError [write]: {error}")),
     }
 }
 

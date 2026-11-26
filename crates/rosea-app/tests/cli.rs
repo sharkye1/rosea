@@ -163,10 +163,13 @@ fn enforces_replay_file_limit_including_trailer() {
     drop(file);
 
     let out = inspect(&map.0, &replay.0);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(out.stdout.is_empty());
-    let error = String::from_utf8(out.stderr).unwrap();
-    assert!(error.starts_with("InspectUnavailable:"));
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("ReplayTrailerNotInterpreted:")
+    );
 
     OpenOptions::new()
         .write(true)
@@ -220,11 +223,20 @@ fn inspect_verifies_raw_bytes_and_preserves_all_loader_warnings() {
     fs::write(&map.0, MAP_BYTES).unwrap();
     fs::write(&replay.0, replay_for(MAP_BYTES)).unwrap();
     let out = inspect(&map.0, &replay.0);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(out.stdout.is_empty());
-    let error = String::from_utf8(out.stderr).unwrap();
-    assert!(error.starts_with("InspectUnavailable: пара проверена"));
-    assert!(error.contains("объектов 1, записей 2, версия 20200427, предупреждений 3"));
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+    let summary = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        summary.contains("MD5 карты: 21a0dd75772444ef88c39473ce6a3575"),
+        "{summary}"
+    );
+    assert!(summary.contains("Версия клиента (game_version): 20200427"));
+    assert!(summary.contains("Объектов: 1"));
+    assert!(summary.contains("Нормализованных записей: 2"));
+    assert!(summary.contains("Предупреждений: 3"));
+    assert!(summary.contains("UnknownBeatmapFields:"));
+    assert!(summary.contains("ReplayTrailerNotInterpreted:"));
+    assert!(summary.contains("UnknownReplayKeys:"));
 
     fs::write(&map.0, &MAP_BYTES[3..]).unwrap();
     let out = inspect(&map.0, &replay.0);
@@ -233,6 +245,32 @@ fn inspect_verifies_raw_bytes_and_preserves_all_loader_warnings() {
     let error = String::from_utf8(out.stderr).unwrap();
     assert!(error.starts_with("BeatmapHashMismatch [parse]"));
     assert!(error.contains("пара карта.osu") && error.contains("пара реплей.osr"));
+}
+
+#[test]
+fn inspect_counts_each_object_kind_without_preparing_geometry_or_loading_resources() {
+    let map_bytes = b"osu file format v14\n[General]\nAudioFilename: absent.mp3\n\
+        [Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n\
+        [Events]\n0,0,\"absent.jpg\",0,0\nSample,10,0,\"absent.wav\",100\n\
+        [HitObjects]\n0,0,10,1,0\n0,0,20,2,0,L|1:1,1,1\n0,0,30,2,0,B|1:1,1,1\n\
+        0,0,40,2,0,P|1:1|2:0,1,1\n256,192,50,8,0,100\n";
+    let map = TempFile::sized("карта с ресурсами.osu", 0);
+    let replay = TempFile::sized("реплей с пробелом.osr", 0);
+    fs::write(&map.0, map_bytes).unwrap();
+    fs::write(&replay.0, replay_for(map_bytes)).unwrap();
+
+    // Без красной timing point слайдеры можно разобрать, но нельзя подготовить.
+    let beatmap = rosea_core::parse::osu(map_bytes).unwrap().value;
+    assert!(rosea_core::prepare::prepare_map(&beatmap).is_err());
+    let out = inspect(&map.0, &replay.0);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stderr.is_empty());
+    let summary = String::from_utf8(out.stdout).unwrap();
+    assert!(summary.contains("Объектов: 5"), "{summary}");
+    assert!(
+        summary.contains("Круги: 1, слайдеры L: 1, B: 1, P: 1, спиннеры: 1"),
+        "{summary}"
+    );
 }
 
 #[test]
