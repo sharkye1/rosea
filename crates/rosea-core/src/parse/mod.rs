@@ -17,6 +17,6 @@ pub use events::osu_breaks;
 pub use hit_objects::osu_hit_objects;
 pub use md5::beatmap_md5;
 pub use metadata::osu_metadata;
-pub use osr::osr;
+pub use osr::{osr, osr_with_location};
 pub use osu::{Difficulty, osu, osu_difficulty, osu_header, osu_mode, osu_stack_leniency};
 pub use timing::osu_timing_points;

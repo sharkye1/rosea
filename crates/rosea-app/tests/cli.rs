@@ -1,5 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
+    io,
     path::{Path, PathBuf},
     process::{self, Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
@@ -24,6 +25,21 @@ fn help_succeeds_on_stdout() {
         );
         assert!(out.stderr.is_empty());
     }
+}
+
+#[test]
+fn help_reports_broken_stdout_with_exit_code_two() {
+    let (reader, writer) = io::pipe().unwrap();
+    drop(reader);
+    let out = Command::new(env!("CARGO_BIN_EXE_rosea"))
+        .arg("--help")
+        .stdout(writer)
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2));
+    let error = String::from_utf8(out.stderr).unwrap();
+    assert!(error.starts_with("IoError [write]: "), "{error}");
 }
 
 #[test]
@@ -114,8 +130,13 @@ fn inspection_reads_a_map_at_the_limit_and_preserves_paths() {
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     let error = String::from_utf8(out.stderr).unwrap();
-    assert!(error.starts_with("MapParseError [parse]"));
-    assert!(error.contains("моя карта.osu"));
+    assert!(error.starts_with("ResourceLimit [parse]"), "{error}");
+    assert!(error.contains("моя карта.osu"), "{error}");
+    assert!(error.contains("line=1"), "{error}");
+    assert!(
+        error.contains("osu_line_bytes, limit=1048576, observed=16777216"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -166,24 +187,28 @@ fn enforces_replay_file_limit_including_trailer() {
 const MAP_BYTES: &[u8] = b"\xef\xbb\xbfosu file format v14\r\n[General]\r\nAudioFilename: missing.mp3\r\nUnknownField: 1\r\n[Difficulty]\r\nCircleSize:5\r\nOverallDifficulty:8\r\nHPDrainRate:5\r\n[HitObjects]\r\n0,0,10,1,0\r\n";
 
 fn replay_for(map: &[u8]) -> Vec<u8> {
-    use std::fmt::Write as _;
-    let mut hex = String::new();
-    for byte in rosea_core::parse::beatmap_md5(map) {
-        write!(hex, "{byte:02X}").unwrap();
-    }
     // Две записи с одним временем, неизвестный бит кнопки и seed.
     let compressed = [
         93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 12, 17, 29, 240, 138,
         210, 67, 185, 117, 204, 55, 148, 8, 134, 117, 193, 194, 120, 221, 231, 7, 247, 23, 255,
         255, 90, 28, 0, 0,
     ];
+    replay_with_payload(map, &compressed)
+}
+
+fn replay_with_payload(map: &[u8], compressed: &[u8]) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let mut hex = String::new();
+    for byte in rosea_core::parse::beatmap_md5(map) {
+        write!(hex, "{byte:02X}").unwrap();
+    }
     let mut bytes = vec![0];
     bytes.extend_from_slice(&20200427_i32.to_le_bytes());
     bytes.extend_from_slice(&[0x0b, 32]);
     bytes.extend_from_slice(hex.as_bytes());
     bytes.extend_from_slice(&[0; 2 + 12 + 4 + 2 + 1 + 4 + 1 + 8]);
     bytes.extend_from_slice(&i32::try_from(compressed.len()).unwrap().to_le_bytes());
-    bytes.extend_from_slice(&compressed);
+    bytes.extend_from_slice(compressed);
     bytes.push(9);
     bytes
 }
@@ -223,6 +248,132 @@ fn reports_missing_replay_with_path_and_io_cause() {
     assert!(context.starts_with("IoError [read]"));
     assert!(context.contains("отсутствующий реплей.osr"));
     assert!(!cause.is_empty());
+}
+
+#[test]
+fn inspect_reports_map_line_and_object_id() {
+    let map = TempFile::sized("ошибка объекта.osu", 0);
+    let replay = TempFile::sized("реплей.osr", 0);
+    let mut bytes = MAP_BYTES.to_vec();
+    let start = bytes.len() - b"0,0,10,1,0\r\n".len();
+    bytes[start] = b'?';
+    fs::write(&map.0, bytes).unwrap();
+
+    let error = inspect_error(&map.0, &replay.0);
+    assert!(
+        error.starts_with("InvalidHitObjectField [parse]"),
+        "{error}"
+    );
+    assert!(error.contains("ошибка объекта.osu"), "{error}");
+    assert!(error.contains("line=10 object_id=0"), "{error}");
+}
+
+#[test]
+fn inspect_reports_binary_field_offset() {
+    let map = TempFile::sized("карта.osu", 0);
+    let replay = TempFile::sized("усечённый реплей.osr", 0);
+    fs::write(&map.0, MAP_BYTES).unwrap();
+    fs::write(&replay.0, [0]).unwrap();
+
+    let error = inspect_error(&map.0, &replay.0);
+    assert!(error.starts_with("UnexpectedEof [parse]"), "{error}");
+    assert!(error.contains("усечённый реплей.osr"), "{error}");
+    assert!(error.contains("byte_offset=1"), "{error}");
+}
+
+#[test]
+fn inspect_reports_replay_limits_with_binary_offset_and_record_index() {
+    let map = TempFile::sized("карта.osu", 0);
+    let replay = TempFile::sized("лимит реплея.osr", 0);
+    fs::write(&map.0, MAP_BYTES).unwrap();
+
+    let mut lzma_header = [0xff; 13];
+    lzma_header[0] = 93;
+    lzma_header[1..5].copy_from_slice(&67_108_865_u32.to_le_bytes());
+    let bytes = replay_with_payload(MAP_BYTES, &lzma_header);
+    fs::write(&replay.0, bytes).unwrap();
+    let error = inspect_error(&map.0, &replay.0);
+    assert!(error.starts_with("ResourceLimit [parse]"), "{error}");
+    assert!(error.contains("лимит реплея.osr"), "{error}");
+    assert!(error.contains("byte_offset=78"), "{error}");
+    assert!(
+        error.contains("LZMA dictionary, limit=67108864, observed=67108865"),
+        "{error}"
+    );
+
+    let compressed =
+        include_bytes!("../../rosea-core/tests/fixtures/replay-records-over-limit.lzma");
+    fs::write(&replay.0, replay_with_payload(MAP_BYTES, compressed)).unwrap();
+    let error = inspect_error(&map.0, &replay.0);
+    assert!(error.starts_with("ResourceLimit [parse]"), "{error}");
+    assert!(error.contains("лимит реплея.osr"), "{error}");
+    assert!(error.contains("record_index=1000000"), "{error}");
+    assert!(
+        error.contains("replay records, limit=1000000, observed=1000001"),
+        "{error}"
+    );
+}
+
+#[test]
+fn inspect_reports_normalization_error_with_original_record_index() {
+    let map = TempFile::sized("карта.osu", 0);
+    let replay = TempFile::sized("переполнение времени.osr", 0);
+    fs::write(&map.0, MAP_BYTES).unwrap();
+    // Записи с дельтами i64::MAX и 1 дают переполнение при накоплении времени.
+    let compressed = [
+        93, 0, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 28, 140, 130, 142, 0, 178, 94,
+        135, 151, 226, 193, 115, 250, 91, 126, 250, 192, 241, 83, 131, 53, 9, 22, 22, 83, 11, 66,
+        30, 123, 255, 254, 176, 24, 0,
+    ];
+    fs::write(&replay.0, replay_with_payload(MAP_BYTES, &compressed)).unwrap();
+
+    let error = inspect_error(&map.0, &replay.0);
+    assert!(
+        error.starts_with("ReplayTimeOverflow [normalize]"),
+        "{error}"
+    );
+    assert!(error.contains("переполнение времени.osr"), "{error}");
+    assert!(error.contains("record_index=1"), "{error}");
+
+    // Дельты 0 и 86400001 пересекают предел нормализованного времени.
+    let compressed = [
+        93, 0, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 31, 31, 4, 88, 56, 16, 64,
+        25, 43, 182, 100, 97, 54, 158, 63, 255, 255, 224, 29, 128, 0,
+    ];
+    fs::write(&replay.0, replay_with_payload(MAP_BYTES, &compressed)).unwrap();
+    let error = inspect_error(&map.0, &replay.0);
+    assert!(error.starts_with("ResourceLimit [normalize]"), "{error}");
+    assert!(error.contains("переполнение времени.osr"), "{error}");
+    assert!(error.contains("record_index=1"), "{error}");
+    assert!(
+        error.contains("replay time ms, limit=86400000, observed=86400001"),
+        "{error}"
+    );
+}
+
+#[test]
+fn inspect_reports_when_normalization_removes_all_records() {
+    let map = TempFile::sized("карта.osu", 0);
+    let replay = TempFile::sized("служебная запись.osr", 0);
+    fs::write(&map.0, MAP_BYTES).unwrap();
+    // Единственная запись «1|256|-500|0,» удаляется как служебная.
+    let compressed = [
+        93, 0, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 159, 2, 67, 81, 3, 180, 0,
+        85, 86, 145, 45, 200, 215, 80, 123, 35, 255, 255, 217, 81, 0, 0,
+    ];
+    fs::write(&replay.0, replay_with_payload(MAP_BYTES, &compressed)).unwrap();
+
+    let error = inspect_error(&map.0, &replay.0);
+    assert!(error.starts_with("NoReplayData [normalize]"), "{error}");
+    assert!(error.contains("служебная запись.osr"), "{error}");
+    assert!(!error.contains("byte_offset="), "{error}");
+}
+
+fn inspect_error(map: &Path, replay: &Path) -> String {
+    let out = inspect(map, replay);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    String::from_utf8(out.stderr).unwrap()
 }
 
 fn inspect(map: &Path, replay: &Path) -> Output {

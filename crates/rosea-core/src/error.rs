@@ -66,6 +66,52 @@ pub enum SourceLocation {
     Object(ObjectId),
 }
 
+/// Причина ошибки с позицией, известной на стадии разбора или нормализации.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ErrorWithLocation {
+    pub error: RoseaError,
+    pub location: SourceLocation,
+}
+
+impl ErrorWithLocation {
+    pub(crate) fn resource_limit(
+        resource: &'static str,
+        limit: u64,
+        observed: u64,
+        location: SourceLocation,
+    ) -> Self {
+        Self {
+            error: RoseaError::ResourceLimit {
+                resource,
+                limit,
+                observed,
+            },
+            location,
+        }
+    }
+}
+
+impl From<RoseaError> for ErrorWithLocation {
+    fn from(error: RoseaError) -> Self {
+        Self {
+            location: error.source_location(),
+            error,
+        }
+    }
+}
+
+impl fmt::Display for ErrorWithLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for ErrorWithLocation {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// Наблюдаемая величина ресурса карты, включая дробные координаты.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct MapResourceAmount(u64);

@@ -1,4 +1,4 @@
-use crate::error::RoseaError;
+use crate::error::{ErrorWithLocation, RoseaError, SourceLocation};
 use crate::model::{
     ExpectedStats, Parsed, ParsedReplay, Point, ReplayInput, ReplayMeta, ReplayRecord, Warning,
 };
@@ -7,7 +7,7 @@ use std::io::{self, Write};
 const LZMA_DICTIONARY_LIMIT: usize = 64 * 1024 * 1024;
 const REPLAY_OUTPUT_LIMIT: usize = 256 * 1024 * 1024;
 
-fn read_records(bytes: &[u8], offset: usize) -> Result<ReplayInput, RoseaError> {
+fn read_records(bytes: &[u8], offset: usize) -> Result<ReplayInput, ErrorWithLocation> {
     let text = std::str::from_utf8(bytes).map_err(|error| {
         let index = bytes[..error.valid_up_to()]
             .iter()
@@ -18,7 +18,7 @@ fn read_records(bytes: &[u8], offset: usize) -> Result<ReplayInput, RoseaError> 
         }
     })?;
     if text.is_empty() {
-        return Err(RoseaError::NoReplayData { offset });
+        return Err(RoseaError::NoReplayData { offset }.into());
     }
     let text = text.strip_suffix(',').unwrap_or(text);
     let mut records = Vec::new();
@@ -29,7 +29,7 @@ fn read_records(bytes: &[u8], offset: usize) -> Result<ReplayInput, RoseaError> 
             limit: 1_000_000,
             observed: index as u64,
         })?;
-        let invalid = || RoseaError::InvalidReplayRecord { index };
+        let invalid = || ErrorWithLocation::from(RoseaError::InvalidReplayRecord { index });
         if seed.is_some() {
             return Err(invalid());
         }
@@ -48,7 +48,7 @@ fn read_records(bytes: &[u8], offset: usize) -> Result<ReplayInput, RoseaError> 
                     .parse::<f64>()
                     .is_ok_and(|value| value.is_finite() && value.fract() != 0.0)
                 {
-                    return Err(RoseaError::UnsupportedReplayFeature { index });
+                    return Err(RoseaError::UnsupportedReplayFeature { index }.into());
                 }
                 return Err(invalid());
             }
@@ -63,11 +63,12 @@ fn read_records(bytes: &[u8], offset: usize) -> Result<ReplayInput, RoseaError> 
         } else {
             let keys = keys.parse::<u32>().map_err(|_| invalid())?;
             if records.len() == 1_000_000 {
-                return Err(RoseaError::ResourceLimit {
-                    resource: "replay records",
-                    limit: 1_000_000,
-                    observed: 1_000_001,
-                });
+                return Err(ErrorWithLocation::resource_limit(
+                    "replay records",
+                    1_000_000,
+                    1_000_001,
+                    SourceLocation::ReplayRecord(index),
+                ));
             }
             records.push(ReplayRecord {
                 index,
@@ -78,19 +79,24 @@ fn read_records(bytes: &[u8], offset: usize) -> Result<ReplayInput, RoseaError> 
         }
     }
     if records.is_empty() {
-        return Err(RoseaError::NoReplayData { offset });
+        return Err(RoseaError::NoReplayData { offset }.into());
     }
     Ok(ReplayInput { records, seed })
 }
 
 pub fn osr(bytes: &[u8]) -> Result<Parsed<ParsedReplay>, RoseaError> {
+    osr_with_location(bytes).map_err(|error| error.error)
+}
+
+/// Разобрать реплей с исходной позицией ошибки, в том числе при превышении лимита.
+pub fn osr_with_location(bytes: &[u8]) -> Result<Parsed<ParsedReplay>, ErrorWithLocation> {
     parse_with_output_limit(bytes, REPLAY_OUTPUT_LIMIT)
 }
 
 fn parse_with_output_limit(
     bytes: &[u8],
     output_limit: usize,
-) -> Result<Parsed<ParsedReplay>, RoseaError> {
+) -> Result<Parsed<ParsedReplay>, ErrorWithLocation> {
     let header = read_header(bytes)?;
     let offset = bytes.len() - header.trailer.len() - header.compressed_data.len();
     let data = decompress_replay(header.compressed_data, offset, output_limit)?;
@@ -158,25 +164,27 @@ fn decompress_replay(
     data: &[u8],
     offset: usize,
     output_limit: usize,
-) -> Result<Vec<u8>, RoseaError> {
+) -> Result<Vec<u8>, ErrorWithLocation> {
     let header = data.get(..13).ok_or(RoseaError::InvalidLzma { offset })?;
     let dictionary = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as u64;
     if dictionary > LZMA_DICTIONARY_LIMIT as u64 {
-        return Err(RoseaError::ResourceLimit {
-            resource: "LZMA dictionary",
-            limit: LZMA_DICTIONARY_LIMIT as u64,
-            observed: dictionary,
-        });
+        return Err(ErrorWithLocation::resource_limit(
+            "LZMA dictionary",
+            LZMA_DICTIONARY_LIMIT as u64,
+            dictionary,
+            SourceLocation::ByteOffset(offset as u64 + 1),
+        ));
     }
     let size = u64::from_le_bytes([
         header[5], header[6], header[7], header[8], header[9], header[10], header[11], header[12],
     ]);
     if size != u64::MAX && size > output_limit as u64 {
-        return Err(RoseaError::ResourceLimit {
-            resource: "decompressed replay",
-            limit: output_limit as u64,
-            observed: size,
-        });
+        return Err(ErrorWithLocation::resource_limit(
+            "decompressed replay",
+            output_limit as u64,
+            size,
+            SourceLocation::ByteOffset(offset as u64 + 5),
+        ));
     }
     let mut output = LimitedOutput {
         bytes: Vec::new(),
@@ -190,15 +198,16 @@ fn decompress_replay(
     };
     let result = lzma_rs::lzma_decompress_with_options(&mut &data[..], &mut output, &options);
     if let Some(observed) = output.exceeded {
-        return Err(RoseaError::ResourceLimit {
-            resource: "decompressed replay",
-            limit: output_limit as u64,
+        return Err(ErrorWithLocation::resource_limit(
+            "decompressed replay",
+            output_limit as u64,
             observed,
-        });
+            SourceLocation::ByteOffset(offset as u64),
+        ));
     }
     result.map_err(|_| RoseaError::InvalidLzma { offset })?;
     if output.bytes.is_empty() {
-        return Err(RoseaError::NoReplayData { offset });
+        return Err(RoseaError::NoReplayData { offset }.into());
     }
     Ok(output.bytes)
 }
@@ -222,7 +231,7 @@ struct ReplayHeader<'a> {
     trailer: &'a [u8],
 }
 
-fn read_header(bytes: &[u8]) -> Result<ReplayHeader<'_>, RoseaError> {
+fn read_header(bytes: &[u8]) -> Result<ReplayHeader<'_>, ErrorWithLocation> {
     let mut cursor = Cursor::new(bytes);
     let mode = cursor.read_u8()?;
     let game_version = cursor.read_i32()?;
@@ -245,7 +254,8 @@ fn read_header(bytes: &[u8]) -> Result<ReplayHeader<'_>, RoseaError> {
     if length == -1 || length == 0 {
         return Err(RoseaError::NoReplayData {
             offset: length_offset,
-        });
+        }
+        .into());
     }
     let length = usize::try_from(length).map_err(|_| RoseaError::InvalidLength {
         offset: length_offset,
@@ -263,13 +273,14 @@ fn read_header(bytes: &[u8]) -> Result<ReplayHeader<'_>, RoseaError> {
         })?;
     let trailer = &bytes[end..];
     if mode != 0 {
-        return Err(RoseaError::UnsupportedReplayMode { mode, offset: 0 });
+        return Err(RoseaError::UnsupportedReplayMode { mode, offset: 0 }.into());
     }
     if mods != 0 {
         return Err(RoseaError::UnsupportedMods {
             mods,
             offset: mods_offset,
-        });
+        }
+        .into());
     }
     Ok(ReplayHeader {
         mode,
@@ -345,19 +356,21 @@ impl<'a> Cursor<'a> {
         Err(RoseaError::InvalidLength { offset: start })
     }
 
-    fn read_string(&mut self) -> Result<&'a str, RoseaError> {
+    fn read_string(&mut self) -> Result<&'a str, ErrorWithLocation> {
         let start = self.offset;
         match self.read_u8()? {
             0 => Ok(""),
             0x0b => {
+                let length_offset = self.offset;
                 let length = self.read_uleb128()?;
                 const MAX_STRING_BYTES: usize = 1024 * 1024;
                 if length > MAX_STRING_BYTES {
-                    return Err(RoseaError::ResourceLimit {
-                        resource: "binary string bytes",
-                        limit: MAX_STRING_BYTES as u64,
-                        observed: length as u64,
-                    });
+                    return Err(ErrorWithLocation::resource_limit(
+                        "binary string bytes",
+                        MAX_STRING_BYTES as u64,
+                        length as u64,
+                        SourceLocation::ByteOffset(length_offset as u64),
+                    ));
                 }
                 let start = self.offset;
                 let end = start
@@ -372,7 +385,7 @@ impl<'a> Cursor<'a> {
                 self.offset = end;
                 Ok(text)
             }
-            _ => Err(RoseaError::InvalidStringMarker { offset: start }),
+            _ => Err(RoseaError::InvalidStringMarker { offset: start }.into()),
         }
     }
 }
@@ -423,28 +436,28 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    read_records(text.as_bytes(), 50),
-                    Err(RoseaError::InvalidReplayRecord { .. })
+                    read_records(text.as_bytes(), 50).unwrap_err().error,
+                    RoseaError::InvalidReplayRecord { .. }
                 ),
                 "{text}"
             );
         }
         assert_eq!(
             read_records(b"1.5|0|0|0", 50),
-            Err(RoseaError::UnsupportedReplayFeature { index: 0 })
+            Err(RoseaError::UnsupportedReplayFeature { index: 0 }.into())
         );
         assert_eq!(
             read_records(b"1|0|0|0,\xff", 50),
-            Err(RoseaError::InvalidReplayRecord { index: 1 })
+            Err(RoseaError::InvalidReplayRecord { index: 1 }.into())
         );
-        assert!(matches!(
+        assert_eq!(
             read_records(b"", 50),
-            Err(RoseaError::NoReplayData { offset: 50 })
-        ));
-        assert!(matches!(
+            Err(RoseaError::NoReplayData { offset: 50 }.into())
+        );
+        assert_eq!(
             read_records(b"-12345|0|0|1", 50),
-            Err(RoseaError::NoReplayData { offset: 50 })
-        ));
+            Err(RoseaError::NoReplayData { offset: 50 }.into())
+        );
     }
 
     #[test]
@@ -466,30 +479,36 @@ mod tests {
         assert_eq!(parsed.value.input.records[0].keys, 5);
         assert_eq!(
             decompress_replay(&data[..12], 50, REPLAY_OUTPUT_LIMIT),
-            Err(RoseaError::InvalidLzma { offset: 50 })
+            Err(RoseaError::InvalidLzma { offset: 50 }.into())
         );
         assert_eq!(
             decompress_replay(&data[..16], 50, REPLAY_OUTPUT_LIMIT),
-            Err(RoseaError::InvalidLzma { offset: 50 })
+            Err(RoseaError::InvalidLzma { offset: 50 }.into())
         );
         let mut bad = data;
         bad[1..5].copy_from_slice(&(LZMA_DICTIONARY_LIMIT as u32 + 1).to_le_bytes());
-        assert!(matches!(
-            decompress_replay(&bad, 50, REPLAY_OUTPUT_LIMIT),
-            Err(RoseaError::ResourceLimit {
+        let error = decompress_replay(&bad, 50, REPLAY_OUTPUT_LIMIT).unwrap_err();
+        assert_eq!(error.location, SourceLocation::ByteOffset(51));
+        assert_eq!(
+            error.error,
+            RoseaError::ResourceLimit {
                 resource: "LZMA dictionary",
-                ..
-            })
-        ));
+                limit: LZMA_DICTIONARY_LIMIT as u64,
+                observed: LZMA_DICTIONARY_LIMIT as u64 + 1,
+            }
+        );
         let mut bad = data;
         bad[5..13].copy_from_slice(&(REPLAY_OUTPUT_LIMIT as u64 + 1).to_le_bytes());
-        assert!(matches!(
-            decompress_replay(&bad, 50, REPLAY_OUTPUT_LIMIT),
-            Err(RoseaError::ResourceLimit {
+        let error = decompress_replay(&bad, 50, REPLAY_OUTPUT_LIMIT).unwrap_err();
+        assert_eq!(error.location, SourceLocation::ByteOffset(55));
+        assert_eq!(
+            error.error,
+            RoseaError::ResourceLimit {
                 resource: "decompressed replay",
-                ..
-            })
-        ));
+                limit: REPLAY_OUTPUT_LIMIT as u64,
+                observed: REPLAY_OUTPUT_LIMIT as u64 + 1,
+            }
+        );
     }
 
     #[test]
@@ -497,8 +516,13 @@ mod tests {
         // Размер LZMA не объявлен. Первый блок словаря помещается, второй превышает предел.
         let data = include_bytes!("../../tests/fixtures/replay-records-at-limit.lzma");
         let replay = example_replay_with_payload(data);
+        let error = parse_with_output_limit(&replay, 8191).unwrap_err();
         assert_eq!(
-            parse_with_output_limit(&replay, 8191).unwrap_err(),
+            error.location,
+            SourceLocation::ByteOffset((replay.len() - data.len()) as u64)
+        );
+        assert_eq!(
+            error.error,
             RoseaError::ResourceLimit {
                 resource: "decompressed replay",
                 limit: 8191,
@@ -564,15 +588,15 @@ mod tests {
         let bytes = example_replay();
         for end in 0..bytes.len() {
             assert!(matches!(
-                read_header(&bytes[..end]),
-                Err(RoseaError::UnexpectedEof { .. })
+                read_header(&bytes[..end]).unwrap_err().error,
+                RoseaError::UnexpectedEof { .. }
             ));
         }
         let mut changed = bytes.clone();
         changed[0] = 1;
         assert_eq!(
             read_header(&changed),
-            Err(RoseaError::UnsupportedReplayMode { mode: 1, offset: 0 })
+            Err(RoseaError::UnsupportedReplayMode { mode: 1, offset: 0 }.into())
         );
         let mut changed = bytes.clone();
         let mods_offset = 5 + 9 + 12 + 4 + 2 + 1;
@@ -582,7 +606,8 @@ mod tests {
             Err(RoseaError::UnsupportedMods {
                 mods: 8,
                 offset: mods_offset
-            })
+            }
+            .into())
         );
         let length_offset = bytes.len() - 7;
         for length in [-1_i32, 0, -2] {
@@ -597,7 +622,7 @@ mod tests {
                     offset: length_offset,
                 }
             };
-            assert_eq!(read_header(&changed), Err(expected));
+            assert_eq!(read_header(&changed), Err(expected.into()));
         }
     }
 
@@ -662,19 +687,19 @@ mod tests {
         assert_eq!(cursor.read_string(), Ok("те"));
         assert_eq!(
             Cursor::new(&[1]).read_string(),
-            Err(RoseaError::InvalidStringMarker { offset: 0 })
+            Err(RoseaError::InvalidStringMarker { offset: 0 }.into())
         );
         assert_eq!(
             Cursor::new(&[0x0b, 2, 0xff, 0xff]).read_string(),
-            Err(RoseaError::InvalidReplayString { offset: 2 })
+            Err(RoseaError::InvalidReplayString { offset: 2 }.into())
         );
         assert_eq!(
             Cursor::new(&[0x0b, 2, 0x61]).read_string(),
-            Err(RoseaError::UnexpectedEof { offset: 2 })
+            Err(RoseaError::UnexpectedEof { offset: 2 }.into())
         );
         assert_eq!(
             Cursor::new(&[0x0b, 0x80]).read_string(),
-            Err(RoseaError::UnexpectedEof { offset: 2 })
+            Err(RoseaError::UnexpectedEof { offset: 2 }.into())
         );
     }
 
@@ -686,13 +711,17 @@ mod tests {
             Cursor::new(&bytes).read_string().map(str::len),
             Ok(1024 * 1024)
         );
+        let error = Cursor::new(&[0x0b, 0x81, 0x80, 0x40])
+            .read_string()
+            .unwrap_err();
+        assert_eq!(error.location, SourceLocation::ByteOffset(1));
         assert_eq!(
-            Cursor::new(&[0x0b, 0x81, 0x80, 0x40]).read_string(),
-            Err(RoseaError::ResourceLimit {
+            error.error,
+            RoseaError::ResourceLimit {
                 resource: "binary string bytes",
                 limit: 1024 * 1024,
                 observed: 1024 * 1024 + 1,
-            })
+            }
         );
     }
 }

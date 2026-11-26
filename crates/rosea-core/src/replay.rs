@@ -1,6 +1,6 @@
 //! Нормализация времён и порядка записей реплея.
 
-use crate::error::RoseaError;
+use crate::error::{ErrorWithLocation, RoseaError, SourceLocation};
 use crate::model::{Parsed, Point, ReplayChange, ReplayInput, TimeMs, Warning};
 use std::ops::Range;
 
@@ -117,6 +117,13 @@ fn change_time(record: &mut TimedRecord, new_ms: i64, changes: &mut Vec<ReplayCh
 }
 
 pub fn normalize(input: ReplayInput) -> Result<Parsed<ReplayTimeline>, RoseaError> {
+    normalize_with_location(input).map_err(|error| error.error)
+}
+
+/// Нормализовать ввод с исходным индексом записи при превышении лимита времени.
+pub fn normalize_with_location(
+    input: ReplayInput,
+) -> Result<Parsed<ReplayTimeline>, ErrorWithLocation> {
     let mut time = 0_i64;
     let mut records = Vec::with_capacity(input.records.len());
     let mut changes = Vec::new();
@@ -172,17 +179,21 @@ pub fn normalize(input: ReplayInput) -> Result<Parsed<ReplayTimeline>, RoseaErro
             });
         } else {
             if record.time_ms.unsigned_abs() > 86_400_000 {
-                return Err(RoseaError::ResourceLimit {
-                    resource: "replay time ms",
-                    limit: 86_400_000,
-                    observed: record.time_ms.unsigned_abs(),
-                });
+                return Err(ErrorWithLocation::resource_limit(
+                    "replay time ms",
+                    86_400_000,
+                    record.time_ms.unsigned_abs(),
+                    SourceLocation::ReplayRecord(record.index),
+                ));
             }
             kept.push(record);
         }
     }
     if kept.is_empty() {
-        return Err(RoseaError::NoReplayData { offset: 0 });
+        return Err(ErrorWithLocation {
+            error: RoseaError::NoReplayData { offset: 0 },
+            location: SourceLocation::None,
+        });
     }
     let mut groups: Vec<Range<usize>> = Vec::new();
     for (index, record) in kept.iter().enumerate() {
