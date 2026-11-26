@@ -34,7 +34,7 @@ pub fn osu_metadata(bytes: &[u8]) -> Result<Metadata, RoseaError> {
             return Err(RoseaError::MapResourceLimit {
                 resource: "osu_line_bytes",
                 limit: MAX_LINE_BYTES as u64,
-                observed: raw_line.len() as u64,
+                observed: (raw_line.len() as u64).into(),
                 line: index + 1,
                 object_id: None,
             });

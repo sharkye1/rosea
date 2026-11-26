@@ -1,10 +1,9 @@
 //! Геометрия L/B/P: нормализация, аппроксимация кривых и выборка по длине пути.
 
 use crate::error::RoseaError;
-use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point};
+use crate::model::{CurveKind, HitObject, HitObjectKind, MAX_MAP_COORDINATE, ObjectId, Point};
 
 const MAX_CONTROLS: usize = 4096;
-const MAX_COORDINATE: f32 = 1_000_000.0;
 const MAX_VERTICES: usize = 2_000_000;
 const MAX_INTERPOLATIONS: usize = 20_000_000;
 const MAX_DEPTH: u32 = 32;
@@ -188,10 +187,10 @@ pub(super) fn path_with_budget(
     }
     // Проверяем исходные координаты до clamp/trunc, чтобы нормализация не скрыла неверный вход.
     for point in controls {
-        if !point.x.is_finite() || point.x.abs() > MAX_COORDINATE {
+        if !point.x.is_finite() || point.x.abs() > MAX_MAP_COORDINATE {
             return Err(invalid("x"));
         }
-        if !point.y.is_finite() || point.y.abs() > MAX_COORDINATE {
+        if !point.y.is_finite() || point.y.abs() > MAX_MAP_COORDINATE {
             return Err(invalid("y"));
         }
     }

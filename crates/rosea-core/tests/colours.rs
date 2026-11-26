@@ -231,7 +231,7 @@ fn enforces_line_length_limits() {
         Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: 1_048_576,
-            observed: 1_048_577,
+            observed: 1_048_577_u64.into(),
             line: 3,
             object_id: None,
         })

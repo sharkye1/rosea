@@ -418,7 +418,7 @@ fn bounds_the_object_scan_used_for_slider_settings() {
         Err(RoseaError::MapResourceLimit {
             resource: "hit_objects",
             limit: 100_000,
-            observed: 100_001,
+            observed: 100_001_u64.into(),
             line: text.lines().count(),
             object_id: Some(ObjectId(100000)),
         })

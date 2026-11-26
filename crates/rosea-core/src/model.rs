@@ -2,6 +2,8 @@
 
 use crate::error::RoseaError;
 
+pub(crate) const MAX_MAP_COORDINATE: f32 = 1_000_000.0;
+
 /// Конечное время в миллисекундах с нормализованным нулём.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct TimeMs(f64);

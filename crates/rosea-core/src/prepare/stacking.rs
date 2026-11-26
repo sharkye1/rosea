@@ -1,7 +1,9 @@
 //! Stacking v14 по несмещённым началам и концам; геометрия путей остаётся относительной.
 
 use crate::error::RoseaError;
-use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point, TimingPoint};
+use crate::model::{
+    CurveKind, HitObject, HitObjectKind, MAX_MAP_COORDINATE, ObjectId, Point, TimingPoint,
+};
 use crate::parse::Difficulty;
 
 use super::visibility::scale_and_preempt;
@@ -146,7 +148,7 @@ pub fn stack_objects(
             });
         }
         for (field, value) in [("x", object.position.x), ("y", object.position.y)] {
-            if !value.is_finite() || value.abs() > 1_000_000.0 {
+            if !value.is_finite() || value.abs() > MAX_MAP_COORDINATE {
                 return Err(RoseaError::InvalidHitObjectField {
                     field,
                     line: object.line,

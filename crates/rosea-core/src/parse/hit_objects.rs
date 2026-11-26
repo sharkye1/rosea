@@ -1,7 +1,7 @@
 //! Чтение кругов, L/B/P-слайдеров и спиннеров. Построение пути и времён относится к prepare.
 
-use crate::error::RoseaError;
-use crate::model::{CurveKind, HitObject, HitObjectKind, ObjectId, Point};
+use crate::error::{MapResourceAmount, RoseaError};
+use crate::model::{CurveKind, HitObject, HitObjectKind, MAX_MAP_COORDINATE, ObjectId, Point};
 
 use super::{osu::osu_text, osu_mode};
 
@@ -29,7 +29,7 @@ pub(super) fn parse_objects(
             return Err(RoseaError::MapResourceLimit {
                 resource: "osu_line_bytes",
                 limit: MAX_LINE_BYTES as u64,
-                observed: raw_line.len() as u64,
+                observed: (raw_line.len() as u64).into(),
                 line: index + 1,
                 object_id: None,
             });
@@ -49,7 +49,7 @@ pub(super) fn parse_objects(
             return Err(RoseaError::MapResourceLimit {
                 resource: "hit_objects",
                 limit: MAX_OBJECTS as u64,
-                observed: objects.len() as u64 + 1,
+                observed: (objects.len() as u64 + 1).into(),
                 line: index + 1,
                 object_id: Some(ObjectId(MAX_OBJECTS as u32)),
             });
@@ -119,14 +119,10 @@ fn parse_object(
         .unwrap_or("")
         .parse()
         .map_err(|_| invalid("hitSound"))?;
-    for (field, finite) in [
-        ("x", x.is_finite()),
-        ("y", y.is_finite()),
-        ("time", start_time.is_finite()),
-    ] {
-        if !finite {
-            return Err(invalid(field));
-        }
+    validate_coordinate(x, "x", line_number, id)?;
+    validate_coordinate(y, "y", line_number, id)?;
+    if !start_time.is_finite() {
+        return Err(invalid("time"));
     }
     let position = Point { x, y };
     let tail = fields.next().unwrap_or("");
@@ -148,6 +144,32 @@ fn parse_object(
         hit_sound,
         kind,
     })
+}
+
+fn validate_coordinate(
+    value: f32,
+    field: &'static str,
+    line: usize,
+    id: ObjectId,
+) -> Result<(), RoseaError> {
+    if !value.is_finite() {
+        return Err(RoseaError::InvalidHitObjectField {
+            field,
+            line,
+            object_id: id,
+        });
+    }
+    let magnitude = value.abs();
+    if magnitude > MAX_MAP_COORDINATE {
+        return Err(RoseaError::MapResourceLimit {
+            resource: "map_coordinate_abs",
+            limit: MAX_MAP_COORDINATE as u64,
+            observed: MapResourceAmount::from_coordinate(magnitude),
+            line,
+            object_id: Some(id),
+        });
+    }
+    Ok(())
 }
 
 fn parse_spinner(
@@ -224,7 +246,7 @@ fn parse_slider(
         return Err(RoseaError::MapResourceLimit {
             resource: "slider_spans",
             limit: u64::from(MAX_SPANS),
-            observed: u64::from(spans),
+            observed: u64::from(spans).into(),
             line,
             object_id: Some(id),
         });
@@ -251,7 +273,7 @@ fn parse_slider(
             return Err(RoseaError::MapResourceLimit {
                 resource: "slider_control_points",
                 limit: MAX_CONTROLS as u64,
-                observed: controls.len() as u64 + 1,
+                observed: (controls.len() as u64 + 1).into(),
                 line,
                 object_id: Some(id),
             });
@@ -261,9 +283,8 @@ fn parse_slider(
             .ok_or_else(|| invalid("curvePoints"))?;
         let x: f32 = x.trim().parse().map_err(|_| invalid("curvePoints"))?;
         let y: f32 = y.trim().parse().map_err(|_| invalid("curvePoints"))?;
-        if !x.is_finite() || !y.is_finite() {
-            return Err(invalid("curvePoints"));
-        }
+        validate_coordinate(x, "curvePoints", line, id)?;
+        validate_coordinate(y, "curvePoints", line, id)?;
         controls.push(Point { x, y });
     }
     if controls.len() < 2 {

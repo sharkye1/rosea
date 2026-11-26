@@ -66,6 +66,38 @@ pub enum SourceLocation {
     Object(ObjectId),
 }
 
+/// Наблюдаемая величина ресурса карты, включая дробные координаты.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct MapResourceAmount(u64);
+
+impl MapResourceAmount {
+    pub(crate) fn from_coordinate(magnitude: f32) -> Self {
+        Self(f64::from(magnitude).to_bits())
+    }
+
+    pub fn get(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+}
+
+impl From<u64> for MapResourceAmount {
+    fn from(count: u64) -> Self {
+        Self((count as f64).to_bits())
+    }
+}
+
+impl fmt::Debug for MapResourceAmount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.get(), f)
+    }
+}
+
+impl fmt::Display for MapResourceAmount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.get(), f)
+    }
+}
+
 // Вызывающий код может различать причины через match, без разбора сообщений Display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoseaError {
@@ -196,7 +228,7 @@ pub enum RoseaError {
     MapResourceLimit {
         resource: &'static str,
         limit: u64,
-        observed: u64,
+        observed: MapResourceAmount,
         line: usize,
         object_id: Option<ObjectId>,
     },

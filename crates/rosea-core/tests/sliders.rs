@@ -308,7 +308,7 @@ fn enforces_control_and_span_limits_before_growing_buffers() {
         Err(RoseaError::MapResourceLimit {
             resource: "slider_control_points",
             limit: 4096,
-            observed: 4097,
+            observed: 4097_u64.into(),
             line: 3,
             object_id: Some(ObjectId(0)),
         })
@@ -319,7 +319,7 @@ fn enforces_control_and_span_limits_before_growing_buffers() {
         Err(RoseaError::MapResourceLimit {
             resource: "slider_spans",
             limit: 10000,
-            observed: 10001,
+            observed: 10001_u64.into(),
             line: 3,
             object_id: Some(ObjectId(0)),
         })
@@ -338,7 +338,7 @@ fn enforces_a_shared_limit_for_mixed_objects() {
         Err(RoseaError::MapResourceLimit {
             resource: "hit_objects",
             limit: 100_000,
-            observed: 100_001,
+            observed: 100_001_u64.into(),
             line: 100003,
             object_id: Some(ObjectId(100000)),
         })

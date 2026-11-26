@@ -281,7 +281,7 @@ fn enforces_timing_point_and_line_limits() {
         Err(RoseaError::MapResourceLimit {
             resource: "timing_points",
             limit: 100_000,
-            observed: 100_001,
+            observed: 100_001_u64.into(),
             line: 100003,
             object_id: None,
         })
@@ -298,7 +298,7 @@ fn enforces_timing_point_and_line_limits() {
         Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: 1_048_576,
-            observed: 1_048_577,
+            observed: 1_048_577_u64.into(),
             line: 3,
             object_id: None,
         })

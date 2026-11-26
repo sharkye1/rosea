@@ -206,7 +206,7 @@ pub fn osu_stack_leniency(bytes: &[u8]) -> Result<f32, RoseaError> {
             return Err(RoseaError::MapResourceLimit {
                 resource: "osu_line_bytes",
                 limit: MAX_LINE_BYTES as u64,
-                observed: raw_line.len() as u64,
+                observed: (raw_line.len() as u64).into(),
                 line: index + 1,
                 object_id: None,
             });
@@ -275,7 +275,7 @@ pub fn osu_difficulty(bytes: &[u8]) -> Result<Difficulty, RoseaError> {
                 return Err(RoseaError::MapResourceLimit {
                     resource: "hit_objects",
                     limit: 100_000,
-                    observed: u64::from(object_index) + 1,
+                    observed: (u64::from(object_index) + 1).into(),
                     line: index + 1,
                     object_id: Some(ObjectId(object_index)),
                 });

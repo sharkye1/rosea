@@ -214,7 +214,7 @@ fn enforces_break_limit_and_line_limit() {
         Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: 1024 * 1024,
-            observed: long_line.len() as u64,
+            observed: (long_line.len() as u64).into(),
             line: 5,
             object_id: None,
         })
@@ -229,7 +229,7 @@ fn enforces_break_limit_and_line_limit() {
         Err(RoseaError::MapResourceLimit {
             resource: "breaks",
             limit: 100_000,
-            observed: 100_001,
+            observed: 100_001_u64.into(),
             line: 100005,
             object_id: None,
         })

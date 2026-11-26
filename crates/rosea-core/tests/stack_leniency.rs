@@ -118,7 +118,7 @@ fn enforces_the_line_limit_before_trimming_whitespace() {
         Err(RoseaError::MapResourceLimit {
             resource: "osu_line_bytes",
             limit: LIMIT as u64,
-            observed: LIMIT as u64 + 1,
+            observed: (LIMIT as u64 + 1).into(),
             line: 3,
             object_id: None,
         })

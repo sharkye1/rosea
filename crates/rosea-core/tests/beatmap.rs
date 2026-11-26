@@ -139,3 +139,47 @@ fn exposes_codes_and_source_locations_without_parsing_messages() {
         "UnsupportedHitObject"
     );
 }
+
+#[test]
+fn enforces_original_coordinate_bounds_in_the_public_parser() {
+    let prefix = "osu file format v14\n[Difficulty]\nCircleSize:4\nOverallDifficulty:5\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[HitObjects]\n";
+    let map = format!("{prefix}1000000,-1000000,0,1,0\n0,0,1,2,0,L|-1000000:1000000,1,10\n");
+    assert_eq!(osu(map.as_bytes()).unwrap().value.object_count(), 2);
+
+    for object in [
+        "1000000.125,0,0,1,0",
+        "0,-1000000.125,0,1,0",
+        "0,0,0,2,0,L|-1000000.125:0,1,10",
+        "0,0,0,2,0,L|0:1000000.125,1,10",
+    ] {
+        let map = format!("{prefix}0,0,10,1,0\n{object}");
+        let error = osu(map.as_bytes()).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::ResourceLimit);
+        assert_eq!(
+            error.source_location(),
+            SourceLocation::Line {
+                line: 10,
+                object_id: Some(ObjectId(1))
+            }
+        );
+        assert!(matches!(error, RoseaError::MapResourceLimit {
+            resource: "map_coordinate_abs", limit: 1_000_000, observed, ..
+        } if observed.get() == 1_000_000.125));
+    }
+
+    for (object, field) in [
+        ("NaN,0,0,1,0", "x"),
+        ("0,0,inf,1,0", "time"),
+        ("0,0,0,2,0,L|0:-inf,1,10", "curvePoints"),
+    ] {
+        let map = format!("{prefix}{object}");
+        assert_eq!(
+            osu(map.as_bytes()).unwrap_err(),
+            RoseaError::InvalidHitObjectField {
+                field,
+                line: 9,
+                object_id: ObjectId(0)
+            }
+        );
+    }
+}
