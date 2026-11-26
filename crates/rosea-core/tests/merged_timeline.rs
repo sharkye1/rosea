@@ -480,6 +480,107 @@ fn mixed_map_journal_keeps_order_without_changing_stats() {
 }
 
 #[test]
+fn public_journal_records_all_event_kinds_in_phase_order() {
+    let bytes = b"osu file format v14\n\
+        [Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n\
+        [TimingPoints]\n0,500,4,0,0,100,1,0\n\
+        [HitObjects]\n256,192,1000,8,0,1100\n\
+        156,192,1100,1,0\n\
+        200,192,1000,2,0,L|180:192,2,20\n\
+        0,0,600,2,0,L|200:0,1,200";
+    let map = prepare_map(&osu(bytes).unwrap().value).unwrap();
+    let bytes = replay_from_records(
+        b"600|0|0|1,10|0|0|0,390|356|192|1,20|156|192|1,20|356|192|1,\
+          20|156|192|1,20|356|192|1,20|156|192|3,1|156|192|0,",
+    );
+    let input = normalize(osr(&bytes).unwrap().value.input).unwrap().value;
+    let mut sim = Simulator::new(&map, &input).unwrap();
+    let mut journal = Vec::new();
+    let mut emit = |event: &SimEvent| journal.push(*event);
+    for time in [1099.0, 1100.0, 1100.0] {
+        sim.advance_with(TimeMs::new(time).unwrap(), &mut emit)
+            .unwrap();
+    }
+    let stats = sim.finish_with(&mut emit).unwrap();
+    assert_eq!(
+        Simulator::new(&map, &input).unwrap().finish().unwrap(),
+        stats
+    );
+
+    use EventKind::{
+        Circle, SliderHead, SliderRepeat, SliderResult, SliderTail, SliderTick, SpinnerBonus,
+        SpinnerPoints, SpinnerResult,
+    };
+    use Judgement::{Great, Meh};
+    let event =
+        |time, id, kind, (part_index, part_hit), judgement, score_delta, (before, after)| {
+            SimEvent {
+                time: TimeMs::new(time).unwrap(),
+                object_id: ObjectId(id),
+                kind,
+                part_index,
+                part_hit,
+                judgement,
+                score_delta,
+                combo_before: before,
+                combo_after: after,
+            }
+        };
+    let no_part = (None, None);
+    assert_eq!(
+        journal,
+        [
+            event(600.0, 3, SliderHead, (None, Some(true)), None, 30, (0, 1)),
+            event(1040.0, 0, SpinnerPoints, no_part, None, 100, (1, 1)),
+            event(1080.0, 0, SpinnerPoints, no_part, None, 100, (1, 1)),
+            event(1100.0, 0, SpinnerBonus, no_part, None, 1100, (1, 1)),
+            event(1100.0, 1, Circle, no_part, Some(Great), 300, (1, 2)),
+            event(
+                1100.0,
+                3,
+                SliderTick,
+                (Some(0), Some(false)),
+                None,
+                0,
+                (2, 0)
+            ),
+            event(
+                1100.0,
+                2,
+                SliderRepeat,
+                (Some(0), Some(true)),
+                None,
+                30,
+                (0, 1)
+            ),
+            event(1100.0, 0, SpinnerResult, no_part, Some(Great), 300, (1, 2)),
+            event(1120.0, 2, SliderHead, (None, Some(false)), None, 0, (2, 0)),
+            event(
+                1164.0,
+                2,
+                SliderTail,
+                (Some(1), Some(false)),
+                None,
+                0,
+                (0, 0)
+            ),
+            event(1200.0, 2, SliderResult, no_part, Some(Meh), 50, (0, 0)),
+            event(
+                1564.0,
+                3,
+                SliderTail,
+                (Some(1), Some(false)),
+                None,
+                0,
+                (0, 0)
+            ),
+            event(1600.0, 3, SliderResult, no_part, Some(Meh), 50, (0, 0)),
+        ],
+    );
+    assert_eq!(stats.score, 2060);
+}
+
+#[test]
 fn mixed_map_stats_and_journal_are_independent_of_advance_frequency() {
     let map = prepare_map(&mixed_beatmap()).unwrap();
     let input = normalize(osr(&mixed_replay_bytes()).unwrap().value.input)
