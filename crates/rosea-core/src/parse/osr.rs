@@ -7,7 +7,7 @@ use std::io::{self, Write};
 const LZMA_DICTIONARY_LIMIT: usize = 64 * 1024 * 1024;
 const REPLAY_OUTPUT_LIMIT: usize = 256 * 1024 * 1024;
 
-fn read_records(bytes: &[u8]) -> Result<ReplayInput, RoseaError> {
+fn read_records(bytes: &[u8], offset: usize) -> Result<ReplayInput, RoseaError> {
     let text = std::str::from_utf8(bytes).map_err(|error| {
         let index = bytes[..error.valid_up_to()]
             .iter()
@@ -18,7 +18,7 @@ fn read_records(bytes: &[u8]) -> Result<ReplayInput, RoseaError> {
         }
     })?;
     if text.is_empty() {
-        return Err(RoseaError::NoReplayData { offset: 0 });
+        return Err(RoseaError::NoReplayData { offset });
     }
     let text = text.strip_suffix(',').unwrap_or(text);
     let mut records = Vec::new();
@@ -78,7 +78,7 @@ fn read_records(bytes: &[u8]) -> Result<ReplayInput, RoseaError> {
         }
     }
     if records.is_empty() {
-        return Err(RoseaError::NoReplayData { offset: 0 });
+        return Err(RoseaError::NoReplayData { offset });
     }
     Ok(ReplayInput { records, seed })
 }
@@ -87,7 +87,7 @@ pub fn osr(bytes: &[u8]) -> Result<Parsed<ParsedReplay>, RoseaError> {
     let header = read_header(bytes)?;
     let offset = bytes.len() - header.trailer.len() - header.compressed_data.len();
     let data = decompress_replay(header.compressed_data, offset)?;
-    let input = read_records(&data)?;
+    let input = read_records(&data, offset)?;
     let expected = ExpectedStats {
         score: header.score,
         max_combo: header.max_combo,
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn reads_replay_records_and_seed() {
-        let input = read_records(b"10|256|192|5,5|257|192|0,-12345|0|0|-42,").unwrap();
+        let input = read_records(b"10|256|192|5,5|257|192|0,-12345|0|0|-42,", 50).unwrap();
         assert_eq!(input.seed, Some(-42));
         assert_eq!(
             input.records,
@@ -391,7 +391,7 @@ mod tests {
                 },
             ]
         );
-        let input = read_records(b"-10|-5|500|4294967295").unwrap();
+        let input = read_records(b"-10|-5|500|4294967295", 50).unwrap();
         assert_eq!(input.records[0].delta_ms, -10);
         assert_eq!(input.records[0].cursor, Point { x: -5.0, y: 500.0 });
         assert_eq!(input.seed, None);
@@ -412,27 +412,27 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    read_records(text.as_bytes()),
+                    read_records(text.as_bytes(), 50),
                     Err(RoseaError::InvalidReplayRecord { .. })
                 ),
                 "{text}"
             );
         }
         assert_eq!(
-            read_records(b"1.5|0|0|0"),
+            read_records(b"1.5|0|0|0", 50),
             Err(RoseaError::UnsupportedReplayFeature { index: 0 })
         );
         assert_eq!(
-            read_records(b"1|0|0|0,\xff"),
+            read_records(b"1|0|0|0,\xff", 50),
             Err(RoseaError::InvalidReplayRecord { index: 1 })
         );
         assert!(matches!(
-            read_records(b""),
-            Err(RoseaError::NoReplayData { .. })
+            read_records(b"", 50),
+            Err(RoseaError::NoReplayData { offset: 50 })
         ));
         assert!(matches!(
-            read_records(b"-12345|0|0|1"),
-            Err(RoseaError::NoReplayData { .. })
+            read_records(b"-12345|0|0|1", 50),
+            Err(RoseaError::NoReplayData { offset: 50 })
         ));
     }
 
@@ -440,12 +440,12 @@ mod tests {
     fn enforces_record_count_limit() {
         let mut data = "0|0|0|0,".repeat(1_000_000);
         assert_eq!(
-            read_records(data.as_bytes()).unwrap().records.len(),
+            read_records(data.as_bytes(), 50).unwrap().records.len(),
             1_000_000
         );
         data.push_str("0|0|0|0");
         assert!(matches!(
-            read_records(data.as_bytes()),
+            read_records(data.as_bytes(), 50),
             Err(RoseaError::ResourceLimit {
                 resource: "replay records",
                 observed: 1_000_001,
