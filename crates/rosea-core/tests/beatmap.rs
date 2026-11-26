@@ -183,3 +183,59 @@ fn enforces_original_coordinate_bounds_in_the_public_parser() {
         );
     }
 }
+
+#[test]
+fn checks_line_bytes_before_parsing_fields() {
+    let mode = format!("Mode:0{}", " ".repeat(1_048_576 - "Mode:0".len()));
+    let suffix = "[Difficulty]\r\nCircleSize:4\r\nOverallDifficulty:5\r\nHPDrainRate:5\r\n[HitObjects]\r\n0,0,0,1,0";
+    let map = format!("osu file format v14\r\n[General]\r\n{mode}\r\n{suffix}");
+    assert_eq!(osu(map.as_bytes()).unwrap().value.object_count(), 1);
+
+    let map = format!("osu file format v14\r\n[General]\r\n{mode}x\r\n{suffix}");
+    assert_eq!(
+        osu(map.as_bytes()).unwrap_err(),
+        RoseaError::MapResourceLimit {
+            resource: "osu_line_bytes",
+            limit: 1_048_576,
+            observed: 1_048_577_u64.into(),
+            line: 3,
+            object_id: None,
+        }
+    );
+}
+
+#[test]
+fn enforces_object_and_control_point_counts_in_the_public_parser() {
+    let prefix = "osu file format v14\n[Difficulty]\nCircleSize:4\nOverallDifficulty:5\nHPDrainRate:5\nSliderMultiplier:1\nSliderTickRate:1\n[HitObjects]\n";
+    let mut map = format!(
+        "{prefix}{}",
+        "0,0,0,1,0\n0,0,0,2,0,L|1:1,1,1\n".repeat(50_000)
+    );
+    assert_eq!(osu(map.as_bytes()).unwrap().value.object_count(), 100_000);
+    map.push_str("0,0,0,1,0");
+    assert_eq!(
+        osu(map.as_bytes()).unwrap_err(),
+        RoseaError::MapResourceLimit {
+            resource: "hit_objects",
+            limit: 100_000,
+            observed: 100_001_u64.into(),
+            line: 100_009,
+            object_id: Some(ObjectId(100_000)),
+        }
+    );
+
+    let controls = "|1:1".repeat(4095);
+    let map = format!("{prefix}0,0,0,2,0,L{controls},1,1");
+    assert_eq!(osu(map.as_bytes()).unwrap().value.object_count(), 1);
+    let map = format!("{prefix}0,0,0,2,0,L{controls}|1:1,1,1");
+    assert_eq!(
+        osu(map.as_bytes()).unwrap_err(),
+        RoseaError::MapResourceLimit {
+            resource: "slider_control_points",
+            limit: 4096,
+            observed: 4097_u64.into(),
+            line: 9,
+            object_id: Some(ObjectId(0)),
+        }
+    );
+}

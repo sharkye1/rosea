@@ -3,7 +3,13 @@
 use crate::error::RoseaError;
 use crate::model::{Beatmap, ObjectId, Parsed, Warning};
 
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+
 pub fn osu(bytes: &[u8]) -> Result<Parsed<Beatmap>, RoseaError> {
+    let text = osu_text(bytes)?;
+    for (index, line) in text.lines().enumerate() {
+        check_line_length(line, index + 1)?;
+    }
     super::osu_mode(bytes)?;
     let value = Beatmap {
         difficulty: osu_difficulty(bytes)?,
@@ -14,7 +20,6 @@ pub fn osu(bytes: &[u8]) -> Result<Parsed<Beatmap>, RoseaError> {
         metadata: super::osu_metadata(bytes)?,
         colours: super::osu_colours(bytes)?,
     };
-    let text = osu_text(bytes)?;
     let mut section = "";
     let mut count = 0_u32;
     for raw in text.lines() {
@@ -99,6 +104,19 @@ pub struct Difficulty {
     // Без слайдеров отсутствие этих полей допустимо, поэтому сохраняем Option.
     pub slider_multiplier: Option<f64>,
     pub slider_tick_rate: Option<f64>,
+}
+
+fn check_line_length(line: &str, line_number: usize) -> Result<(), RoseaError> {
+    if line.len() > MAX_LINE_BYTES {
+        return Err(RoseaError::MapResourceLimit {
+            resource: "osu_line_bytes",
+            limit: MAX_LINE_BYTES as u64,
+            observed: (line.len() as u64).into(),
+            line: line_number,
+            object_id: None,
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn osu_text(bytes: &[u8]) -> Result<&str, RoseaError> {
@@ -194,23 +212,13 @@ pub fn osu_mode(bytes: &[u8]) -> Result<u32, RoseaError> {
 
 /// Читает StackLeniency из General; без поля или секции возвращает 0.7.
 pub fn osu_stack_leniency(bytes: &[u8]) -> Result<f32, RoseaError> {
-    const MAX_LINE_BYTES: usize = 1024 * 1024;
-
     osu_mode(bytes)?;
     let text = osu_text(bytes)?;
     let mut in_general = false;
     let mut leniency = None;
 
     for (index, raw_line) in text.lines().enumerate() {
-        if raw_line.len() > MAX_LINE_BYTES {
-            return Err(RoseaError::MapResourceLimit {
-                resource: "osu_line_bytes",
-                limit: MAX_LINE_BYTES as u64,
-                observed: (raw_line.len() as u64).into(),
-                line: index + 1,
-                object_id: None,
-            });
-        }
+        check_line_length(raw_line, index + 1)?;
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with("//") {
             continue;
