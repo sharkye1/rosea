@@ -352,6 +352,10 @@ fn mixed_map_finishes_each_object_once_after_early_eof() {
         }
     );
     let stats = sim.finish_with(&mut |event| journal.push(*event)).unwrap();
+    assert_eq!(
+        Simulator::new(&map, &input).unwrap().finish().unwrap(),
+        stats
+    );
 
     use EventKind::{Circle, SliderResult, SliderTick, SpinnerResult};
     use Judgement::{Great, Meh, Miss, Ok};
@@ -400,6 +404,31 @@ fn mixed_map_finishes_each_object_once_after_early_eof() {
         counts.count_300 + counts.count_100 + counts.count_50 + counts.count_miss,
         parsed.object_count()
     );
+}
+
+#[test]
+fn mixed_map_end_time_includes_late_eof() {
+    let map = prepare_map(&mixed_beatmap()).unwrap();
+    let bytes = replay_from_records(b"900|50|200|1,10|50|200|0,2090|300|0|0,0|301|0|0,");
+    let input = normalize(osr(&bytes).unwrap().value.input).unwrap().value;
+    let mut sim = Simulator::new(&map, &input).unwrap();
+    assert_eq!(sim.end_time().get(), 3000.0);
+
+    let stats = Simulator::new(&map, &input).unwrap().finish().unwrap();
+    let mut journal = Vec::new();
+    let with_journal = Simulator::new(&map, &input)
+        .unwrap()
+        .finish_with(&mut |event| journal.push(*event))
+        .unwrap();
+    assert_eq!(with_journal, stats);
+    assert_eq!(journal.last().unwrap().time.get(), 2800.25);
+
+    let mut after_advance = Vec::new();
+    let mut emit = |event: &SimEvent| after_advance.push(*event);
+    sim.advance_with(TimeMs::new(3100.0).unwrap(), &mut emit)
+        .unwrap();
+    assert_eq!(sim.finish_with(&mut emit).unwrap(), stats);
+    assert_eq!(after_advance, journal);
 }
 
 #[test]
