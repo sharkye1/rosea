@@ -3,8 +3,6 @@
 #![forbid(unsafe_code)]
 
 mod cli;
-mod hash;
-mod load;
 
 use std::{
     env,
@@ -13,17 +11,17 @@ use std::{
     process::ExitCode,
 };
 
+use rosea_app::{LoadedPair, load_pair};
 use rosea_core::model::Warning;
 
 fn main() -> ExitCode {
     match cli::parse(env::args_os().skip(1)) {
         Ok(cli::Command::Help) => write_stdout(|out| out.write_all(cli::HELP.as_bytes())),
         Ok(cli::Command::Inspect { map, replay }) => {
-            let pair = match load::load_pair(&map, &replay) {
+            let pair = match load_pair(&map, &replay) {
                 Ok(pair) => pair,
                 Err(error) => return fail(error),
             };
-            let _expected = pair.expected;
             write_stdout(|out| write_inspection(out, &pair))
         }
         Ok(cli::Command::Play) if !cfg!(feature = "window") => {
@@ -36,7 +34,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn write_inspection(out: &mut impl Write, pair: &load::LoadedPair) -> io::Result<()> {
+fn write_inspection(out: &mut impl Write, pair: &LoadedPair) -> io::Result<()> {
     let counts = pair.map.object_counts();
     writeln!(
         out,

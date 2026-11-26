@@ -259,9 +259,6 @@ fn inspect_counts_each_object_kind_without_preparing_geometry_or_loading_resourc
     fs::write(&map.0, map_bytes).unwrap();
     fs::write(&replay.0, replay_for(map_bytes)).unwrap();
 
-    // Без красной timing point слайдеры можно разобрать, но нельзя подготовить.
-    let beatmap = rosea_core::parse::osu(map_bytes).unwrap().value;
-    assert!(rosea_core::prepare::prepare_map(&beatmap).is_err());
     let out = inspect(&map.0, &replay.0);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert!(out.stderr.is_empty());
@@ -270,6 +267,59 @@ fn inspect_counts_each_object_kind_without_preparing_geometry_or_loading_resourc
     assert!(
         summary.contains("Круги: 1, слайдеры L: 1, B: 1, P: 1, спиннеры: 1"),
         "{summary}"
+    );
+
+    // Для подготовки той же карты нужна красная timing point.
+    let error = rosea_app::run_headless(&map.0, &replay.0).unwrap_err();
+    assert!(matches!(error, rosea_app::AppError::Prepare { .. }));
+    let message = error.to_string();
+    assert!(
+        message.starts_with("PreprocessError [prepare]"),
+        "{message}"
+    );
+    assert!(message.contains("карта с ресурсами.osu"), "{message}");
+    assert!(message.contains("line=15 object_id=1"), "{message}");
+}
+
+#[test]
+fn headless_finishes_after_replay_eof_and_ignores_expected_stats() {
+    let map_bytes = [MAP_BYTES, b"0,0,1000,1,0\r\n256,192,2000,8,0,4000\r\n"].concat();
+    let map = TempFile::sized("карта для прогона.osu", 0);
+    let replay = TempFile::sized("ввод для прогона.osr", 0);
+    let mut replay_bytes = replay_for(&map_bytes);
+    fs::write(&map.0, &map_bytes).unwrap();
+    fs::write(&replay.0, &replay_bytes).unwrap();
+
+    // Последняя запись ввода на 10 мс, после неё истекает окно круга и завершается спиннер.
+    let first = rosea_app::run_headless(&map.0, &replay.0).unwrap();
+    assert_eq!(first.actual.score, 300);
+    assert_eq!(first.actual.max_combo, 1);
+    assert_eq!(first.actual.current_combo, 0);
+    assert_eq!(first.actual.counts.count_300, 1);
+    assert_eq!(first.actual.counts.count_100, 0);
+    assert_eq!(first.actual.counts.count_50, 0);
+    assert_eq!(first.actual.counts.count_miss, 2);
+    assert_eq!(first.meta.game_version(), 20200427);
+    assert_eq!(first.warnings.len(), 3);
+
+    // Меняем только шесть полей ожиданий в заголовке .osr.
+    for offset in [41, 43, 45, 51, 53, 57] {
+        replay_bytes[offset] = 7;
+    }
+    fs::write(&replay.0, &replay_bytes).unwrap();
+    let second = rosea_app::run_headless(&map.0, &replay.0).unwrap();
+    assert_eq!(second.actual, first.actual);
+    assert_eq!(second.warnings, first.warnings);
+    assert_eq!(
+        second.expected,
+        rosea_core::model::ExpectedStats {
+            score: 7,
+            max_combo: 7,
+            count_300: 7,
+            count_100: 7,
+            count_50: 7,
+            count_miss: 7,
+        }
     );
 }
 

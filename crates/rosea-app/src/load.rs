@@ -15,18 +15,20 @@ use std::{
 
 use crate::hash;
 
-pub(crate) const MAP_LIMIT: u64 = 16 * 1024 * 1024;
-pub(crate) const REPLAY_LIMIT: u64 = 64 * 1024 * 1024;
+const MAP_LIMIT: u64 = 16 * 1024 * 1024;
+const REPLAY_LIMIT: u64 = 64 * 1024 * 1024;
 
-pub(crate) struct LoadedPair {
-    pub(crate) map: Beatmap,
-    pub(crate) input: ReplayTimeline,
-    pub(crate) meta: ReplayMeta,
-    pub(crate) expected: ExpectedStats,
-    pub(crate) warnings: Vec<Warning>,
+/// Проверенная пара с нормализованным вводом.
+pub struct LoadedPair {
+    pub map: Beatmap,
+    pub input: ReplayTimeline,
+    pub meta: ReplayMeta,
+    pub expected: ExpectedStats,
+    pub warnings: Vec<Warning>,
 }
 
-pub(crate) enum LoadError<'a> {
+#[derive(Debug)]
+pub enum AppError<'a> {
     Read(ReadError<'a>),
     Parse {
         path: &'a Path,
@@ -40,9 +42,17 @@ pub(crate) enum LoadError<'a> {
         path: &'a Path,
         source: ErrorWithLocation,
     },
+    Prepare {
+        path: &'a Path,
+        source: ErrorWithLocation,
+    },
+    Simulate {
+        path: &'a Path,
+        source: ErrorWithLocation,
+    },
 }
 
-impl fmt::Display for LoadError<'_> {
+impl fmt::Display for AppError<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Read(error) => error.fmt(f),
@@ -64,6 +74,21 @@ impl fmt::Display for LoadError<'_> {
                 ErrorCode::NoReplayData,
             ),
             Self::Normalize { path, source } => fmt_core_error(f, "normalize", path, source),
+            Self::Prepare { path, source } => fmt_core_error(f, "prepare", path, source),
+            Self::Simulate { path, source } => fmt_core_error(f, "simulate", path, source),
+        }
+    }
+}
+
+impl std::error::Error for AppError<'_> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) => error.source(),
+            Self::Parse { source, .. }
+            | Self::Normalize { source, .. }
+            | Self::Prepare { source, .. }
+            | Self::Simulate { source, .. } => Some(source),
+            Self::HashMismatch { .. } => None,
         }
     }
 }
@@ -115,22 +140,23 @@ fn fmt_limit(
     )
 }
 
-pub(crate) fn load_pair<'a>(map: &'a Path, replay: &'a Path) -> Result<LoadedPair, LoadError<'a>> {
-    let map_bytes = read_limited(map, MAP_LIMIT).map_err(LoadError::Read)?;
-    let replay_bytes = read_limited(replay, REPLAY_LIMIT).map_err(LoadError::Read)?;
+/// Читает, проверяет и нормализует пару по явно заданным путям.
+pub fn load_pair<'a>(map: &'a Path, replay: &'a Path) -> Result<LoadedPair, AppError<'a>> {
+    let map_bytes = read_limited(map, MAP_LIMIT).map_err(AppError::Read)?;
+    let replay_bytes = read_limited(replay, REPLAY_LIMIT).map_err(AppError::Read)?;
     let digest = beatmap_md5(&map_bytes);
-    let map_result = osu(&map_bytes).map_err(|source| LoadError::Parse {
+    let map_result = osu(&map_bytes).map_err(|source| AppError::Parse {
         path: map,
         source: source.into(),
     })?;
-    let replay_result = osr_with_location(&replay_bytes).map_err(|source| LoadError::Parse {
+    let replay_result = osr_with_location(&replay_bytes).map_err(|source| AppError::Parse {
         path: replay,
         source,
     })?;
     hash::check_hash(digest, &replay_result.value.meta)
-        .map_err(|_| LoadError::HashMismatch { map, replay })?;
+        .map_err(|_| AppError::HashMismatch { map, replay })?;
     let normalized = normalize_with_location(replay_result.value.input).map_err(|source| {
-        LoadError::Normalize {
+        AppError::Normalize {
             path: replay,
             source,
         }
@@ -147,7 +173,8 @@ pub(crate) fn load_pair<'a>(map: &'a Path, replay: &'a Path) -> Result<LoadedPai
     })
 }
 
-pub(crate) enum ReadError<'a> {
+#[derive(Debug)]
+pub enum ReadError<'a> {
     Io {
         path: &'a Path,
         source: io::Error,
@@ -175,7 +202,16 @@ impl fmt::Display for ReadError<'_> {
     }
 }
 
-pub(crate) fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, ReadError<'_>> {
+impl std::error::Error for ReadError<'_> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Limit { .. } => None,
+        }
+    }
+}
+
+fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>, ReadError<'_>> {
     let io_error = |source| ReadError::Io { path, source };
     let file = File::open(path).map_err(io_error)?;
     let mut bytes = Vec::new();
