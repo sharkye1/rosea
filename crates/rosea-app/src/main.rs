@@ -28,9 +28,9 @@ fn main() -> ExitCode {
             fail("WindowUnavailable: пересоберите rosea-app с feature window для оконного режима")
         }
         Ok(cli::Command::Play) => fail("PlayUnavailable: оконный режим пока недоступен"),
-        Err(cli::UsageError(message)) => {
-            fail(format_args!("UsageError: {message}. Справка: rosea --help"))
-        }
+        Ok(cli::Command::Frame) => fail("FrameUnavailable: вывод кадра пока недоступен"),
+        Ok(cli::Command::Export) => fail("ExportUnavailable: вывод видео пока недоступен"),
+        Err(error) => fail(error),
     }
 }
 

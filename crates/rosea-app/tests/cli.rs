@@ -122,6 +122,236 @@ fn rejects_invalid_play_dimensions_as_usage_errors() {
     }
 }
 
+fn run_image(command: &str, options: &[&str]) -> Output {
+    let mut args = vec![
+        command,
+        "--map",
+        "нет карты.osu",
+        "--replay",
+        "нет реплея.osr",
+    ];
+    args.extend_from_slice(options);
+    run(&args)
+}
+
+#[test]
+fn image_commands_accept_defaults_and_inclusive_limits() {
+    for (command, options, unavailable) in [
+        (
+            "frame",
+            &["--at-ms", "-0.25", "--out", "кадр с пробелом.ppm"][..],
+            "FrameUnavailable:",
+        ),
+        (
+            "frame",
+            &[
+                "--at-ms",
+                "-86400000",
+                "--out",
+                "-",
+                "--width",
+                "4096",
+                "--height",
+                "2048",
+            ],
+            "FrameUnavailable:",
+        ),
+        (
+            "export",
+            &["--from-ms", "-2.5", "--to-ms", "-1", "--out", "видео.y4m"],
+            "ExportUnavailable:",
+        ),
+        (
+            "export",
+            &[
+                "--from-ms",
+                "-86400000",
+                "--to-ms",
+                "86400000",
+                "--out",
+                "-",
+                "--fps",
+                "1",
+            ],
+            "ExportUnavailable:",
+        ),
+        (
+            "export",
+            &[
+                "--width",
+                "64",
+                "--height",
+                "64",
+                "--fps",
+                "240",
+                "--from-ms",
+                "0",
+                "--to-ms",
+                "0.5",
+                "--out",
+                "-",
+            ],
+            "ExportUnavailable:",
+        ),
+    ] {
+        let out = run_image(command, options);
+        assert_eq!(out.status.code(), Some(2), "{options:?}");
+        assert!(out.stdout.is_empty(), "{options:?}");
+        let error = String::from_utf8(out.stderr).unwrap();
+        assert!(error.starts_with(unavailable), "{options:?}: {error}");
+    }
+}
+
+#[test]
+fn image_commands_reject_invalid_times_fps_and_flag_combinations() {
+    for (command, options) in [
+        ("frame", &["--out", "-"][..]),
+        ("frame", &["--at-ms", "0"]),
+        ("frame", &["--at-ms", "0", "--at-ms", "1", "--out", "-"]),
+        (
+            "frame",
+            &["--at-ms", "0", "--out", "-", "--out", "другой.ppm"],
+        ),
+        (
+            "frame",
+            &[
+                "--at-ms", "0", "--out", "-", "--width", "64", "--width", "65",
+            ],
+        ),
+        ("frame", &["--at-ms", "0", "--out", "-", "--height", "63"]),
+        ("frame", &["--at-ms", "0", "--out", "-", "--fps", "60"]),
+        ("frame", &["--at-ms", "−1", "--out", "-"]),
+        ("frame", &["--at-ms", "NaN", "--out", "-"]),
+        ("frame", &["--at-ms", "-inf", "--out", "-"]),
+        ("frame", &["--at-ms", "1e999", "--out", "-"]),
+        ("export", &["--from-ms", "1", "--out", "-"]),
+        ("export", &["--to-ms", "1", "--out", "-"]),
+        ("export", &["--from-ms", "-0", "--to-ms", "0", "--out", "-"]),
+        (
+            "export",
+            &["--from-ms", "-1", "--to-ms", "-2", "--out", "-"],
+        ),
+        (
+            "export",
+            &[
+                "--from-ms",
+                "0",
+                "--to-ms",
+                "1",
+                "--to-ms",
+                "2",
+                "--out",
+                "-",
+            ],
+        ),
+        (
+            "export",
+            &["--from-ms", "0", "--to-ms", "1", "--out", "-", "--fps", "0"],
+        ),
+        (
+            "export",
+            &[
+                "--from-ms",
+                "0",
+                "--to-ms",
+                "1",
+                "--out",
+                "-",
+                "--fps",
+                "60.0",
+            ],
+        ),
+        (
+            "export",
+            &[
+                "--from-ms",
+                "0",
+                "--to-ms",
+                "1",
+                "--out",
+                "-",
+                "--fps",
+                "６０",
+            ],
+        ),
+        (
+            "export",
+            &[
+                "--from-ms",
+                "0",
+                "--to-ms",
+                "1",
+                "--out",
+                "-",
+                "--fps",
+                "1",
+                "--fps",
+                "2",
+            ],
+        ),
+    ] {
+        let out = run_image(command, options);
+        assert_eq!(out.status.code(), Some(2), "{options:?}");
+        assert!(out.stdout.is_empty(), "{options:?}");
+        let error = String::from_utf8(out.stderr).unwrap();
+        assert!(error.starts_with("UsageError:"), "{options:?}: {error}");
+    }
+}
+
+#[test]
+fn image_commands_report_exceeded_limits() {
+    for (command, options, limit) in [
+        (
+            "frame",
+            &["--at-ms", "0", "--out", "-", "--width", "4097"][..],
+            "image_width, limit=4096, observed=4097",
+        ),
+        (
+            "frame",
+            &["--at-ms", "0", "--out", "-", "--height", "4097"],
+            "image_height, limit=4096, observed=4097",
+        ),
+        (
+            "frame",
+            &[
+                "--at-ms", "0", "--out", "-", "--width", "4096", "--height", "2049",
+            ],
+            "image_pixels, limit=8388608, observed=8392704",
+        ),
+        (
+            "frame",
+            &["--at-ms", "-86400000.5", "--out", "-"],
+            "absolute_time_ms, limit=86400000, observed=86400000.5",
+        ),
+        (
+            "export",
+            &["--from-ms", "0", "--to-ms", "86400001", "--out", "-"],
+            "absolute_time_ms, limit=86400000, observed=86400001",
+        ),
+        (
+            "export",
+            &[
+                "--from-ms",
+                "0",
+                "--to-ms",
+                "1",
+                "--out",
+                "-",
+                "--fps",
+                "241",
+            ],
+            "export_fps, limit=240, observed=241",
+        ),
+    ] {
+        let out = run_image(command, options);
+        assert_eq!(out.status.code(), Some(2), "{options:?}");
+        assert!(out.stdout.is_empty(), "{options:?}");
+        let error = String::from_utf8(out.stderr).unwrap();
+        assert!(error.starts_with("ResourceLimit [parse]: "), "{error}");
+        assert!(error.contains(limit), "{error}");
+    }
+}
+
 #[test]
 fn inspection_reads_a_map_at_the_limit_and_preserves_paths() {
     let map = TempFile::sized("моя карта.osu", 16 * 1024 * 1024);
