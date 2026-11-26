@@ -50,7 +50,7 @@ pub struct Simulator<'a> {
     active_spinners: Vec<ObjectId>,
     next_slider_index: usize,
     stats: Stats,
-    failed: bool,
+    failure: Option<RoseaError>,
     end_time: TimeMs,
     current_time: Option<TimeMs>,
 }
@@ -105,7 +105,7 @@ impl<'a> Simulator<'a> {
             active_spinners: Vec::new(),
             next_slider_index: 0,
             stats: Stats::default(),
-            failed: false,
+            failure: None,
             end_time,
             current_time: None,
         })
@@ -115,6 +115,7 @@ impl<'a> Simulator<'a> {
         self.end_time
     }
 
+    /// Промежуточная статистика. Полноту прогона подтверждают `finish` и `finish_with`.
     pub fn stats(&self) -> Stats {
         self.stats
     }
@@ -123,13 +124,14 @@ impl<'a> Simulator<'a> {
         self.advance_with(time, &mut |_| {})
     }
 
+    /// Ошибка игровой операции завершает прогон. Следующие запросы возвращают ту же ошибку.
     pub fn advance_with(
         &mut self,
         time: TimeMs,
         emit: &mut dyn FnMut(&SimEvent),
     ) -> Result<(), RoseaError> {
-        if self.failed {
-            return Err(RoseaError::ScoreOverflow);
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
         }
         let map = self.map;
         let timeline = &mut self.timeline;
@@ -168,7 +170,7 @@ impl<'a> Simulator<'a> {
             .err();
         })?;
         if let Some(error) = failure {
-            self.failed = true;
+            self.failure = Some(error.clone());
             return Err(error);
         }
         self.current_time = Some(time);
@@ -1045,23 +1047,59 @@ mod tests {
     }
 
     #[test]
-    fn failed_score_does_not_emit_result() {
-        let map = b"osu file format v14\n[Difficulty]\nCircleSize:5\nOverallDifficulty:8\nHPDrainRate:5\n[HitObjects]\n0,0,1000,1,0";
-        let map = prepare_map(&osu(map).unwrap().value).unwrap();
-        let replay = replay(&[(1000, 0.0, 1)]);
+    fn score_overflow_keeps_only_events_before_failure() {
+        let map = slider_map("0,0,1000,1,0\n100,0,1010,1,0\n200,0,1200,1,0");
+        let replay = replay(&[
+            (1000, 0.0, 1),
+            (10, 100.0, 3),
+            (190, 200.0, 0),
+            (0, 200.0, 1),
+        ]);
         let mut sim = Simulator::new(&map, &replay).unwrap();
-        sim.stats.score = u64::MAX;
+        sim.stats.score = u64::MAX - 300;
         let mut events = Vec::new();
+        let mut emit = |event: &SimEvent| events.push(*event);
         assert_eq!(
-            sim.advance_with(TimeMs::new(1000.0).unwrap(), &mut |event| events
-                .push(*event)),
+            sim.advance_with(TimeMs::new(1200.0).unwrap(), &mut emit),
             Err(RoseaError::ScoreOverflow)
         );
-        assert!(events.is_empty());
+        assert_eq!(sim.stats().score, u64::MAX);
+        assert_eq!(sim.stats().counts.count_300, 1);
         assert_eq!(
-            sim.advance_to(TimeMs::new(1001.0).unwrap()),
+            sim.advance_to(TimeMs::new(1201.0).unwrap()),
             Err(RoseaError::ScoreOverflow)
         );
+        assert_eq!(sim.finish_with(&mut emit), Err(RoseaError::ScoreOverflow));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].object_id, ObjectId(0));
+    }
+
+    #[test]
+    fn numerical_failure_retains_source_until_finish() {
+        let map = slider_map("0,0,900,1,0\n256,192,1000,8,0,1200\n100,0,1300,1,0");
+        // Подставляем нечисловую координату напрямую: парсер .osr её отклоняет.
+        let replay = replay(&[
+            (900, 0.0, 1),
+            (10, 0.0, 0),
+            (90, 356.0, 1),
+            (50, f32::NAN, 1),
+            (10, 100.0, 0),
+            (240, 100.0, 1),
+        ]);
+        let mut sim = Simulator::new(&map, &replay).unwrap();
+        let mut events = Vec::new();
+        let mut emit = |event: &SimEvent| events.push(*event);
+        let failure = || RoseaError::NumericalError {
+            line: 12,
+            object_id: ObjectId(1),
+        };
+        let end = sim.end_time();
+        assert_eq!(sim.advance_with(end, &mut emit), Err(failure()));
+        assert_eq!(sim.advance_to(end), Err(failure()));
+        assert_eq!(sim.finish_with(&mut emit), Err(failure()));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].object_id, ObjectId(0));
+        assert_eq!(events[0].judgement, Some(Judgement::Great));
     }
 
     #[test]

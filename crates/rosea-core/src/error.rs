@@ -5,7 +5,7 @@ use std::fmt;
 use crate::model::ObjectId;
 
 // Вызывающий код может различать причины через match, без разбора сообщений Display.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoseaError {
     UnexpectedEof {
         offset: usize,
