@@ -84,9 +84,16 @@ fn read_records(bytes: &[u8], offset: usize) -> Result<ReplayInput, RoseaError> 
 }
 
 pub fn osr(bytes: &[u8]) -> Result<Parsed<ParsedReplay>, RoseaError> {
+    parse_with_output_limit(bytes, REPLAY_OUTPUT_LIMIT)
+}
+
+fn parse_with_output_limit(
+    bytes: &[u8],
+    output_limit: usize,
+) -> Result<Parsed<ParsedReplay>, RoseaError> {
     let header = read_header(bytes)?;
     let offset = bytes.len() - header.trailer.len() - header.compressed_data.len();
-    let data = decompress_replay(header.compressed_data, offset)?;
+    let data = decompress_replay(header.compressed_data, offset, output_limit)?;
     let input = read_records(&data, offset)?;
     let expected = ExpectedStats {
         score: header.score,
@@ -147,7 +154,11 @@ impl Write for LimitedOutput {
     }
 }
 
-fn decompress_replay(data: &[u8], offset: usize) -> Result<Vec<u8>, RoseaError> {
+fn decompress_replay(
+    data: &[u8],
+    offset: usize,
+    output_limit: usize,
+) -> Result<Vec<u8>, RoseaError> {
     let header = data.get(..13).ok_or(RoseaError::InvalidLzma { offset })?;
     let dictionary = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as u64;
     if dictionary > LZMA_DICTIONARY_LIMIT as u64 {
@@ -160,16 +171,16 @@ fn decompress_replay(data: &[u8], offset: usize) -> Result<Vec<u8>, RoseaError> 
     let size = u64::from_le_bytes([
         header[5], header[6], header[7], header[8], header[9], header[10], header[11], header[12],
     ]);
-    if size != u64::MAX && size > REPLAY_OUTPUT_LIMIT as u64 {
+    if size != u64::MAX && size > output_limit as u64 {
         return Err(RoseaError::ResourceLimit {
             resource: "decompressed replay",
-            limit: REPLAY_OUTPUT_LIMIT as u64,
+            limit: output_limit as u64,
             observed: size,
         });
     }
     let mut output = LimitedOutput {
         bytes: Vec::new(),
-        limit: REPLAY_OUTPUT_LIMIT,
+        limit: output_limit,
         exceeded: None,
     };
     let options = lzma_rs::decompress::Options {
@@ -181,7 +192,7 @@ fn decompress_replay(data: &[u8], offset: usize) -> Result<Vec<u8>, RoseaError> 
     if let Some(observed) = output.exceeded {
         return Err(RoseaError::ResourceLimit {
             resource: "decompressed replay",
-            limit: REPLAY_OUTPUT_LIMIT as u64,
+            limit: output_limit as u64,
             observed,
         });
     }
@@ -437,35 +448,12 @@ mod tests {
     }
 
     #[test]
-    fn enforces_record_count_limit() {
-        let mut data = "0|0|0|0,".repeat(1_000_000);
-        assert_eq!(
-            read_records(data.as_bytes(), 50).unwrap().records.len(),
-            1_000_000
-        );
-        data.push_str("0|0|0|0");
-        assert!(matches!(
-            read_records(data.as_bytes(), 50),
-            Err(RoseaError::ResourceLimit {
-                resource: "replay records",
-                observed: 1_000_001,
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn decompresses_and_checks_lzma_limits() {
         let data = [
             93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 12, 3, 65, 4,
             153, 91, 83, 160, 122, 219, 176, 37, 27, 45, 1, 127, 255, 225, 190, 128, 0,
         ];
-        assert_eq!(decompress_replay(&data, 50).unwrap(), b"10|256|192|5,");
-        let mut replay = example_replay();
-        let length_offset = replay.len() - 7;
-        replay.truncate(length_offset);
-        replay.extend_from_slice(&(data.len() as i32).to_le_bytes());
-        replay.extend_from_slice(&data);
+        let mut replay = example_replay_with_payload(&data);
         replay.extend_from_slice(&[7, 8]);
         let parsed = osr(&replay).unwrap();
         assert_eq!(parsed.value.meta.trailer, &[7, 8]);
@@ -477,17 +465,17 @@ mod tests {
         );
         assert_eq!(parsed.value.input.records[0].keys, 5);
         assert_eq!(
-            decompress_replay(&data[..12], 50),
+            decompress_replay(&data[..12], 50, REPLAY_OUTPUT_LIMIT),
             Err(RoseaError::InvalidLzma { offset: 50 })
         );
         assert_eq!(
-            decompress_replay(&data[..16], 50),
+            decompress_replay(&data[..16], 50, REPLAY_OUTPUT_LIMIT),
             Err(RoseaError::InvalidLzma { offset: 50 })
         );
         let mut bad = data;
         bad[1..5].copy_from_slice(&(LZMA_DICTIONARY_LIMIT as u32 + 1).to_le_bytes());
         assert!(matches!(
-            decompress_replay(&bad, 50),
+            decompress_replay(&bad, 50, REPLAY_OUTPUT_LIMIT),
             Err(RoseaError::ResourceLimit {
                 resource: "LZMA dictionary",
                 ..
@@ -496,21 +484,35 @@ mod tests {
         let mut bad = data;
         bad[5..13].copy_from_slice(&(REPLAY_OUTPUT_LIMIT as u64 + 1).to_le_bytes());
         assert!(matches!(
-            decompress_replay(&bad, 50),
+            decompress_replay(&bad, 50, REPLAY_OUTPUT_LIMIT),
             Err(RoseaError::ResourceLimit {
                 resource: "decompressed replay",
                 ..
             })
         ));
-        let mut output = LimitedOutput {
-            bytes: Vec::new(),
-            limit: 2,
-            exceeded: None,
-        };
-        assert_eq!(output.write(b"ab").unwrap(), 2);
-        assert!(output.write(b"c").is_err());
-        assert_eq!(output.exceeded, Some(3));
-        assert_eq!(output.bytes, b"ab");
+    }
+
+    #[test]
+    fn stops_writing_when_unknown_lzma_output_exceeds_limit() {
+        // Размер LZMA не объявлен. Первый блок словаря помещается, второй превышает предел.
+        let data = include_bytes!("../../tests/fixtures/replay-records-at-limit.lzma");
+        let replay = example_replay_with_payload(data);
+        assert_eq!(
+            parse_with_output_limit(&replay, 8191).unwrap_err(),
+            RoseaError::ResourceLimit {
+                resource: "decompressed replay",
+                limit: 8191,
+                observed: 8192,
+            }
+        );
+    }
+
+    fn example_replay_with_payload(data: &[u8]) -> Vec<u8> {
+        let mut replay = example_replay();
+        replay.truncate(replay.len() - 7);
+        replay.extend_from_slice(&(data.len() as i32).to_le_bytes());
+        replay.extend_from_slice(data);
+        replay
     }
 
     fn example_replay() -> Vec<u8> {

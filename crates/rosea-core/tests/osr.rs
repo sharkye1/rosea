@@ -1,5 +1,5 @@
 use rosea_core::{
-    error::{ErrorCode, SourceLocation},
+    error::{ErrorCode, RoseaError, SourceLocation},
     model::Warning,
     parse::osr,
     replay::normalize,
@@ -84,6 +84,67 @@ fn locates_seed_only_stream_at_compressed_payload() {
 }
 
 #[test]
+fn distinguishes_truncated_payload_from_empty_decompressed_stream() {
+    let bytes = replay_bytes();
+    let truncated = &bytes[..bytes.len() - 3];
+    let error = osr(truncated).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::UnexpectedEof);
+    assert_eq!(
+        error.source_location(),
+        SourceLocation::ByteOffset(PAYLOAD_OFFSET as u64)
+    );
+
+    let empty = replay_bytes_with_payload(&[
+        93, 0, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 131, 255, 251, 255, 255, 192, 0,
+        0, 0,
+    ]);
+    let error = osr(&empty).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::NoReplayData);
+    assert_eq!(
+        error.source_location(),
+        SourceLocation::ByteOffset(PAYLOAD_OFFSET as u64)
+    );
+}
+
+#[test]
+fn rejects_second_trailing_empty_record() {
+    // LZMA-поток «10|0|0|0,,».
+    let bytes = replay_bytes_with_payload(&[
+        93, 0, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 24, 140, 12, 17, 157, 202, 137,
+        19, 109, 68, 255, 255, 214, 7, 0, 0,
+    ]);
+    let error = osr(&bytes).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::InvalidReplayRecord);
+    assert_eq!(error.source_location(), SourceLocation::ReplayRecord(1));
+}
+
+#[test]
+fn enforces_record_count_limit_through_public_api() {
+    // Потоки созданы Python lzma.compress с FORMAT_ALONE, LZMA1, preset=0 и dict_size=4096.
+    // Первый: b"0|0|0|0," * 1_000_000 + b"-12345|0|0|7,".
+    // Второй: b"0|0|0|0," * 1_000_001.
+    let at_limit =
+        replay_bytes_with_payload(include_bytes!("fixtures/replay-records-at-limit.lzma"));
+    let over_limit =
+        replay_bytes_with_payload(include_bytes!("fixtures/replay-records-over-limit.lzma"));
+
+    let parsed = osr(&at_limit).unwrap();
+    assert_eq!(parsed.value.input.records().len(), 1_000_000);
+    assert_eq!(parsed.value.input.seed(), Some(7));
+
+    let error = osr(&over_limit).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::ResourceLimit);
+    assert_eq!(
+        error,
+        RoseaError::ResourceLimit {
+            resource: "replay records",
+            limit: 1_000_000,
+            observed: 1_000_001,
+        }
+    );
+}
+
+#[test]
 fn parses_replay_through_public_api() {
     let bytes = replay_bytes();
     let parsed = osr(&bytes).unwrap();
@@ -92,6 +153,8 @@ fn parses_replay_through_public_api() {
     assert_eq!(parsed.value.expected.score, -42);
     assert_eq!(parsed.value.expected.count_miss, 6);
     assert_eq!(parsed.value.meta.count_geki, 4);
+    // После единственной записи в сжатом потоке ровно одна запятая.
+    assert_eq!(parsed.value.input.records().len(), 1);
     assert_eq!(parsed.value.input.records()[0].delta_ms, 10);
     assert_eq!(parsed.value.meta.trailer, [9, 10]);
     assert_eq!(parsed.warnings, vec![Warning::ReplayTrailerNotInterpreted]);
@@ -99,7 +162,6 @@ fn parses_replay_through_public_api() {
     assert_eq!(timeline.value.record_count(), 1);
     assert_eq!(timeline.value.records()[0].time_ms, 10);
     assert!(timeline.warnings.is_empty());
-    assert!(osr(&bytes[..bytes.len() - 3]).is_err());
 }
 
 #[test]
